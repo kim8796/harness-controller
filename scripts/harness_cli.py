@@ -947,6 +947,10 @@ def _load_controller_target(target_id: str) -> harness_controller.TargetRecord:
     return harness_controller.load_target(repo_root(), target_id)
 
 
+def _resolve_controller_target(selector: str) -> harness_controller.TargetRecord:
+    return harness_controller.resolve_target_selector(repo_root(), selector)
+
+
 def _render_target_verify_text(payload: Mapping[str, object]) -> None:
     blockers = payload.get("blockers") or []
     warnings = payload.get("warnings") or []
@@ -969,6 +973,7 @@ def command_target_add(args: argparse.Namespace) -> int:
             branch=args.branch,
             controller_version=_controller_version(),
             profile=args.profile,
+            display_name=args.display_name,
             force=args.force,
         )
         verification = harness_controller.verify_target(record)
@@ -989,6 +994,8 @@ def command_target_add(args: argparse.Namespace) -> int:
         else:
             print("external target 등록 완료")
             print(f"- target: `{record.target_id}`")
+            if record.display_name:
+                print(f"- 표시 이름: `{record.display_name}`")
             print(f"- product repo: `{record.repo.as_posix()}`")
             print(f"- state root: `{record.state_root.as_posix()}`")
             print(f"- dashboard: `{report.as_posix()}`")
@@ -1013,17 +1020,23 @@ def command_target_list(args: argparse.Namespace) -> int:
         return 0
     print("등록된 external targets")
     if not records:
-        print("- none")
+        print("- 대상 없음")
         print("다음 명령: `./harness target add <id> --repo /path/to/product-repo --branch main`")
         return 0
     for record in records:
-        print(f"- `{record.target_id}`: {record.repo.as_posix()} ({record.branch})")
+        default_marker = " 기본 대상" if record.is_default else ""
+        aliases = ", ".join("@" + alias for alias in record.aliases) if record.aliases else "별칭 없음"
+        display = f" / {record.display_name}" if record.display_name else ""
+        print(
+            f"- 대상 ID `{record.target_id}`{display}: {record.repo.as_posix()} "
+            f"({record.branch}; {aliases}{default_marker})"
+        )
     return 0
 
 
 def command_target_verify(args: argparse.Namespace) -> int:
     try:
-        record = _load_controller_target(args.target_id)
+        record = _resolve_controller_target(args.target)
         verification = harness_controller.verify_target(record)
         if args.json:
             print(json.dumps(verification, ensure_ascii=False, indent=2, sort_keys=True))
@@ -1037,7 +1050,7 @@ def command_target_verify(args: argparse.Namespace) -> int:
 
 def command_target_status(args: argparse.Namespace) -> int:
     try:
-        record = _load_controller_target(args.target_id)
+        record = _resolve_controller_target(args.target)
         verification = harness_controller.verify_target(record)
         payload = {
             "schema_version": 1,
@@ -1062,7 +1075,7 @@ def command_target_status(args: argparse.Namespace) -> int:
 
 def command_target_dashboard(args: argparse.Namespace) -> int:
     try:
-        record = _load_controller_target(args.target_id)
+        record = _resolve_controller_target(args.target)
         verification = harness_controller.verify_target(record)
         report = harness_controller.write_dashboard(
             controller_root=repo_root(),
@@ -1087,7 +1100,7 @@ def command_target_run(args: argparse.Namespace) -> int:
         return 2
     lock: harness_controller.TargetRunLock | None = None
     try:
-        record = _load_controller_target(args.target_id)
+        record = _resolve_controller_target(args.target)
         lock = harness_controller.acquire_target_run_lock(
             controller_root=repo_root(),
             record=record,
@@ -1131,7 +1144,8 @@ def command_target_run(args: argparse.Namespace) -> int:
         after_head = harness_controller.target_git_head(record.repo)
         status_changed = before_status != after_status
         head_changed = before_head != after_head
-        post_markers = harness_controller.verify_target(record).get("harness_markers", [])
+        post_verification = harness_controller.verify_target(record)
+        post_markers = post_verification.get("harness_markers", [])
         post_blockers: list[str] = []
         if status_changed:
             post_blockers.append("target-git-status-changed")
@@ -1139,10 +1153,13 @@ def command_target_run(args: argparse.Namespace) -> int:
             post_blockers.append("target-head-changed")
         if post_markers:
             post_blockers.append("target-harness-files-present")
+        for blocker in harness_controller.target_run_blockers(post_verification):
+            if blocker not in post_blockers:
+                post_blockers.append(blocker)
         smoke_report = harness_controller.write_target_run_smoke_report(
             controller_root=repo_root(),
             record=record,
-            verification=verification,
+            verification=post_verification if post_blockers else verification,
             result="blocked" if post_blockers else "passed",
             run_blockers=post_blockers,
             before_status=before_status,
@@ -1173,6 +1190,84 @@ def command_target_run(args: argparse.Namespace) -> int:
     finally:
         if lock is not None:
             harness_controller.release_target_run_lock(lock)
+
+
+def command_target_alias_add(args: argparse.Namespace) -> int:
+    try:
+        alias = harness_controller.validate_target_alias(args.alias)
+        record = harness_controller.add_target_alias(repo_root(), args.target_id, alias)
+        print("target alias 추가 완료")
+        print(f"- 대상: `{record.target_id}`")
+        print(f"- alias: `@{alias}`")
+        print("- 저장/서명/락/인박스에는 canonical target id만 사용됩니다.")
+        return 0
+    except harness_controller.ControllerError as exc:
+        print(f"error: {exc}")
+        return 2
+
+
+def command_target_alias_remove(args: argparse.Namespace) -> int:
+    try:
+        alias = harness_controller.validate_target_alias(args.alias)
+        record = harness_controller.remove_target_alias(repo_root(), args.target_id, alias)
+        print("target alias 제거 완료")
+        print(f"- 대상: `{record.target_id}`")
+        print(f"- alias: `@{alias}`")
+        return 0
+    except harness_controller.ControllerError as exc:
+        print(f"error: {exc}")
+        return 2
+
+
+def command_target_alias_list(args: argparse.Namespace) -> int:
+    records = harness_controller.list_targets(repo_root())
+    if args.json:
+        payload = {
+            "schema_version": 1,
+            "targets": [
+                {
+                    "target_id": record.target_id,
+                    "display_name": record.display_name,
+                    "aliases": list(record.aliases),
+                    "default": record.is_default,
+                }
+                for record in records
+            ],
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    print("external target 별칭")
+    if not records:
+        print("- 대상 없음")
+        return 0
+    for record in records:
+        aliases = ", ".join("@" + alias for alias in record.aliases) if record.aliases else "별칭 없음"
+        default_marker = " (@default, 기본 대상)" if record.is_default else ""
+        print(f"- 대상 ID `{record.target_id}`{default_marker}: {aliases}")
+    return 0
+
+
+def command_target_set_default(args: argparse.Namespace) -> int:
+    try:
+        record = harness_controller.set_default_target(repo_root(), args.target_id)
+        print("target default selector 설정 완료")
+        print(f"- @default -> `{record.target_id}`")
+        print("- @default는 selector일 뿐이며 sidecar/Redis/signature에는 canonical target id만 사용됩니다.")
+        return 0
+    except harness_controller.ControllerError as exc:
+        print(f"error: {exc}")
+        return 2
+
+
+def command_target_clear_default(args: argparse.Namespace) -> int:
+    try:
+        harness_controller.clear_default_target(repo_root())
+        print("target default selector 제거 완료")
+        print("- @default는 더 이상 해석되지 않습니다.")
+        return 0
+    except harness_controller.ControllerError as exc:
+        print(f"error: {exc}")
+        return 2
 
 
 def _shim_dir(raw_prefix: Path) -> Path:
@@ -1433,10 +1528,12 @@ def build_parser() -> argparse.ArgumentParser:
     target_subparsers = target.add_subparsers(dest="target_command", required=True)
     target_add = target_subparsers.add_parser("add", help="Register a local product git repo as an external target.")
     target_id_help = "canonical target id (예: my-app; latest/default/all/embedded 금지)"
+    target_selector_help = "target selector: canonical id, @alias, or @default"
     target_add.add_argument("target_id", help=target_id_help)
     target_add.add_argument("--repo", required=True, type=Path)
     target_add.add_argument("--branch", default="main")
     target_add.add_argument("--profile", choices=harness_profiles.profile_names(), default=harness_profiles.DEFAULT_PROFILE)
+    target_add.add_argument("--display-name", help="Operator-facing display name; canonical id remains unchanged.")
     target_add.add_argument("--force", action="store_true", help="Replace an existing local target registry entry.")
     target_add.add_argument("--json", action="store_true")
     target_add.set_defaults(func=command_target_add)
@@ -1444,21 +1541,39 @@ def build_parser() -> argparse.ArgumentParser:
     target_list.add_argument("--json", action="store_true")
     target_list.set_defaults(func=command_target_list)
     target_verify = target_subparsers.add_parser("verify", help="Verify an external target without mutating product files.")
-    target_verify.add_argument("target_id", help=target_id_help)
+    target_verify.add_argument("target", help=target_selector_help)
     target_verify.add_argument("--json", action="store_true")
     target_verify.set_defaults(func=command_target_verify)
     target_status = target_subparsers.add_parser("status", help="Show a compact external target status.")
-    target_status.add_argument("target_id", help=target_id_help)
+    target_status.add_argument("target", help=target_selector_help)
     target_status.add_argument("--json", action="store_true")
     target_status.set_defaults(func=command_target_status)
     target_dashboard = target_subparsers.add_parser("dashboard", help="Write the read-only external target dashboard.")
-    target_dashboard.add_argument("target_id", help=target_id_help)
+    target_dashboard.add_argument("target", help=target_selector_help)
     target_dashboard.add_argument("--json", action="store_true")
     target_dashboard.set_defaults(func=command_target_dashboard)
     target_run = target_subparsers.add_parser("run", help="Run an external target read-only/no-op smoke.")
-    target_run.add_argument("target_id", help=target_id_help)
+    target_run.add_argument("target", help=target_selector_help)
     target_run.add_argument("--once", action="store_true")
     target_run.set_defaults(func=command_target_run)
+    target_alias = target_subparsers.add_parser("alias", help="Manage target aliases used as explicit @selectors.")
+    target_alias_subparsers = target_alias.add_subparsers(dest="target_alias_command", required=True)
+    target_alias_add = target_alias_subparsers.add_parser("add", help="Add an @alias to a canonical target id.")
+    target_alias_add.add_argument("target_id", help=target_id_help)
+    target_alias_add.add_argument("alias", help="alias name; @ prefix is optional")
+    target_alias_add.set_defaults(func=command_target_alias_add)
+    target_alias_remove = target_alias_subparsers.add_parser("remove", help="Remove an @alias from a canonical target id.")
+    target_alias_remove.add_argument("target_id", help=target_id_help)
+    target_alias_remove.add_argument("alias", help="alias name; @ prefix is optional")
+    target_alias_remove.set_defaults(func=command_target_alias_remove)
+    target_alias_list = target_alias_subparsers.add_parser("list", help="List aliases for all targets.")
+    target_alias_list.add_argument("--json", action="store_true")
+    target_alias_list.set_defaults(func=command_target_alias_list)
+    target_set_default = target_subparsers.add_parser("set-default", help="Set explicit @default selector for read-only convenience.")
+    target_set_default.add_argument("target_id", help=target_id_help)
+    target_set_default.set_defaults(func=command_target_set_default)
+    target_clear_default = target_subparsers.add_parser("clear-default", help="Clear explicit @default selector.")
+    target_clear_default.set_defaults(func=command_target_clear_default)
 
     self_parser = subparsers.add_parser("self", help="Install or inspect the optional global harness wrapper.")
     self_subparsers = self_parser.add_subparsers(dest="self_command", required=True)

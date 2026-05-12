@@ -1,8 +1,14 @@
 # Harness Framework Version
 
-- Current Version: 1.7.107
+- Current Version: 1.7.108
 - Release Date: 2026-05-12
 - Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + on-demand export output.
+
+## What Changed In 1.7.108
+
+- Added external controller target aliases and explicit `@default` selector while keeping canonical `target_id` as the only sidecar, lock, Redis, signature, and inbox identity.
+- Added `./harness target alias add|remove|list`, `./harness target set-default`, and `./harness target clear-default`.
+- Allowed Telegram/operator selectors to use canonical id or explicit `@alias` / `@default`, with collision and reserved-name checks that fail closed.
 
 ## What Changed In 1.7.107
 

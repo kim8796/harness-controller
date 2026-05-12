@@ -14,6 +14,7 @@ from typing import Mapping, Sequence
 
 TARGET_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 RESERVED_TARGET_IDS = frozenset({"latest", "default", "all", "embedded"})
+TARGET_ALIAS_PATTERN = TARGET_ID_PATTERN
 TARGETS_DIR = Path("targets")
 TARGET_CONFIG_NAME = "target.json"
 TARGET_RUN_LOCK_NAME = "target-run.lock"
@@ -209,6 +210,9 @@ class TargetRecord:
     created_at: str
     updated_at: str
     profile: str = "telegram"
+    display_name: str | None = None
+    aliases: tuple[str, ...] = ()
+    is_default: bool = False
 
     def state_paths(self, controller_root: Path) -> StatePaths:
         return StatePaths.external(
@@ -226,6 +230,9 @@ class TargetRecord:
         return {
             "schema_version": 1,
             "target_id": self.target_id,
+            "display_name": self.display_name,
+            "aliases": list(self.aliases),
+            "default": self.is_default,
             "repo": self.repo.as_posix(),
             "branch": self.branch,
             "profile": self.profile,
@@ -265,6 +272,9 @@ class TargetRecord:
             created_at=str(payload.get("created_at") or ""),
             updated_at=str(payload.get("updated_at") or ""),
             profile=str(payload.get("profile") or "telegram"),
+            display_name=_optional_display_name(payload.get("display_name")),
+            aliases=_normalize_aliases(payload.get("aliases")),
+            is_default=bool(payload.get("default") or payload.get("is_default")),
         )
 
 
@@ -300,9 +310,21 @@ def git_toplevel(path: Path) -> Path:
 def validate_target_id(target_id: str, *, allow_reserved: bool = False) -> str:
     if not TARGET_ID_PATTERN.fullmatch(target_id):
         raise ControllerError("target id must match [A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
-    if target_id in {".", ".."} or (target_id in RESERVED_TARGET_IDS and not allow_reserved):
+    reserved = {item.casefold() for item in RESERVED_TARGET_IDS}
+    if target_id in {".", ".."} or (target_id.casefold() in reserved and not allow_reserved):
         raise ControllerError("target id is reserved")
     return target_id
+
+
+def validate_target_alias(alias: str) -> str:
+    text = str(alias or "").strip()
+    if text.startswith("@"):
+        text = text[1:].strip()
+    if not TARGET_ALIAS_PATTERN.fullmatch(text):
+        raise ControllerError("target alias must match [A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+    if text in {".", ".."} or text.casefold() in {item.casefold() for item in RESERVED_TARGET_IDS}:
+        raise ControllerError("target alias is reserved")
+    return text
 
 
 def targets_root(controller_root: Path) -> Path:
@@ -397,6 +419,18 @@ def validate_sidecar_integrity(state_root: Path) -> list[str]:
     return [relative.as_posix() for relative in SIDECAR_DIRS if not (state_root / relative).exists()]
 
 
+def _prepare_sidecar_file_for_write(*, state_root: Path, path: Path, label: str) -> Path:
+    resolved_state = state_root.resolve()
+    if path.is_symlink():
+        raise ControllerError(f"{label} must not be a symlink")
+    if path.exists() and not path.is_file():
+        raise ControllerError(f"{label} must be a regular file")
+    resolved_path = path.resolve(strict=False)
+    if not _path_is_relative_to(resolved_path, resolved_state):
+        raise ControllerError(f"{label} must stay inside target sidecar")
+    return path
+
+
 def _validate_root_boundary(*, controller_root: Path, target_root: Path, state_root: Path) -> None:
     resolved_controller = controller_root.resolve()
     resolved_target = target_root.resolve()
@@ -486,6 +520,7 @@ def add_target(
     branch: str,
     controller_version: str,
     profile: str = "telegram",
+    display_name: str | None = None,
     force: bool = False,
 ) -> TargetRecord:
     resolved_id = validate_target_id(target_id)
@@ -497,6 +532,11 @@ def add_target(
     )
     state_root = state_paths.state_root
     config_path = state_paths.target_config
+    for record in list_targets(controller_root, strict=True):
+        if record.target_id.casefold() == resolved_id.casefold() and record.target_id != resolved_id:
+            raise ControllerError("target id collides with an existing target")
+        if resolved_id.casefold() in {alias.casefold() for alias in record.aliases}:
+            raise ControllerError("target id collides with an existing alias")
     if config_path.exists() and not force:
         raise ControllerError(f"target already exists: {resolved_id}")
     blockers = _target_preflight_blockers(target_repo)
@@ -519,11 +559,9 @@ def add_target(
         created_at=created_at,
         updated_at=now,
         profile=profile,
+        display_name=_optional_display_name(display_name),
     )
-    config_path.write_text(
-        json.dumps(record.to_json(controller_root), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    _write_target_record(controller_root, record)
     return record
 
 
@@ -539,11 +577,12 @@ def load_target(controller_root: Path, target_id: str) -> TargetRecord:
     return TargetRecord.from_json(payload, controller_root=controller_root, expected_target_id=resolved_id)
 
 
-def list_targets(controller_root: Path) -> list[TargetRecord]:
+def list_targets(controller_root: Path, *, strict: bool = False) -> list[TargetRecord]:
     root = validate_targets_root(controller_root)
     if not root.exists():
         return []
     records: list[TargetRecord] = []
+    invalid: list[str] = []
     for config in sorted(root.glob(f"*/{TARGET_CONFIG_NAME}")):
         try:
             expected_id = config.parent.name
@@ -555,8 +594,169 @@ def list_targets(controller_root: Path) -> list[TargetRecord]:
                 )
             )
         except (OSError, json.JSONDecodeError, KeyError, ControllerError):
+            if strict:
+                invalid.append(config.parent.name)
             continue
+    if invalid:
+        raise ControllerError("target registry invalid: " + ", ".join(invalid))
+    if strict:
+        _validate_target_registry_invariants(records)
     return records
+
+
+def resolve_target_selector(controller_root: Path, selector: str) -> TargetRecord:
+    text = str(selector or "").strip()
+    if not text:
+        raise ControllerError("target selector is required")
+    if text.startswith("@"):
+        if text[1:].strip().casefold() == "default":
+            default_record = default_target(controller_root)
+            if default_record is None:
+                raise ControllerError("default target is not set")
+            return default_record
+        alias = validate_target_alias(text)
+        matches = [
+            record
+            for record in list_targets(controller_root, strict=True)
+            if alias.casefold() in {item.casefold() for item in record.aliases}
+        ]
+        if not matches:
+            raise ControllerError(f"unknown target alias: @{alias}")
+        if len(matches) > 1:
+            raise ControllerError(f"ambiguous target alias: @{alias}")
+        return matches[0]
+    list_targets(controller_root, strict=True)
+    return load_target(controller_root, validate_target_id(text))
+
+
+def default_target(controller_root: Path) -> TargetRecord | None:
+    defaults = [record for record in list_targets(controller_root, strict=True) if record.is_default]
+    if len(defaults) > 1:
+        raise ControllerError("multiple default targets configured")
+    return defaults[0] if defaults else None
+
+
+def set_default_target(controller_root: Path, target_id: str) -> TargetRecord:
+    selected = load_target(controller_root, target_id)
+    for record in list_targets(controller_root, strict=True):
+        updated = _replace_record(
+            record,
+            is_default=record.target_id == selected.target_id,
+        )
+        _write_target_record(controller_root, updated)
+        if updated.target_id == selected.target_id:
+            selected = updated
+    return selected
+
+
+def clear_default_target(controller_root: Path) -> None:
+    for record in list_targets(controller_root, strict=True):
+        if record.is_default:
+            _write_target_record(controller_root, _replace_record(record, is_default=False))
+
+
+def add_target_alias(controller_root: Path, target_id: str, alias: str) -> TargetRecord:
+    record = load_target(controller_root, target_id)
+    normalized = validate_target_alias(alias)
+    _ensure_alias_available(controller_root, normalized, owner_target_id=record.target_id)
+    if normalized.casefold() in {item.casefold() for item in record.aliases}:
+        return record
+    updated = _replace_record(record, aliases=tuple(sorted((*record.aliases, normalized), key=str.casefold)))
+    _write_target_record(controller_root, updated)
+    return updated
+
+
+def remove_target_alias(controller_root: Path, target_id: str, alias: str) -> TargetRecord:
+    record = load_target(controller_root, target_id)
+    normalized = validate_target_alias(alias)
+    remaining = tuple(item for item in record.aliases if item.casefold() != normalized.casefold())
+    updated = _replace_record(record, aliases=remaining)
+    _write_target_record(controller_root, updated)
+    return updated
+
+
+def _write_target_record(controller_root: Path, record: TargetRecord) -> None:
+    state_paths = record.state_paths(controller_root)
+    state_paths.target_config.write_text(
+        json.dumps(record.to_json(controller_root), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _replace_record(record: TargetRecord, **overrides: object) -> TargetRecord:
+    values = {
+        "target_id": record.target_id,
+        "repo": record.repo,
+        "branch": record.branch,
+        "state_root": record.state_root,
+        "controller_version": record.controller_version,
+        "created_at": record.created_at,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "profile": record.profile,
+        "display_name": record.display_name,
+        "aliases": record.aliases,
+        "is_default": record.is_default,
+    }
+    values.update(overrides)
+    return TargetRecord(**values)  # type: ignore[arg-type]
+
+
+def _ensure_alias_available(controller_root: Path, alias: str, *, owner_target_id: str) -> None:
+    alias_key = alias.casefold()
+    for record in list_targets(controller_root, strict=True):
+        if alias_key == record.target_id.casefold():
+            raise ControllerError("target alias collides with a target id")
+        if record.target_id != owner_target_id and alias_key in {item.casefold() for item in record.aliases}:
+            raise ControllerError("target alias collides with another target")
+
+
+def _validate_target_registry_invariants(records: Sequence[TargetRecord]) -> None:
+    target_keys: dict[str, str] = {}
+    alias_keys: dict[str, str] = {}
+    defaults: list[str] = []
+    for record in records:
+        target_key = record.target_id.casefold()
+        if target_key in target_keys:
+            raise ControllerError("target registry duplicate target id")
+        target_keys[target_key] = record.target_id
+        if record.is_default:
+            defaults.append(record.target_id)
+    if len(defaults) > 1:
+        raise ControllerError("multiple default targets configured")
+    for record in records:
+        for alias in record.aliases:
+            alias_key = alias.casefold()
+            if alias_key in target_keys:
+                raise ControllerError("target alias collides with a target id")
+            if alias_key in alias_keys:
+                raise ControllerError("target alias collides with another target")
+            alias_keys[alias_key] = record.target_id
+
+
+def _optional_display_name(value: object) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if len(text) > 120:
+        raise ControllerError("target display name is too long")
+    return text
+
+
+def _normalize_aliases(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ControllerError("target aliases must be a list")
+    aliases: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        alias = validate_target_alias(str(item))
+        key = alias.casefold()
+        if key in seen:
+            raise ControllerError("target aliases contain duplicates")
+        seen.add(key)
+        aliases.append(alias)
+    return tuple(aliases)
 
 
 def _tracked_files(target_root: Path, paths: Sequence[Path]) -> list[str]:
@@ -661,7 +861,11 @@ def write_dashboard(*, controller_root: Path, record: TargetRecord, verification
     validate_sidecar_integrity(state_paths.state_root)
     report_dir = state_paths.reports_dir
     report_dir.mkdir(parents=True, exist_ok=True)
-    report = state_paths.dashboard
+    report = _prepare_sidecar_file_for_write(
+        state_root=state_paths.state_root,
+        path=state_paths.dashboard,
+        label="target dashboard report",
+    )
     blockers = verification.get("blockers") or []
     warnings = verification.get("warnings") or []
     run_blockers = target_run_blockers(verification)
@@ -671,6 +875,9 @@ def write_dashboard(*, controller_root: Path, record: TargetRecord, verification
             "# External Harness Target Dashboard",
             "",
             f"- Target: `{record.target_id}`",
+            f"- Display name: `{record.display_name or record.target_id}`",
+            f"- Aliases: `{', '.join('@' + alias for alias in record.aliases) if record.aliases else 'none'}`",
+            f"- Default selector: `{'yes' if record.is_default else 'no'}`",
             f"- Product repo: `{record.repo.as_posix()}`",
             f"- Controller root: `{state_paths.controller_root.as_posix()}`",
             f"- State root: `{state_paths.state_root.as_posix()}`",
@@ -686,6 +893,7 @@ def write_dashboard(*, controller_root: Path, record: TargetRecord, verification
             "- `target run --once` 는 read-only/no-op smoke 로 target boundary 만 검증할 수 있다.",
             "- product-changing autonomy lane 은 RootContext-aware execution phase 전까지 비활성화돼 있다.",
             "- Telegram 지시는 target-aware relay 가 `targets/<id>/operator-inbox` 로 materialize 한다.",
+            "- operator selector 는 canonical id 또는 `@alias`, `@default` 를 쓸 수 있지만 sidecar/Redis/signature 에는 canonical target id 만 남긴다.",
             "",
         ]
     )
@@ -710,7 +918,11 @@ def write_target_run_smoke_report(
     validate_sidecar_integrity(state_paths.state_root)
     report_dir = state_paths.reports_dir
     report_dir.mkdir(parents=True, exist_ok=True)
-    report = state_paths.target_run_report
+    report = _prepare_sidecar_file_for_write(
+        state_root=state_paths.state_root,
+        path=state_paths.target_run_report,
+        label="target run smoke report",
+    )
 
     def _render_status(lines: Sequence[str]) -> list[str]:
         if not lines:

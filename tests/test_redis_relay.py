@@ -177,7 +177,7 @@ def test_owner_relay_target_id_is_signed_and_validated() -> None:
         )
 
 
-@pytest.mark.parametrize("target_id", ["bad target", "bad/target", "../target", "-bad", "latest"])
+@pytest.mark.parametrize("target_id", ["bad target", "bad/target", "../target", "-bad", "latest", "Default"])
 def test_owner_relay_rejects_invalid_target_id_without_normalizing(target_id: str) -> None:
     with pytest.raises(relay.RelayEnvelopeError, match="invalid target_id"):
         relay.build_owner_relay_envelope(

@@ -874,6 +874,7 @@ def _controller_target_ids(repo_root: Path) -> tuple[frozenset[str], str | None]
 def _apply_known_target_to_parsed(
     parsed: Mapping[str, str],
     *,
+    repo_root: Path,
     known_targets: frozenset[str],
 ) -> tuple[dict[str, str], str | None]:
     parsed_for_write = dict(parsed)
@@ -884,10 +885,18 @@ def _apply_known_target_to_parsed(
         return parsed_for_write, None
     argument = str(parsed_for_write.get("argument", "")).strip()
     first, separator, rest = argument.partition(" ")
-    if not first or first not in known_targets:
+    try:
+        from harness_controller import ControllerError, resolve_target_selector
+    except Exception as exc:
+        return parsed_for_write, f"target registry unavailable: {exc.__class__.__name__}"
+    try:
+        resolved_target = resolve_target_selector(repo_root, first).target_id if first else None
+    except ControllerError:
+        resolved_target = None
+    if not resolved_target or resolved_target not in known_targets:
         known = ", ".join(sorted(known_targets))
-        return parsed_for_write, f"target id required or unknown for external command (known: {known})"
-    parsed_for_write["target_id"] = first
+        return parsed_for_write, f"target selector required or unknown for external command (known: {known})"
+    parsed_for_write["target_id"] = resolved_target
     parsed_for_write["argument"] = rest.strip() if separator else ""
     return parsed_for_write, None
 
@@ -1214,6 +1223,7 @@ def handle_inbound_update(
         return {"update_id": update_id, "action": "ignored", "reason": registry_error}
     parsed_for_write, target_error = _apply_known_target_to_parsed(
         parsed,
+        repo_root=repo_root,
         known_targets=known_targets,
     )
     if target_error:

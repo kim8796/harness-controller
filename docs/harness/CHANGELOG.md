@@ -1,5 +1,12 @@
 # Harness Changelog
 
+## 1.7.108 - 2026-05-12
+
+- Added selector-only aliases for external controller targets through `./harness target alias add|remove|list`.
+- Added explicit `@default` selector management through `./harness target set-default|clear-default`.
+- Kept canonical target ids as the only sidecar/lock/Redis/signature/inbox identity and fail closed on alias collisions or reserved selectors.
+- Updated Telegram/product bot and local bridge target routing so `@alias` resolves before relay signing or sidecar inbox materialization.
+
 ## 1.7.107 - 2026-05-12
 
 - Clarified `target run --once` CLI/help/dashboard wording so operators see read-only/no-op smoke and product-changing execution as separate states.

@@ -58,6 +58,10 @@ def test_external_target_id_rejects_operator_reserved_words() -> None:
 
     with pytest.raises(module.ControllerError, match="reserved"):
         module.validate_target_id("latest")
+    with pytest.raises(module.ControllerError, match="reserved"):
+        module.validate_target_id("Default")
+    with pytest.raises(module.ControllerError, match="reserved"):
+        module.validate_target_alias("LATEST")
 
     assert module.StatePaths.embedded(Path("/tmp/embedded")).target_id == "embedded"
 
@@ -118,6 +122,190 @@ def test_state_paths_keep_targets_isolated(tmp_path: Path) -> None:
     assert record_a.state_paths(controller).operator_inbox == controller.resolve() / "targets" / "app" / "operator-inbox"
     assert record_b.state_paths(controller).operator_inbox == controller.resolve() / "targets" / "admin" / "operator-inbox"
     assert record_a.state_paths(controller).operator_inbox != record_b.state_paths(controller).operator_inbox
+
+
+def test_target_alias_and_default_resolve_to_canonical_id(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product_a = tmp_path / "product-a"
+    product_b = tmp_path / "product-b"
+    controller.mkdir()
+    _init_git_repo(product_a)
+    _init_git_repo(product_b)
+    module.add_target(
+        controller_root=controller,
+        target_id="my-app",
+        repo=product_a,
+        branch="main",
+        controller_version="1.8.0",
+        display_name="My App",
+    )
+    module.add_target(
+        controller_root=controller,
+        target_id="admin",
+        repo=product_b,
+        branch="main",
+        controller_version="1.8.0",
+    )
+
+    updated = module.add_target_alias(controller, "my-app", "@app")
+    default = module.set_default_target(controller, "my-app")
+    payload = json.loads((controller / "targets" / "my-app" / "target.json").read_text(encoding="utf-8"))
+
+    assert updated.aliases == ("app",)
+    assert default.is_default is True
+    assert payload["display_name"] == "My App"
+    assert payload["aliases"] == ["app"]
+    assert payload["default"] is True
+    assert module.resolve_target_selector(controller, "my-app").target_id == "my-app"
+    assert module.resolve_target_selector(controller, "@app").target_id == "my-app"
+    assert module.resolve_target_selector(controller, "@default").target_id == "my-app"
+
+
+def test_target_alias_collisions_fail_closed(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product_a = tmp_path / "product-a"
+    product_b = tmp_path / "product-b"
+    controller.mkdir()
+    _init_git_repo(product_a)
+    _init_git_repo(product_b)
+    module.add_target(controller_root=controller, target_id="app", repo=product_a, branch="main", controller_version="1.8.0")
+    module.add_target(
+        controller_root=controller,
+        target_id="admin",
+        repo=product_b,
+        branch="main",
+        controller_version="1.8.0",
+    )
+
+    with pytest.raises(module.ControllerError, match="collides with a target id"):
+        module.add_target_alias(controller, "admin", "app")
+    module.add_target_alias(controller, "app", "prod")
+    with pytest.raises(module.ControllerError, match="collides with another target"):
+        module.add_target_alias(controller, "admin", "PROD")
+    with pytest.raises(module.ControllerError, match="reserved"):
+        module.add_target_alias(controller, "admin", "@default")
+
+
+def test_target_id_colliding_with_existing_alias_fails_closed(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product_a = tmp_path / "product-a"
+    product_b = tmp_path / "product-b"
+    controller.mkdir()
+    _init_git_repo(product_a)
+    _init_git_repo(product_b)
+    module.add_target(controller_root=controller, target_id="app", repo=product_a, branch="main", controller_version="1.8.0")
+    module.add_target_alias(controller, "app", "prod")
+
+    with pytest.raises(module.ControllerError, match="target id collides with an existing alias"):
+        module.add_target(
+            controller_root=controller,
+            target_id="PROD",
+            repo=product_b,
+            branch="main",
+            controller_version="1.8.0",
+        )
+
+
+def test_target_id_casefold_duplicate_fails_closed(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product_a = tmp_path / "product-a"
+    product_b = tmp_path / "product-b"
+    controller.mkdir()
+    _init_git_repo(product_a)
+    _init_git_repo(product_b)
+    module.add_target(controller_root=controller, target_id="app", repo=product_a, branch="main", controller_version="1.8.0")
+
+    with pytest.raises(module.ControllerError, match="target id collides with an existing target"):
+        module.add_target(
+            controller_root=controller,
+            target_id="APP",
+            repo=product_b,
+            branch="main",
+            controller_version="1.8.0",
+        )
+
+
+def test_target_registry_invariant_collisions_fail_closed(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product_a = tmp_path / "product-a"
+    product_b = tmp_path / "product-b"
+    controller.mkdir()
+    _init_git_repo(product_a)
+    _init_git_repo(product_b)
+    module.add_target(controller_root=controller, target_id="app", repo=product_a, branch="main", controller_version="1.8.0")
+    module.add_target(
+        controller_root=controller,
+        target_id="admin",
+        repo=product_b,
+        branch="main",
+        controller_version="1.8.0",
+    )
+    app_config = controller / "targets" / "app" / "target.json"
+    app_payload = json.loads(app_config.read_text(encoding="utf-8"))
+    app_payload["aliases"] = ["admin"]
+    app_config.write_text(json.dumps(app_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(module.ControllerError, match="target alias collides with a target id"):
+        module.resolve_target_selector(controller, "@admin")
+
+
+def test_target_registry_duplicate_alias_and_default_fail_closed(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product_a = tmp_path / "product-a"
+    product_b = tmp_path / "product-b"
+    controller.mkdir()
+    _init_git_repo(product_a)
+    _init_git_repo(product_b)
+    module.add_target(controller_root=controller, target_id="app", repo=product_a, branch="main", controller_version="1.8.0")
+    module.add_target(
+        controller_root=controller,
+        target_id="admin",
+        repo=product_b,
+        branch="main",
+        controller_version="1.8.0",
+    )
+    for target_id in ("app", "admin"):
+        config = controller / "targets" / target_id / "target.json"
+        payload = json.loads(config.read_text(encoding="utf-8"))
+        payload["aliases"] = ["ops"]
+        config.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(module.ControllerError, match="target alias collides with another target"):
+        module.resolve_target_selector(controller, "@ops")
+
+    for target_id in ("app", "admin"):
+        config = controller / "targets" / target_id / "target.json"
+        payload = json.loads(config.read_text(encoding="utf-8"))
+        payload["aliases"] = []
+        payload["default"] = True
+        config.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(module.ControllerError, match="multiple default targets configured"):
+        module.default_target(controller)
+
+
+def test_target_selector_fails_closed_when_registry_contains_corrupt_target(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_git_repo(product)
+    module.add_target(controller_root=controller, target_id="app", repo=product, branch="main", controller_version="1.8.0")
+    corrupt = controller / "targets" / "bad" / "target.json"
+    corrupt.parent.mkdir(parents=True)
+    corrupt.write_text("{not-json\n", encoding="utf-8")
+
+    assert [record.target_id for record in module.list_targets(controller)] == ["app"]
+    with pytest.raises(module.ControllerError, match="target registry invalid"):
+        module.resolve_target_selector(controller, "app")
+    with pytest.raises(module.ControllerError, match="target registry invalid"):
+        module.add_target_alias(controller, "app", "alias")
 
 
 def test_target_run_lock_is_target_scoped_and_released(tmp_path: Path) -> None:
@@ -368,6 +556,72 @@ def test_verify_and_dashboard_reject_nested_sidecar_symlink(tmp_path: Path) -> N
         assert "sidecar path must not be a symlink" in str(exc)
     else:
         raise AssertionError("dashboard write followed a nested sidecar symlink")
+
+
+def test_dashboard_write_rejects_report_file_symlink(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_git_repo(product)
+    record = module.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.0",
+    )
+    leak = product / "leaked-dashboard.md"
+    leak.write_text("do not overwrite\n", encoding="utf-8")
+    dashboard = controller / "targets" / "demo" / "reports" / "operator-dashboard-latest.md"
+    dashboard.symlink_to(leak)
+
+    verification = module.verify_target(record)
+    with pytest.raises(module.ControllerError, match="target dashboard report must not be a symlink"):
+        module.write_dashboard(controller_root=controller, record=record, verification=verification)
+    assert leak.read_text(encoding="utf-8") == "do not overwrite\n"
+
+
+def test_target_run_report_write_rejects_report_file_symlink(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_git_repo(product)
+    record = module.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.0",
+    )
+    leak = product / "leaked-smoke.md"
+    leak.write_text("do not overwrite\n", encoding="utf-8")
+    smoke_report = controller / "targets" / "demo" / "reports" / "target-run-latest.md"
+    smoke_report.symlink_to(leak)
+    lock = module.TargetRunLock(
+        target_id="demo",
+        path=controller / "targets" / "demo" / "locks" / "target-run.lock",
+        owner="test",
+        token="token",
+        acquired_at="2026-05-12T00:00:00",
+    )
+
+    verification = module.verify_target(record)
+    with pytest.raises(module.ControllerError, match="target run smoke report must not be a symlink"):
+        module.write_target_run_smoke_report(
+            controller_root=controller,
+            record=record,
+            verification=verification,
+            result="passed",
+            run_blockers=[],
+            before_status=[],
+            after_status=[],
+            before_head="head",
+            after_head="head",
+            lock=lock,
+        )
+    assert leak.read_text(encoding="utf-8") == "do not overwrite\n"
 
 
 def test_target_run_blockers_include_detached_head(tmp_path: Path) -> None:

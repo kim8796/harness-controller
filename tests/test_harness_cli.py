@@ -291,9 +291,26 @@ def test_external_target_add_verify_dashboard_and_run_preflight(monkeypatch, tmp
     monkeypatch.setattr(module, "repo_root", lambda: controller)
     monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.0")
 
-    assert module.main(["target", "add", "demo", "--repo", str(product), "--branch", "main", "--json"]) == 0
+    assert (
+        module.main(
+            [
+                "target",
+                "add",
+                "demo",
+                "--repo",
+                str(product),
+                "--branch",
+                "main",
+                "--display-name",
+                "Demo App",
+                "--json",
+            ]
+        )
+        == 0
+    )
     add_payload = json.loads(capsys.readouterr().out)
     assert add_payload["target"]["target_id"] == "demo"
+    assert add_payload["target"]["display_name"] == "Demo App"
     assert (controller / "targets" / "demo" / "target.json").exists()
     assert (controller / "targets" / "demo" / "reports" / "operator-dashboard-latest.md").exists()
     assert not (product / "harness").exists()
@@ -315,6 +332,27 @@ def test_external_target_add_verify_dashboard_and_run_preflight(monkeypatch, tmp
     assert module.main(["target", "list", "--json"]) == 0
     list_payload = json.loads(capsys.readouterr().out)
     assert [target["target_id"] for target in list_payload["targets"]] == ["demo"]
+
+    assert module.main(["target", "alias", "add", "demo", "app"]) == 0
+    alias_output = capsys.readouterr().out
+    assert "@app" in alias_output
+    assert module.main(["target", "set-default", "demo"]) == 0
+    default_output = capsys.readouterr().out
+    assert "@default -> `demo`" in default_output
+    assert module.main(["target", "alias", "list", "--json"]) == 0
+    alias_payload = json.loads(capsys.readouterr().out)
+    assert alias_payload["targets"][0]["aliases"] == ["app"]
+    assert alias_payload["targets"][0]["default"] is True
+    assert module.main(["target", "status", "@app", "--json"]) == 0
+    alias_status_payload = json.loads(capsys.readouterr().out)
+    assert alias_status_payload["target"]["target_id"] == "demo"
+    assert module.main(["target", "verify", "@default", "--json"]) == 0
+    default_verify_payload = json.loads(capsys.readouterr().out)
+    assert default_verify_payload["target_id"] == "demo"
+    assert module.main(["target", "alias", "remove", "demo", "@app"]) == 0
+    capsys.readouterr()
+    assert module.main(["target", "clear-default"]) == 0
+    capsys.readouterr()
 
     assert module.main(["target", "run", "demo", "--once"]) == 0
     output = capsys.readouterr().out
@@ -379,7 +417,7 @@ def test_external_target_rejects_corrupt_registry_state_root(monkeypatch, tmp_pa
     config.write_text(json.dumps(payload), encoding="utf-8")
 
     assert module.main(["target", "dashboard", "demo"]) == 2
-    assert "state_root mismatch" in capsys.readouterr().out
+    assert "target registry invalid" in capsys.readouterr().out
     assert not (product / "reports" / "operator-dashboard-latest.md").exists()
 
 
@@ -638,6 +676,38 @@ def test_external_target_run_once_blocks_post_status_change(monkeypatch, tmp_pat
 
     assert "target-git-status-changed" in output
     assert "?? generated.txt" in smoke_report.read_text(encoding="utf-8")
+    assert not (controller / "targets" / "demo" / "locks" / "target-run.lock").exists()
+
+
+def test_external_target_run_once_rechecks_post_run_blockers(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.0")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product), "--branch", "main"]) == 0
+    capsys.readouterr()
+    record = module.harness_controller.load_target(controller, "demo")
+    initial = module.harness_controller.verify_target(record)
+    post = dict(initial)
+    post["ok"] = False
+    post["branch"] = {"expected": "main", "actual": "feature", "detached": False}
+    verifications = iter((initial, post))
+    monkeypatch.setattr(module.harness_controller, "verify_target", lambda current: next(verifications))
+
+    assert module.main(["target", "run", "demo", "--once"]) == 2
+    output = capsys.readouterr().out
+    smoke_report = controller / "targets" / "demo" / "reports" / "target-run-latest.md"
+
+    assert "target-branch-differs" in output
+    assert "target-branch-differs" in smoke_report.read_text(encoding="utf-8")
     assert not (controller / "targets" / "demo" / "locks" / "target-run.lock").exists()
 
 

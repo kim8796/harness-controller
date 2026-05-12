@@ -303,6 +303,8 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "Harness Controller Bundle" in readme
     assert "./harness controller doctor" in readme
     assert "HARNESS_RELAY_TARGET_IDS=my-app" in readme
+    assert "HARNESS_RELAY_TARGET_ALIASES=app=my-app" in readme
+    assert "./harness target alias add my-app app" in readme
     assert "targets/my-app/operator-inbox" in readme
     assert "read-only/no-op smoke" in readme
     assert "target run --once` runs a read-only/no-op smoke" in readme

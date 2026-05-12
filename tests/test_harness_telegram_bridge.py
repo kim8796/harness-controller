@@ -908,6 +908,73 @@ def test_handle_inbound_target_command_writes_sidecar_inbox(tmp_path: Path) -> N
     assert "latest 다음 사이클 진행" in body
 
 
+def test_handle_inbound_target_command_resolves_alias_to_canonical_sidecar(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _add_controller_target(controller, "my-app", product)
+    from scripts import harness_controller
+
+    harness_controller.add_target_alias(controller, "my-app", "app")
+    harness_controller.set_default_target(controller, "my-app")
+    update = {
+        "update_id": 211,
+        "message": {
+            "message_id": 299,
+            "from": {"id": 42},
+            "chat": {"id": "123", "type": "private"},
+            "text": "/harness note @app latest 다음 사이클 진행",
+        },
+    }
+
+    result = module.handle_inbound_update(controller, update, admin_chat_id="123", operator_user_ids=(42,))
+
+    assert result["action"] == "inbox"
+    assert result["target_id"] == "my-app"
+    inbox_files = [
+        path for path in (controller / "targets" / "my-app" / "operator-inbox").glob("*.md")
+        if path.name != "README.md"
+    ]
+    assert len(inbox_files) == 1
+    body = inbox_files[0].read_text(encoding="utf-8")
+    assert "Relay-Target-ID: my-app" in body
+    assert "latest 다음 사이클 진행" in body
+
+
+def test_handle_inbound_target_command_resolves_default_to_canonical_sidecar(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _add_controller_target(controller, "my-app", product)
+    from scripts import harness_controller
+
+    harness_controller.set_default_target(controller, "my-app")
+    update = {
+        "update_id": 212,
+        "message": {
+            "message_id": 300,
+            "from": {"id": 42},
+            "chat": {"id": "123", "type": "private"},
+            "text": "/harness note @default latest 다음 사이클 진행",
+        },
+    }
+
+    result = module.handle_inbound_update(controller, update, admin_chat_id="123", operator_user_ids=(42,))
+
+    assert result["action"] == "inbox"
+    assert result["target_id"] == "my-app"
+    inbox_files = [
+        path for path in (controller / "targets" / "my-app" / "operator-inbox").glob("*.md")
+        if path.name != "README.md"
+    ]
+    assert len(inbox_files) == 1
+    body = inbox_files[0].read_text(encoding="utf-8")
+    assert "Relay-Target-ID: my-app" in body
+    assert "latest 다음 사이클 진행" in body
+
+
 def test_handle_inbound_target_command_requires_known_target(tmp_path: Path) -> None:
     module = _load_module()
     controller = tmp_path / "controller"
@@ -926,7 +993,7 @@ def test_handle_inbound_target_command_requires_known_target(tmp_path: Path) -> 
     result = module.handle_inbound_update(controller, update, admin_chat_id="123", operator_user_ids=(42,))
 
     assert result["action"] == "ignored"
-    assert "target id required" in result["reason"]
+    assert "target selector required" in result["reason"]
     assert not (controller / "runs" / "autonomy" / "inbox").exists()
     inbox_files = [
         path for path in (controller / "targets" / "app" / "operator-inbox").glob("*.md")

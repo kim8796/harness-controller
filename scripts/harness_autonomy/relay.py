@@ -66,7 +66,7 @@ def normalize_relay_target_id(value: object | None) -> str | None:
     raw = str(value or "").strip()
     if not raw:
         return None
-    if not _TARGET_ID_RE.fullmatch(raw) or raw in _RESERVED_TARGET_IDS:
+    if not _TARGET_ID_RE.fullmatch(raw) or raw.casefold() in {item.casefold() for item in _RESERVED_TARGET_IDS}:
         raise RelayEnvelopeError("invalid target_id")
     return raw
 

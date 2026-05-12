@@ -46,12 +46,14 @@ cd /path/to/harness-controller
 ./harness controller doctor
 ./harness controller export /path/to/controller-bundle
 ./harness target add my-app --repo /path/to/my-app --branch main
+./harness target alias add my-app app
+./harness target set-default my-app
 ./harness target verify my-app
 ./harness target dashboard my-app
 ./harness target run my-app --once
 ```
 
-이 preview 는 product repo 를 검사하고 controller 쪽 `targets/<id>/` sidecar 에 registry/dashboard 를 만든다. product repo 에 `HARNESS.md`, `scripts/harness*`, `runs/**`, `reports/**`, `backlog/**` 를 쓰지 않는다. `./harness controller export <dir>` 는 private `harness-controller` repo 를 ad hoc 복사 없이 seed 하기 위한 controller-safe bundle 을 만든다. v1.7.100 부터 controller bundle 은 GitHub Actions workflow 와 그 workflow 가 실행할 focused tests / generated controller conftest 를 함께 포함하고, v1.7.101 부터 그 focused tests 는 clean hosted runner 에서도 git identity 없이 깨지지 않게 자체 identity 를 쓴다. v1.7.102 부터 controller workflow 는 Node 24-compatible official actions 를 쓰며, v1.7.103 부터 target sidecar 경로는 단일 `StatePaths` resolver 로 정한다. v1.7.104 부터 `./harness target run my-app --once` 는 target별 lock 을 잡고, v1.7.105 부터 Telegram/Redis owner 지시는 signed target id 를 검증해 `targets/<id>/operator-inbox` 로 들어간다. v1.7.107 기준 target run 은 verified target 에 대해 read-only/no-op smoke 로 성공하고 `targets/<id>/reports/target-run-latest.md` 를 남긴다. Detached HEAD, dirty target, branch mismatch 는 smoke blocker 다. 실제 product diff 실행은 autonomy core 가 `controller_root` / `target_root` / `state_root` 를 끝까지 받는 별도 RootContext-aware execution phase 에서 켠다.
+이 preview 는 product repo 를 검사하고 controller 쪽 `targets/<id>/` sidecar 에 registry/dashboard 를 만든다. product repo 에 `HARNESS.md`, `scripts/harness*`, `runs/**`, `reports/**`, `backlog/**` 를 쓰지 않는다. `./harness controller export <dir>` 는 private `harness-controller` repo 를 ad hoc 복사 없이 seed 하기 위한 controller-safe bundle 을 만든다. v1.7.100 부터 controller bundle 은 GitHub Actions workflow 와 그 workflow 가 실행할 focused tests / generated controller conftest 를 함께 포함하고, v1.7.101 부터 그 focused tests 는 clean hosted runner 에서도 git identity 없이 깨지지 않게 자체 identity 를 쓴다. v1.7.102 부터 controller workflow 는 Node 24-compatible official actions 를 쓰며, v1.7.103 부터 target sidecar 경로는 단일 `StatePaths` resolver 로 정한다. v1.7.104 부터 `./harness target run my-app --once` 는 target별 lock 을 잡고, v1.7.105 부터 Telegram/Redis owner 지시는 signed target id 를 검증해 `targets/<id>/operator-inbox` 로 들어간다. v1.7.107 기준 target run 은 verified target 에 대해 read-only/no-op smoke 로 성공하고 `targets/<id>/reports/target-run-latest.md` 를 남긴다. v1.7.108 부터 operator 는 `@app`, `@default` selector 를 쓸 수 있지만 sidecar/Redis/signature/inbox 에는 canonical `my-app` 만 남는다. Detached HEAD, dirty target, branch mismatch 는 smoke blocker 다. 실제 product diff 실행은 autonomy core 가 `controller_root` / `target_root` / `state_root` 를 끝까지 받는 별도 RootContext-aware execution phase 에서 켠다.
 
 ### B. controller repo 없이 설치 도구만 따로 들고 간다
 
@@ -276,14 +278,17 @@ export HARNESS_TELEGRAM_ADMIN_CHAT_ID=<admin-chat-id>
 export HARNESS_TELEGRAM_OPERATOR_USER_IDS=<telegram-user-id>
 export HARNESS_RELAY_ENABLED=true
 export HARNESS_RELAY_REPO_ID=<stable-repo-id>
+# single-bound compatibility 및 explicit @default 대상이다.
+export HARNESS_RELAY_TARGET_ID=my-app
 # 외부 controller multi-target이면 canonical target id를 쉼표로 지정한다.
 export HARNESS_RELAY_TARGET_IDS=my-app
+export HARNESS_RELAY_TARGET_ALIASES=app=my-app
 export HARNESS_RELAY_SIGNING_KEY=<long-random-signing-key>
 export UPSTASH_REDIS_REST_URL=<upstash-rest-url>
 export UPSTASH_REDIS_REST_TOKEN=<upstash-rest-token>
 ```
 
-`HARNESS_TELEGRAM_ADMIN_CHAT_ID` 는 read-only status/help chat boundary 이고, state-changing Owner instruction 은 private chat 과 `HARNESS_TELEGRAM_OPERATOR_USER_IDS` 의 Telegram numeric `from.id` 가 모두 맞아야 한다. `HARNESS_RELAY_REPO_ID` 는 product bot 과 local loop/controller 가 공유하는 stable namespace 이며, `HARNESS_RELAY_SIGNING_KEY` 는 relay payload 서명/검증용 secret 이라 문서나 chat 에 남기지 않는다. `HARNESS_RELAY_TARGET_ID` 는 product bot 하나가 target 하나에 묶이는 single-bound compatibility 값이지 CLI `target` 명령의 default target 이 아니다. `HARNESS_RELAY_TARGET_IDS` 는 external multi-target 명령에서 허용할 canonical target id 목록이다. target id 는 `my-app` 같은 lower-kebab-case 를 권장하며, 허용 문자는 영문/숫자/`.`/`_`/`-` 이다. `latest`, `default`, `all`, `embedded` 는 Telegram operand 와 충돌할 수 있어 target id 로 쓰지 않는다.
+`HARNESS_TELEGRAM_ADMIN_CHAT_ID` 는 read-only status/help chat boundary 이고, state-changing Owner instruction 은 private chat 과 `HARNESS_TELEGRAM_OPERATOR_USER_IDS` 의 Telegram numeric `from.id` 가 모두 맞아야 한다. `HARNESS_RELAY_REPO_ID` 는 product bot 과 local loop/controller 가 공유하는 stable namespace 이며, `HARNESS_RELAY_SIGNING_KEY` 는 relay payload 서명/검증용 secret 이라 문서나 chat 에 남기지 않는다. `HARNESS_RELAY_TARGET_ID` 는 product bot 하나가 target 하나에 묶이는 single-bound compatibility 값이자 explicit `@default` 대상이다. `HARNESS_RELAY_TARGET_IDS` 는 external multi-target 명령에서 허용할 canonical target id 목록이다. `HARNESS_RELAY_TARGET_ALIASES` 는 `app=my-app,ops=admin` 형식의 selector mapping 이며, alias 는 operator 입력에만 쓰고 Redis/signature/inbox 에는 canonical target id 만 남긴다. target id 와 alias 는 `my-app` 같은 lower-kebab-case 를 권장하며, 허용 문자는 영문/숫자/`.`/`_`/`-` 이다. `latest`, `default`, `all`, `embedded` 는 Telegram operand 와 충돌할 수 있어 target id/alias 로 쓰지 않는다.
 
 Upstash 를 쓸 때는 Upstash 콘솔에서 Redis DB 를 만든 뒤 REST URL/token 을 `.env` 또는 shell env 에 넣고, `./harness env check --provider upstash` 로 로컬 입력 상태를 확인한다. 그 다음 `./harness env register --provider vercel --dry-run` 으로 Vercel Project Settings 에 넣을 key 목록을 확인한다. 이 명령들은 값의 존재/강도만 보며, Upstash/Vercel 원격 검증이나 등록은 하지 않는다. 준비 실패는 exit code `2` 로 끝나며 내부 오류가 아니라 보강할 env 가 있다는 뜻이다.
 
@@ -292,7 +297,7 @@ Upstash 를 쓸 때는 Upstash 콘솔에서 Redis DB 를 만든 뒤 REST URL/tok
 - `/harness help`: 한국어 도움말
 - `/harness status`: read-only 상태 확인
 - `/harness note`, `/harness answer`, `/harness pause`, `/harness resume`, `/harness retry`, `/harness salvage`, `/harness veto`: 직접 실행하지 않고 Owner instruction 파일로 남김
-- external controller multi-target 예시: `/harness note my-app latest 다음 방향`, `/harness answer my-app latest 진행해`
+- external controller multi-target 예시: `/harness note my-app latest 다음 방향`, `/harness note @app latest 다음 방향`, `/harness answer @default latest 진행해`
 - `/loop_status`, `/loop_note`, `/loop_veto`, `/loop_pause`, `/loop_resume`, `/loop_retry`, `/loop_answer`: compatibility alias
 
 상태 변경 명령은 Telegram bridge 가 즉시 실행하지 않는다. embedded mode 에서는 `runs/autonomy/inbox/*.md`, external target mode 에서는 `targets/<id>/operator-inbox/*.md` 로만 남기고 다음 safe point 에서 기존 inbox flow 가 읽는다. prefix 없는 일반 메시지는 하네스 명령으로 처리하지 않고, 비밀값/토큰/chat id/raw env 값은 보내지 않는다.
