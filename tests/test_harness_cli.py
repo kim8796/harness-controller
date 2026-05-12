@@ -21,6 +21,14 @@ def _git_env() -> dict[str, str]:
     for key in tuple(env):
         if key.startswith("GIT_"):
             env.pop(key, None)
+    env.update(
+        {
+            "GIT_AUTHOR_NAME": "Harness Test",
+            "GIT_AUTHOR_EMAIL": "harness-test@example.invalid",
+            "GIT_COMMITTER_NAME": "Harness Test",
+            "GIT_COMMITTER_EMAIL": "harness-test@example.invalid",
+        }
+    )
     return env
 
 

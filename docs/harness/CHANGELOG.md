@@ -1,5 +1,10 @@
 # Harness Changelog
 
+## 1.7.101 - 2026-05-12
+
+- Made controller focused tests self-contained in clean CI runners by supplying local git author/committer identity for temporary commits.
+- Preserved the controller export and target smoke contract while fixing GitHub Actions execution on hosted runners.
+
 ## 1.7.100 - 2026-05-12
 
 - Added focused CI tests and a generated controller-specific `tests/conftest.py` to controller bundles.
