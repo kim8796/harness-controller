@@ -1099,18 +1099,72 @@ def command_target_run(args: argparse.Namespace) -> int:
             record=record,
             verification=verification,
         )
-        if not verification["ok"]:
+        run_blockers = harness_controller.target_run_blockers(verification)
+        before_status = [
+            str(line)
+            for line in (
+                verification.get("git", {}).get("dirty_paths", [])
+                if isinstance(verification.get("git"), dict)
+                else []
+            )
+        ]
+        if run_blockers:
+            smoke_report = harness_controller.write_target_run_smoke_report(
+                controller_root=repo_root(),
+                record=record,
+                verification=verification,
+                result="blocked",
+                run_blockers=run_blockers,
+                before_status=before_status,
+                after_status=before_status,
+                before_head="",
+                after_head="",
+                lock=lock,
+            )
             _render_target_verify_text(verification)
-            print("target run --once 중단: blocker를 먼저 해결해야 합니다.")
+            print("target run --once 중단: run blocker를 먼저 해결해야 합니다.")
+            print(f"- run blockers: {', '.join(run_blockers)}")
+            print(f"- smoke report: `{smoke_report.as_posix()}`")
             return 2
-        print("external target run preflight 완료")
+        before_head = harness_controller.target_git_head(record.repo)
+        after_status = harness_controller.target_git_status_lines(record.repo)
+        after_head = harness_controller.target_git_head(record.repo)
+        status_changed = before_status != after_status
+        head_changed = before_head != after_head
+        post_markers = harness_controller.verify_target(record).get("harness_markers", [])
+        post_blockers: list[str] = []
+        if status_changed:
+            post_blockers.append("target-git-status-changed")
+        if head_changed:
+            post_blockers.append("target-head-changed")
+        if post_markers:
+            post_blockers.append("target-harness-files-present")
+        smoke_report = harness_controller.write_target_run_smoke_report(
+            controller_root=repo_root(),
+            record=record,
+            verification=verification,
+            result="blocked" if post_blockers else "passed",
+            run_blockers=post_blockers,
+            before_status=before_status,
+            after_status=after_status,
+            before_head=before_head,
+            after_head=after_head,
+            lock=lock,
+        )
+        if post_blockers:
+            print("target run --once 중단: product repo changed during read-only smoke.")
+            print(f"- run blockers: {', '.join(post_blockers)}")
+            print(f"- smoke report: `{smoke_report.as_posix()}`")
+            return 2
+        print("external target run read-only smoke 완료")
         print(f"- 대상: `{record.target_id}`")
         print(f"- dashboard: `{report.as_posix()}`")
+        print(f"- smoke report: `{smoke_report.as_posix()}`")
         print(f"- lock: acquired/released `{lock.path.as_posix()}`")
-        print("- lane 실행: not started")
-        print("- 이유: external product diff 실행은 RootContext-aware autonomy core 승격 후 활성화합니다.")
+        print("- lane 실행: not started (read-only/no-op smoke only)")
+        print("- 이유: product-changing execution 은 RootContext-aware autonomy core 승격 후 별도 단계에서 활성화합니다.")
         print("- product repo 변경: no")
-        return 2
+        return 0
     except harness_controller.ControllerError as exc:
         print(f"error: {exc}")
         return 2

@@ -156,6 +156,10 @@ class StatePaths:
         return self.reports_dir / "operator-dashboard-latest.md"
 
     @property
+    def target_run_report(self) -> Path:
+        return self.reports_dir / "target-run-latest.md"
+
+    @property
     def operator_inbox(self) -> Path:
         return self.state_root / "operator-inbox"
 
@@ -615,6 +619,38 @@ def verify_target(record: TargetRecord) -> dict[str, object]:
     }
 
 
+def target_run_blockers(verification: Mapping[str, object]) -> list[str]:
+    blockers: list[str] = []
+    for blocker in verification.get("blockers") or []:
+        text = str(blocker)
+        if text and text not in blockers:
+            blockers.append(text)
+    git_info = verification.get("git")
+    if isinstance(git_info, Mapping) and git_info.get("clean") is False and "target-git-dirty" not in blockers:
+        blockers.append("target-git-dirty")
+    branch_info = verification.get("branch")
+    if isinstance(branch_info, Mapping):
+        expected = str(branch_info.get("expected") or "")
+        actual = str(branch_info.get("actual") or "")
+        if expected and actual and expected != actual and "target-branch-differs" not in blockers:
+            blockers.append("target-branch-differs")
+    return blockers
+
+
+def target_git_status_lines(target_root: Path) -> list[str]:
+    result = git(["status", "--porcelain=v1"], cwd=target_root)
+    if result.returncode != 0:
+        raise ControllerError("target git status failed")
+    return [line.rstrip() for line in result.stdout.splitlines() if line.rstrip()]
+
+
+def target_git_head(target_root: Path) -> str:
+    result = git(["rev-parse", "HEAD"], cwd=target_root)
+    if result.returncode != 0:
+        raise ControllerError("target git HEAD read failed")
+    return result.stdout.strip()
+
+
 def write_dashboard(*, controller_root: Path, record: TargetRecord, verification: Mapping[str, object]) -> Path:
     state_paths = record.state_paths(controller_root)
     validate_sidecar_integrity(state_paths.state_root)
@@ -641,6 +677,67 @@ def write_dashboard(*, controller_root: Path, record: TargetRecord, verification
             "- product repo 에 harness runtime 파일을 자동으로 쓰지 않는다.",
             "- 외부 target 실행은 RootContext-aware autonomy core 승격 전까지 fail-closed 한다.",
             "- Telegram 지시는 이후 target-aware relay 가 `targets/<id>/operator-inbox` 로 materialize 한다.",
+            "",
+        ]
+    )
+    report.write_text(text, encoding="utf-8")
+    return report
+
+
+def write_target_run_smoke_report(
+    *,
+    controller_root: Path,
+    record: TargetRecord,
+    verification: Mapping[str, object],
+    result: str,
+    run_blockers: Sequence[str],
+    before_status: Sequence[str],
+    after_status: Sequence[str],
+    before_head: str,
+    after_head: str,
+    lock: TargetRunLock,
+) -> Path:
+    state_paths = record.state_paths(controller_root)
+    validate_sidecar_integrity(state_paths.state_root)
+    report_dir = state_paths.reports_dir
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report = state_paths.target_run_report
+
+    def _render_status(lines: Sequence[str]) -> list[str]:
+        if not lines:
+            return ["- none"]
+        return [f"- `{line}`" for line in lines]
+
+    text = "\n".join(
+        [
+            "# External Target Run Read-Only Smoke",
+            "",
+            f"- Target: `{record.target_id}`",
+            f"- Result: `{result}`",
+            f"- Product repo: `{record.repo.as_posix()}`",
+            f"- Controller root: `{state_paths.controller_root.as_posix()}`",
+            f"- State root: `{state_paths.state_root.as_posix()}`",
+            f"- Lock path: `{lock.path.as_posix()}`",
+            f"- Lock acquired at: `{lock.acquired_at}`",
+            f"- Run blockers: `{', '.join(str(item) for item in run_blockers) if run_blockers else 'none'}`",
+            "- Lane execution: `not-started`",
+            "- Product diff execution: `disabled`",
+            f"- Product HEAD before: `{before_head or 'unknown'}`",
+            f"- Product HEAD after: `{after_head or 'unknown'}`",
+            "",
+            "## Product Git Status Before",
+            "",
+            *_render_status(before_status),
+            "",
+            "## Product Git Status After",
+            "",
+            *_render_status(after_status),
+            "",
+            "## Operator Guidance",
+            "",
+            "- 이 smoke 는 target boundary 검증만 수행한다.",
+            "- product repo 에 harness runtime/state 파일을 쓰지 않는다.",
+            "- 실제 product-changing autonomy lane 은 다음 RootContext-aware execution phase 에서 별도로 연다.",
             "",
         ]
     )

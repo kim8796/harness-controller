@@ -304,6 +304,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "./harness controller doctor" in readme
     assert "HARNESS_RELAY_TARGET_IDS=my-app" in readme
     assert "targets/my-app/operator-inbox" in readme
+    assert "read-only/no-op smoke" in readme
     assert "Harness Controller Adapter" in (bundle / "AGENTS.md").read_text(encoding="utf-8")
     product_marker = "MINI" + "APP"
     assert product_marker not in (bundle / "docs" / "harness" / "GOALS.md").read_text(encoding="utf-8")

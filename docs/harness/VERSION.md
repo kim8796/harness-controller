@@ -1,8 +1,15 @@
 # Harness Framework Version
 
-- Current Version: 1.7.105
+- Current Version: 1.7.106
 - Release Date: 2026-05-12
 - Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + on-demand export output.
+
+## What Changed In 1.7.106
+
+- Promoted `./harness target run <id> --once` from fail-closed preflight to a successful read-only/no-op smoke for verified external targets.
+- Added target run smoke reports under `targets/<id>/reports/target-run-latest.md` while keeping product-changing lane execution disabled.
+- Promoted dirty target repos and branch mismatch from verify warnings to `target run --once` blockers.
+- Kept product repos clean: no harness runtime/state files, product diffs, commits, or pushes are created by this smoke.
 
 ## What Changed In 1.7.105
 

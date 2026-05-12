@@ -1,5 +1,11 @@
 # Harness Changelog
 
+## 1.7.106 - 2026-05-12
+
+- Made `./harness target run <id> --once` succeed as a read-only/no-op smoke when the target is verified and clean.
+- Added a controller sidecar smoke report at `targets/<id>/reports/target-run-latest.md`.
+- Kept product-changing autonomy execution disabled and blocked dirty target repos or branch mismatches during the smoke.
+
 ## 1.7.105 - 2026-05-12
 
 - Routed target-scoped Telegram/Redis owner instructions to `targets/<id>/operator-inbox` after controller target registry and sidecar validation.

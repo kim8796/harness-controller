@@ -921,7 +921,7 @@ def export_controller_bundle(root: Path, output_dir: Path, version: str | None =
                 "",
                 "- Set `HARNESS_RELAY_TARGET_IDS=my-app` in the product bot/runtime that enqueues relay commands.",
                 "- Use `/harness note my-app ...` or `/harness answer my-app ...` so the signed target id reaches this controller.",
-                "- The controller drains to `targets/my-app/operator-inbox`; `target run --once` still fails closed before product lane execution.",
+                "- The controller drains to `targets/my-app/operator-inbox`; `target run --once` runs a read-only/no-op smoke and still keeps product-changing execution disabled.",
                 "",
                 "## Excluded Live State",
                 "",
