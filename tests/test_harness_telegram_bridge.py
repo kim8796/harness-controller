@@ -133,7 +133,7 @@ def test_discover_unsent_outbox_files_excludes_known_hashes(tmp_path: Path) -> N
 
 def test_discover_unsent_outbox_files_excludes_known_notification_id(tmp_path: Path) -> None:
     module = _load_module()
-    notification_id = "goal-complete-proposal:goal-complete:MINIAPP1:abc123"
+    notification_id = "goal-complete-proposal:goal-complete:GOAL1:abc123"
     _write_outbox(
         tmp_path,
         "one.md",
@@ -187,7 +187,7 @@ def test_render_summary_includes_proposal_id_when_present(tmp_path: Path) -> Non
 
 def test_render_new_format_summary_includes_state_proposal_uid(tmp_path: Path) -> None:
     module = _load_module()
-    uid = "state::repo-root::run-1::goal::MINIAPP1::goal-status-change"
+    uid = "state::repo-root::run-1::goal::GOAL1::goal-status-change"
     path = _write_outbox(
         tmp_path,
         "goal-complete.md",
@@ -209,7 +209,7 @@ def test_render_new_format_summary_includes_state_proposal_uid(tmp_path: Path) -
 
     rendered = module.render_telegram_summary(path)
 
-    assert "State\\-Proposal\\-UID: state::repo\\-root::run\\-1::goal::MINIAPP1::goal\\-status\\-change" in rendered
+    assert "State\\-Proposal\\-UID: state::repo\\-root::run\\-1::goal::GOAL1::goal\\-status\\-change" in rendered
 
 
 def test_render_summary_truncates_to_summary_max_chars(tmp_path: Path) -> None:
@@ -647,7 +647,7 @@ def test_update_sent_state_does_not_overwrite_existing(tmp_path: Path) -> None:
 
 def test_update_sent_state_records_notification_id(tmp_path: Path) -> None:
     module = _load_module()
-    notification_id = "goal-complete-applied:goal-complete:MINIAPP1:abc123"
+    notification_id = "goal-complete-applied:goal-complete:GOAL1:abc123"
     path = _write_outbox(tmp_path, "one.md", f"Task-ID: run-1\nNotification-ID: {notification_id}\n")
 
     module.update_sent_state(tmp_path, [path])
