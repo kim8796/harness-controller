@@ -587,6 +587,9 @@ def verify_target(record: TargetRecord) -> dict[str, object]:
         warnings.append("target-git-dirty")
     current_branch_result = git(["branch", "--show-current"], cwd=target_root) if target_root.exists() else None
     current_branch = current_branch_result.stdout.strip() if current_branch_result and current_branch_result.returncode == 0 else ""
+    detached_head = bool(current_branch_result and current_branch_result.returncode == 0 and not current_branch)
+    if detached_head:
+        warnings.append("target-detached-head")
     if current_branch and current_branch != record.branch:
         warnings.append("target-branch-differs")
     harness_markers = _existing_harness_markers(target_root) if target_root.exists() else []
@@ -611,7 +614,7 @@ def verify_target(record: TargetRecord) -> dict[str, object]:
         "warnings": warnings,
         "target_root": target_root.as_posix(),
         "state_root": state_root.as_posix(),
-        "branch": {"expected": record.branch, "actual": current_branch},
+        "branch": {"expected": record.branch, "actual": current_branch, "detached": detached_head},
         "git": {"clean": not dirty_paths, "dirty_paths": dirty_paths},
         "harness_markers": harness_markers,
         "tracked_harness_markers": tracked_harness_markers,
@@ -632,6 +635,8 @@ def target_run_blockers(verification: Mapping[str, object]) -> list[str]:
     if isinstance(branch_info, Mapping):
         expected = str(branch_info.get("expected") or "")
         actual = str(branch_info.get("actual") or "")
+        if branch_info.get("detached") is True and "target-detached-head" not in blockers:
+            blockers.append("target-detached-head")
         if expected and actual and expected != actual and "target-branch-differs" not in blockers:
             blockers.append("target-branch-differs")
     return blockers
@@ -659,6 +664,8 @@ def write_dashboard(*, controller_root: Path, record: TargetRecord, verification
     report = state_paths.dashboard
     blockers = verification.get("blockers") or []
     warnings = verification.get("warnings") or []
+    run_blockers = target_run_blockers(verification)
+    result = "ready" if not blockers and not run_blockers else "needs-attention"
     text = "\n".join(
         [
             "# External Harness Target Dashboard",
@@ -667,16 +674,18 @@ def write_dashboard(*, controller_root: Path, record: TargetRecord, verification
             f"- Product repo: `{record.repo.as_posix()}`",
             f"- Controller root: `{state_paths.controller_root.as_posix()}`",
             f"- State root: `{state_paths.state_root.as_posix()}`",
-            f"- Result: `{'ready' if verification.get('ok') else 'needs-attention'}`",
+            f"- Result: `{result}`",
             f"- Blockers: `{', '.join(str(item) for item in blockers) if blockers else 'none'}`",
             f"- Warnings: `{', '.join(str(item) for item in warnings) if warnings else 'none'}`",
+            f"- Target run smoke blockers: `{', '.join(str(item) for item in run_blockers) if run_blockers else 'none'}`",
             "",
             "## Operator Guidance",
             "",
             "- 이 dashboard 는 read-only projection 이다.",
             "- product repo 에 harness runtime 파일을 자동으로 쓰지 않는다.",
-            "- 외부 target 실행은 RootContext-aware autonomy core 승격 전까지 fail-closed 한다.",
-            "- Telegram 지시는 이후 target-aware relay 가 `targets/<id>/operator-inbox` 로 materialize 한다.",
+            "- `target run --once` 는 read-only/no-op smoke 로 target boundary 만 검증할 수 있다.",
+            "- product-changing autonomy lane 은 RootContext-aware execution phase 전까지 비활성화돼 있다.",
+            "- Telegram 지시는 target-aware relay 가 `targets/<id>/operator-inbox` 로 materialize 한다.",
             "",
         ]
     )

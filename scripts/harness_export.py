@@ -915,6 +915,7 @@ def export_controller_bundle(root: Path, output_dir: Path, version: str | None =
                 "./harness target add my-app --repo /path/to/product-repo --branch main",
                 "./harness target verify my-app",
                 "./harness target dashboard my-app",
+                "./harness target run my-app --once",
                 "```",
                 "",
                 "Telegram/Redis owner commands are target-scoped in external mode:",

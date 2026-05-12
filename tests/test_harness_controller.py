@@ -362,6 +362,38 @@ def test_verify_and_dashboard_reject_nested_sidecar_symlink(tmp_path: Path) -> N
         raise AssertionError("dashboard write followed a nested sidecar symlink")
 
 
+def test_target_run_blockers_include_detached_head(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_git_repo(product)
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.strip()
+    subprocess.run(["git", "checkout", "--detach", head], cwd=product, check=True, env=_git_env())
+    record = module.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.0",
+    )
+
+    verification = module.verify_target(record)
+
+    assert verification["branch"] == {"expected": "main", "actual": "", "detached": True}
+    assert "target-detached-head" in verification["warnings"]
+    assert "target-detached-head" in module.target_run_blockers(verification)
+
+
 def test_target_run_lock_rejects_symlink(tmp_path: Path) -> None:
     module = _load_module()
     controller = tmp_path / "controller"

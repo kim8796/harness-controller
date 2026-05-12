@@ -1083,7 +1083,7 @@ def command_target_dashboard(args: argparse.Namespace) -> int:
 
 def command_target_run(args: argparse.Namespace) -> int:
     if not args.once:
-        print("error: external target run은 bounded smoke만 허용합니다. --once 를 붙이세요.")
+        print("error: external target run은 read-only/no-op smoke만 허용합니다. --once 를 붙이세요.")
         return 2
     lock: harness_controller.TargetRunLock | None = None
     try:
@@ -1156,14 +1156,16 @@ def command_target_run(args: argparse.Namespace) -> int:
             print(f"- run blockers: {', '.join(post_blockers)}")
             print(f"- smoke report: `{smoke_report.as_posix()}`")
             return 2
-        print("external target run read-only smoke 완료")
-        print(f"- 대상: `{record.target_id}`")
+        print("외부 target read-only smoke 완료")
+        print(f"- 대상 ID: `{record.target_id}`")
         print(f"- dashboard: `{report.as_posix()}`")
         print(f"- smoke report: `{smoke_report.as_posix()}`")
         print(f"- lock: acquired/released `{lock.path.as_posix()}`")
-        print("- lane 실행: not started (read-only/no-op smoke only)")
-        print("- 이유: product-changing execution 은 RootContext-aware autonomy core 승격 후 별도 단계에서 활성화합니다.")
-        print("- product repo 변경: no")
+        print("- 검증 범위: target 등록/sidecar/dashboard/lock/product git 상태")
+        print("- lane 실행: 시작 안 함 (read-only/no-op smoke only)")
+        print("- 제품 변경 실행: 비활성화")
+        print("- 다음 단계: 지금은 제품 변경 실행이 비활성화되어 있습니다. 별도 RootContext-aware execution phase 에서만 켭니다.")
+        print("- product repo 변경: 없음")
         return 0
     except harness_controller.ControllerError as exc:
         print(f"error: {exc}")
@@ -1430,7 +1432,8 @@ def build_parser() -> argparse.ArgumentParser:
     target = subparsers.add_parser("target", help="Manage product repositories from an external harness controller.")
     target_subparsers = target.add_subparsers(dest="target_command", required=True)
     target_add = target_subparsers.add_parser("add", help="Register a local product git repo as an external target.")
-    target_add.add_argument("target_id")
+    target_id_help = "canonical target id (예: my-app; latest/default/all/embedded 금지)"
+    target_add.add_argument("target_id", help=target_id_help)
     target_add.add_argument("--repo", required=True, type=Path)
     target_add.add_argument("--branch", default="main")
     target_add.add_argument("--profile", choices=harness_profiles.profile_names(), default=harness_profiles.DEFAULT_PROFILE)
@@ -1441,19 +1444,19 @@ def build_parser() -> argparse.ArgumentParser:
     target_list.add_argument("--json", action="store_true")
     target_list.set_defaults(func=command_target_list)
     target_verify = target_subparsers.add_parser("verify", help="Verify an external target without mutating product files.")
-    target_verify.add_argument("target_id")
+    target_verify.add_argument("target_id", help=target_id_help)
     target_verify.add_argument("--json", action="store_true")
     target_verify.set_defaults(func=command_target_verify)
     target_status = target_subparsers.add_parser("status", help="Show a compact external target status.")
-    target_status.add_argument("target_id")
+    target_status.add_argument("target_id", help=target_id_help)
     target_status.add_argument("--json", action="store_true")
     target_status.set_defaults(func=command_target_status)
     target_dashboard = target_subparsers.add_parser("dashboard", help="Write the read-only external target dashboard.")
-    target_dashboard.add_argument("target_id")
+    target_dashboard.add_argument("target_id", help=target_id_help)
     target_dashboard.add_argument("--json", action="store_true")
     target_dashboard.set_defaults(func=command_target_dashboard)
-    target_run = target_subparsers.add_parser("run", help="Run an external target bounded preflight.")
-    target_run.add_argument("target_id")
+    target_run = target_subparsers.add_parser("run", help="Run an external target read-only/no-op smoke.")
+    target_run.add_argument("target_id", help=target_id_help)
     target_run.add_argument("--once", action="store_true")
     target_run.set_defaults(func=command_target_run)
 

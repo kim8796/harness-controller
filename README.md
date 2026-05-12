@@ -1,4 +1,4 @@
-# Harness Controller Bundle v1.7.106
+# Harness Controller Bundle v1.7.107
 
 이 디렉토리는 product repo 밖에서 실행하는 external harness controller 배포 번들이다.
 product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는다.
@@ -10,6 +10,7 @@ product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는�
 ./harness target add my-app --repo /path/to/product-repo --branch main
 ./harness target verify my-app
 ./harness target dashboard my-app
+./harness target run my-app --once
 ```
 
 Telegram/Redis owner commands are target-scoped in external mode:
@@ -117,7 +118,7 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `tests/test_harness_export.py`
 - `tests/test_harness_telegram_bridge.py`
 - `tests/test_redis_relay.py`
-- `docs/harness/releases/v1.7.106.md`
+- `docs/harness/releases/v1.7.107.md`
 
 ## Generated Controller Files
 

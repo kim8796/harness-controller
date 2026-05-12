@@ -318,8 +318,9 @@ def test_external_target_add_verify_dashboard_and_run_preflight(monkeypatch, tmp
 
     assert module.main(["target", "run", "demo", "--once"]) == 0
     output = capsys.readouterr().out
-    assert "lane 실행: not started (read-only/no-op smoke only)" in output
-    assert "product repo 변경: no" in output
+    assert "lane 실행: 시작 안 함 (read-only/no-op smoke only)" in output
+    assert "제품 변경 실행: 비활성화" in output
+    assert "product repo 변경: 없음" in output
     assert (controller / "targets" / "demo" / "reports" / "target-run-latest.md").exists()
 
 
@@ -440,9 +441,10 @@ def test_external_target_run_once_read_only_smoke_without_product_mutation(
         env=_git_env(),
     ).stdout
 
-    assert "external target run read-only smoke 완료" in output
-    assert "lane 실행: not started (read-only/no-op smoke only)" in output
-    assert "RootContext-aware autonomy core" in output
+    assert "외부 target read-only smoke 완료" in output
+    assert "대상 ID: `demo`" in output
+    assert "lane 실행: 시작 안 함 (read-only/no-op smoke only)" in output
+    assert "제품 변경 실행: 비활성화" in output
     assert before == after == ""
     assert (controller / "targets" / "demo" / "reports" / "operator-dashboard-latest.md").exists()
     smoke_report = controller / "targets" / "demo" / "reports" / "target-run-latest.md"
@@ -486,7 +488,7 @@ def test_external_target_run_once_blocks_same_target_lock_without_blocking_other
     assert dashboard.read_text(encoding="utf-8") == "original dashboard\n"
     assert module.main(["target", "run", "admin", "--once"]) == 0
     output = capsys.readouterr().out
-    assert "external target run read-only smoke 완료" in output
+    assert "외부 target read-only smoke 완료" in output
     assert "already locked" not in output
     assert lock_path.exists()
     assert not (controller / "targets" / "admin" / "locks" / "target-run.lock").exists()
@@ -542,6 +544,47 @@ def test_external_target_run_once_blocks_branch_mismatch(monkeypatch, tmp_path: 
 
     assert "target-branch-differs" in output
     assert not (product / "runs").exists()
+    assert not (controller / "targets" / "demo" / "locks" / "target-run.lock").exists()
+
+
+def test_external_target_run_once_blocks_detached_head(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.strip()
+    subprocess.run(["git", "checkout", "--detach", head], cwd=product, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.0")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product), "--branch", "main"]) == 0
+    capsys.readouterr()
+
+    assert module.main(["target", "run", "demo", "--once"]) == 2
+    output = capsys.readouterr().out
+    smoke_report = controller / "targets" / "demo" / "reports" / "target-run-latest.md"
+    dashboard = controller / "targets" / "demo" / "reports" / "operator-dashboard-latest.md"
+
+    assert "target-detached-head" in output
+    assert smoke_report.exists()
+    assert "target-detached-head" in smoke_report.read_text(encoding="utf-8")
+    dashboard_body = dashboard.read_text(encoding="utf-8")
+    assert "Result: `needs-attention`" in dashboard_body
+    assert "Target run smoke blockers: `target-detached-head`" in dashboard_body
+    assert not (product / "runs").exists()
+    assert not (product / "reports").exists()
     assert not (controller / "targets" / "demo" / "locks" / "target-run.lock").exists()
 
 

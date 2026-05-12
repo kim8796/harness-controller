@@ -1,5 +1,11 @@
 # Harness Changelog
 
+## 1.7.107 - 2026-05-12
+
+- Clarified `target run --once` CLI/help/dashboard wording so operators see read-only/no-op smoke and product-changing execution as separate states.
+- Added explicit `target-detached-head` blocking for external target run smoke.
+- Added the read-only smoke step to controller clone/use docs and controller bundle README.
+
 ## 1.7.106 - 2026-05-12
 
 - Made `./harness target run <id> --once` succeed as a read-only/no-op smoke when the target is verified and clean.
