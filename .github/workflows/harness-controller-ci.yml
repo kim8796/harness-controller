@@ -1,0 +1,94 @@
+name: Harness Controller CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  starter-smoke:
+    name: Starter smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest ruff
+      - name: Lint focused harness surfaces
+        run: python -m ruff check scripts/harness_cli.py scripts/harness_controller.py scripts/harness_export.py scripts/harness_starter_install.py tests/test_harness_cli.py tests/test_harness_controller.py tests/test_harness_export.py
+      - name: Run focused tests
+        run: python -m pytest tests/test_harness_cli.py tests/test_harness_controller.py tests/test_harness_export.py -q
+      - name: Export source check
+        run: python scripts/harness_export.py --check --controller-bundle "$RUNNER_TEMP/controller-source-check"
+      - name: Controller sanitization and self-test
+        run: |
+          python harness controller export "$RUNNER_TEMP/harness-controller-controller-bundle" --sanitize-report "$RUNNER_TEMP/controller-sanitization-report.json"
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+          temp = Path(os.environ["RUNNER_TEMP"])
+          bundle = temp / "harness-controller-controller-bundle"
+          report = json.loads((temp / "controller-sanitization-report.json").read_text())
+          assert report["ok"], report
+          assert not report["blockers"], report
+          assert not report["controller_surface_mentions"], report
+          assert not report["historical_mentions"], report
+          subprocess.run(["git", "init", "-b", "main"], cwd=bundle, check=True)
+          subprocess.run(
+              [
+                  sys.executable,
+                  "-m",
+                  "pytest",
+                  "tests/test_harness_cli.py",
+                  "tests/test_harness_controller.py",
+                  "tests/test_harness_export.py",
+                  "-q",
+              ],
+              cwd=bundle,
+              check=True,
+          )
+          PY
+      - name: Starter sanitization report
+        run: |
+          python scripts/harness_export.py --starter-bundle "$RUNNER_TEMP/harness-controller-bundle" --sanitize-report "$RUNNER_TEMP/dist-sanitization-report.json"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          report = json.loads(Path(os.environ["RUNNER_TEMP"], "dist-sanitization-report.json").read_text())
+          assert report["ok"], report
+          PY
+      - name: Clean clone/install/upgrade smoke
+        run: |
+          python - <<'PY'
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+          temp = Path(os.environ["RUNNER_TEMP"])
+          bundle = temp / "harness-controller-bundle"
+          project = temp / "harness-smoke-project"
+          env = dict(os.environ)
+          for key in list(env):
+              if key.startswith("GIT_"):
+                  env.pop(key, None)
+          subprocess.run([sys.executable, str(bundle / "harness"), "new", str(project), "--no-input"], check=True, env=env)
+          subprocess.run([sys.executable, "harness", "complete-setup", "--apply"], cwd=project, check=True, env=env)
+          subprocess.run([sys.executable, "harness", "verify", "--loop-ready"], cwd=project, check=True, env=env)
+          subprocess.run([sys.executable, "harness", "upgrade", "--source", str(bundle), "--json"], cwd=project, check=True, env=env)
+          subprocess.run([sys.executable, str(bundle / "harness"), "self", "doctor"], cwd=bundle, check=True, env=env)
+          PY
