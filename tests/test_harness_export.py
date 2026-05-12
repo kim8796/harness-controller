@@ -175,7 +175,7 @@ def test_starter_bundle_excludes_live_state_and_can_create_project(tmp_path: Pat
     assert (bundle / "scripts" / "harness_controller.py").exists()
     assert (bundle / "scripts" / "harness_profiles.py").exists()
     assert not (bundle / ".github" / "workflows" / "harness-controller-ci.yml").exists()
-    assert not (bundle / "tests" / "test_harness_export.py").exists()
+    assert not (bundle / "tests").exists()
     assert (bundle / "scripts" / "harness_autonomy" / "relay.py").exists()
     assert (bundle / "scripts" / "harness_starter_install.py").exists()
     bundle_readme = (bundle / "README.md").read_text(encoding="utf-8")
@@ -292,6 +292,8 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "tests" / "test_harness_cli.py").exists()
     assert (bundle / "tests" / "test_harness_controller.py").exists()
     assert (bundle / "tests" / "test_harness_export.py").exists()
+    assert (bundle / "tests" / "test_harness_telegram_bridge.py").exists()
+    assert (bundle / "tests" / "test_redis_relay.py").exists()
     assert not (bundle / "targets").exists()
     assert not (bundle / ".env").exists()
     assert not (bundle / "runs" / "autonomy" / "control.json").exists()
@@ -300,6 +302,8 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     readme = (bundle / "README.md").read_text(encoding="utf-8")
     assert "Harness Controller Bundle" in readme
     assert "./harness controller doctor" in readme
+    assert "HARNESS_RELAY_TARGET_IDS=my-app" in readme
+    assert "targets/my-app/operator-inbox" in readme
     assert "Harness Controller Adapter" in (bundle / "AGENTS.md").read_text(encoding="utf-8")
     product_marker = "MINI" + "APP"
     assert product_marker not in (bundle / "docs" / "harness" / "GOALS.md").read_text(encoding="utf-8")

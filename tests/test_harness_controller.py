@@ -5,6 +5,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from conftest import load_script_module
 
 
@@ -41,6 +43,15 @@ def test_root_context_embedded_preserves_existing_root_semantics(tmp_path: Path)
     assert paths.root_context() == context
     assert paths.state_root == root.resolve()
     assert paths.operator_inbox == root.resolve() / "operator-inbox"
+
+
+def test_external_target_id_rejects_operator_reserved_words() -> None:
+    module = _load_module()
+
+    with pytest.raises(module.ControllerError, match="reserved"):
+        module.validate_target_id("latest")
+
+    assert module.StatePaths.embedded(Path("/tmp/embedded")).target_id == "embedded"
 
 
 def test_state_paths_external_resolves_target_scoped_paths(tmp_path: Path) -> None:

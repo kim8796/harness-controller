@@ -1,8 +1,15 @@
 # Harness Framework Version
 
-- Current Version: 1.7.104
+- Current Version: 1.7.105
 - Release Date: 2026-05-12
 - Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + on-demand export output.
+
+## What Changed In 1.7.105
+
+- Routed signed Telegram/Redis `target_id` owner instructions into external controller sidecars at `targets/<id>/operator-inbox`.
+- Added explicit target-aware product-bot relay grammar using `HARNESS_RELAY_TARGET_IDS`; unknown or missing targets fail closed before enqueue when that allowlist is configured.
+- Made relay target ids reject invalid input instead of normalizing it into a different target name.
+- Expanded controller bundle CI coverage to include target-aware relay and Telegram bridge tests while keeping `./harness target run <id> --once` fail-closed before product lane execution.
 
 ## What Changed In 1.7.104
 

@@ -169,7 +169,7 @@ def render_harness_owner_help() -> str:
         [
             "하네스 Owner 명령 도움말",
             "",
-            "`/harness`는 하네스 운영 지시의 canonical namespace입니다. Telegram bridge와 product bot은 지시를 직접 실행하지 않고, state-changing 명령을 `runs/autonomy/inbox/`에 Owner instruction으로 남깁니다.",
+            "`/harness`는 하네스 운영 지시의 canonical namespace입니다. Telegram bridge와 product bot은 지시를 직접 실행하지 않고 Owner instruction만 남깁니다. embedded mode는 `runs/autonomy/inbox/`, external target mode는 `targets/<id>/operator-inbox/`를 사용합니다.",
             "",
             "읽기 전용",
             "- `/harness help`: 이 도움말을 표시합니다.",
@@ -177,7 +177,9 @@ def render_harness_owner_help() -> str:
             "",
             "Owner instruction",
             "- `/harness note <메모>`: 다음 planner safe point에 전달할 메모를 남깁니다.",
+            "- `/harness note <target-id> <메모>`: external controller target에 메모를 남깁니다.",
             "- `/harness answer <대상> <답변>`: 최신 decision packet 또는 지정 대상에 답변합니다.",
+            "- `/harness answer <target-id> <대상> <답변>`: external controller target의 decision packet에 답변합니다.",
             "- `/harness pause <이유>`: 다음 safe point에서 pause하도록 지시합니다.",
             "- `/harness resume <이유>`: 다음 safe point에서 resume을 검토하도록 지시합니다.",
             "- `/harness retry <대상> <이유>`: 같은 backlog 또는 지정 대상을 재시도하도록 지시합니다.",
@@ -193,7 +195,9 @@ def render_harness_owner_help() -> str:
             "- state-changing 명령은 즉시 실행이 아니라 inbox 기록입니다.",
             "",
             "답장 예시",
+            "- `/harness note my-app latest 다음 safe point에서 이 방향으로 진행해`",
             "- `/harness answer latest salvage 진행해. 코드 변경 없이 evidence만 정리해`",
+            "- `/harness answer my-app latest salvage 진행해. 코드 변경 없이 evidence만 정리해`",
             "- `/harness retry latest 같은 오류면 Doctor 말고 manual-review로 멈춰`",
             "- `/harness veto state::repo-root::run::goal::GOAL1::goal-status-change`",
         ]
@@ -342,8 +346,13 @@ def parse_harness_owner_instruction_packet(text: str) -> dict[str, Any] | None:
     }
 
 
-def _existing_owner_instruction_for_update(root: Path, update_id: int) -> Path | None:
-    inbox_root = inbox_dir_path(root)
+def _existing_owner_instruction_for_update(
+    root: Path,
+    update_id: int,
+    *,
+    inbox_path: Path = DEFAULT_INBOX_PATH,
+) -> Path | None:
+    inbox_root = inbox_dir_path(root, inbox_path)
     if not inbox_root.exists():
         return None
     pattern = f"Telegram-Update-ID: {int(update_id)}"
@@ -371,6 +380,7 @@ def write_harness_owner_instruction(
     actor_hash: str | None = None,
     chat_hash: str | None = None,
     title_prefix: str = "harness-owner",
+    inbox_path: Path = DEFAULT_INBOX_PATH,
 ) -> tuple[Path, bool]:
     if str(parsed.get("read_only", "")).lower() == "true":
         raise AutonomyError("read-only harness owner command does not create inbox messages")
@@ -378,7 +388,7 @@ def write_harness_owner_instruction(
     if validation_error:
         raise AutonomyError(validation_error)
     if update_id is not None:
-        existing = _existing_owner_instruction_for_update(root, int(update_id))
+        existing = _existing_owner_instruction_for_update(root, int(update_id), inbox_path=inbox_path)
         if existing is not None:
             return existing, False
     action = str(parsed.get("action", "owner")).strip() or "owner"
@@ -401,6 +411,7 @@ def write_harness_owner_instruction(
             message=packet,
             title="-".join(title_parts),
             source=source,
+            inbox_path=inbox_path,
         ),
         True,
     )

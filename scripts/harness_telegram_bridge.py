@@ -68,10 +68,12 @@ except Exception:  # pragma: no cover - bridge fallback when package imports are
         message: str,
         title: str | None = None,
         source: str = "telegram-operator",
+        inbox_path: Path = Path("runs/autonomy/inbox"),
     ) -> Path:
+        _ = source
         created_at = datetime.now().strftime("%Y%m%d-%H%M%S")
         stem = re.sub(r"[^A-Za-z0-9._-]+", "-", title or "telegram-operator").strip("-") or "telegram-operator"
-        path = root / "runs" / "autonomy" / "inbox" / f"{created_at}-{stem}.md"
+        path = root / inbox_path / f"{created_at}-{stem}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(message.strip() + "\n", encoding="utf-8")
         return path
@@ -146,6 +148,7 @@ except Exception:  # pragma: no cover - bridge fallback when package imports are
         actor_id: str | int | None = None,
         chat_id: str | int | None = None,
         title_prefix: str = "harness-owner",
+        inbox_path: Path = Path("runs/autonomy/inbox"),
     ) -> tuple[Path, bool]:
         path = write_inbox_message(
             root,
@@ -159,6 +162,7 @@ except Exception:  # pragma: no cover - bridge fallback when package imports are
             ),
             title=f"{title_prefix}-{parsed.get('action', 'owner')}",
             source=source,
+            inbox_path=inbox_path,
         )
         return path, True
 
@@ -229,6 +233,7 @@ RELAY_TTL_SECONDS_ENV = "HARNESS_RELAY_TTL_SECONDS"
 RELAY_SIGNING_KEY_ENV = "HARNESS_RELAY_SIGNING_KEY"
 DEFAULT_RELAY_REPO_ID = "repo-root"
 DEFAULT_RELAY_TTL_SECONDS = 7 * 24 * 60 * 60
+TARGET_OPERATOR_INBOX_PATH = Path("operator-inbox")
 
 
 def _sha256_file(path: Path) -> str:
@@ -830,6 +835,84 @@ def _relay_operator_user_ids() -> tuple[int, ...]:
     return tuple(sorted(operator_ids))
 
 
+def _controller_target_ids(repo_root: Path) -> tuple[frozenset[str], str | None]:
+    targets_path = repo_root / "targets"
+    if not targets_path.exists():
+        return frozenset(), None
+    try:
+        from harness_controller import (
+            ControllerError,
+            TARGET_CONFIG_NAME,
+            load_target,
+            validate_targets_root,
+        )
+    except Exception as exc:
+        return frozenset(), f"target registry unavailable: {exc.__class__.__name__}"
+    try:
+        root = validate_targets_root(repo_root)
+    except ControllerError as exc:
+        return frozenset(), f"target registry unavailable: {sanitize_for_outbox(str(exc))}"
+    if not root.exists():
+        return frozenset(), None
+    target_dirs = [path for path in sorted(root.iterdir()) if path.is_dir()]
+    ids: set[str] = set()
+    invalid: list[str] = []
+    for target_dir in target_dirs:
+        config = target_dir / TARGET_CONFIG_NAME
+        if not config.exists():
+            invalid.append(target_dir.name)
+            continue
+        try:
+            ids.add(load_target(repo_root, target_dir.name).target_id)
+        except ControllerError as exc:
+            invalid.append(f"{target_dir.name}: {sanitize_for_outbox(str(exc))}")
+    if invalid:
+        return frozenset(), "target registry invalid: " + ", ".join(invalid)
+    return frozenset(ids), None
+
+
+def _apply_known_target_to_parsed(
+    parsed: Mapping[str, str],
+    *,
+    known_targets: frozenset[str],
+) -> tuple[dict[str, str], str | None]:
+    parsed_for_write = dict(parsed)
+    if not known_targets:
+        return parsed_for_write, None
+    action = str(parsed_for_write.get("action", "")).strip()
+    if action not in {"note", "veto", "pause", "resume", "retry", "answer", "salvage"}:
+        return parsed_for_write, None
+    argument = str(parsed_for_write.get("argument", "")).strip()
+    first, separator, rest = argument.partition(" ")
+    if not first or first not in known_targets:
+        known = ", ".join(sorted(known_targets))
+        return parsed_for_write, f"target id required or unknown for external command (known: {known})"
+    parsed_for_write["target_id"] = first
+    parsed_for_write["argument"] = rest.strip() if separator else ""
+    return parsed_for_write, None
+
+
+def _owner_instruction_write_context(
+    repo_root: Path,
+    target_id: str | None,
+) -> tuple[Path, Path | None]:
+    if not target_id:
+        return repo_root, None
+    try:
+        from harness_controller import ControllerError, load_target, validate_sidecar_integrity
+    except Exception as exc:  # pragma: no cover - controller module unavailable in minimal bridge fallback
+        raise ValueError(f"target registry unavailable: {exc.__class__.__name__}") from exc
+    try:
+        record = load_target(repo_root, target_id)
+        state_paths = record.state_paths(repo_root)
+        missing = validate_sidecar_integrity(state_paths.state_root)
+    except ControllerError as exc:
+        raise ValueError(str(exc)) from exc
+    if missing:
+        raise ValueError("target sidecar incomplete: " + ", ".join(missing))
+    return state_paths.state_root, TARGET_OPERATOR_INBOX_PATH
+
+
 def _build_relay_store_from_env() -> Any | None:
     url = os.environ.get("UPSTASH_REDIS_REST_URL", "").strip()
     token = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "").strip()
@@ -863,11 +946,12 @@ def _materialize_relay_envelope(
         operator_user_ids=operator_user_ids,
     )
     parsed_for_write = parsed_command_from_relay_envelope(validated)
+    write_root, inbox_relative_path = _owner_instruction_write_context(repo_root, target_id)
     if parsed_for_write["action"] == "veto":
         requested_proposal_parts = parsed_for_write["argument"].strip().split(maxsplit=1)
         if not requested_proposal_parts:
             raise ValueError("`/harness veto` requires a proposal UID")
-        proposal_uid, resolution_error = _resolve_state_veto_uid(repo_root, requested_proposal_parts[0])
+        proposal_uid, resolution_error = _resolve_state_veto_uid(write_root, requested_proposal_parts[0])
         if proposal_uid is None:
             raise ValueError(f"veto not queued: {resolution_error or 'unresolved proposal'}")
         parsed_for_write["proposal_uid"] = proposal_uid
@@ -876,8 +960,8 @@ def _materialize_relay_envelope(
         raise ValueError(validation_error)
     update_id_raw = validated.get("telegram_update_id")
     update_id = int(update_id_raw) if update_id_raw is not None else None
-    inbox_path, created = write_harness_owner_instruction(
-        repo_root,
+    materialized_path, created = write_harness_owner_instruction(
+        write_root,
         parsed_for_write,
         source="telegram-redis-relay",
         update_id=update_id,
@@ -885,12 +969,13 @@ def _materialize_relay_envelope(
         actor_hash=validated.get("actor_hash"),
         chat_hash=validated.get("chat_hash"),
         title_prefix="telegram-relay-owner",
+        **({"inbox_path": inbox_relative_path} if inbox_relative_path is not None else {}),
     )
     return {
         "action": "inbox" if created else "duplicate",
         "command": parsed_for_write.get("command"),
         "target_id": validated.get("target_id"),
-        "path": _relative_to_repo(repo_root, inbox_path),
+        "path": _relative_to_repo(repo_root, materialized_path),
         "idempotency_key": validated.get("idempotency_key"),
     }
 
@@ -1124,12 +1209,22 @@ def handle_inbound_update(
         return {"update_id": update_id, "action": "ignored", "reason": "operator allowlist missing"}
     if from_user_id is None or from_user_id not in operator_ids:
         return {"update_id": update_id, "action": "ignored", "reason": "non-operator user"}
-    parsed_for_write = dict(parsed)
+    known_targets, registry_error = _controller_target_ids(repo_root)
+    if registry_error:
+        return {"update_id": update_id, "action": "ignored", "reason": registry_error}
+    parsed_for_write, target_error = _apply_known_target_to_parsed(
+        parsed,
+        known_targets=known_targets,
+    )
+    if target_error:
+        return {"update_id": update_id, "action": "ignored", "reason": target_error}
+    target_id = parsed_for_write.get("target_id") or None
+    write_root, inbox_relative_path = _owner_instruction_write_context(repo_root, target_id)
     if action == "veto":
         requested_proposal_parts = str(parsed_for_write.get("argument", "")).strip().split(maxsplit=1)
         if not requested_proposal_parts:
             return {"update_id": update_id, "action": "ignored", "reason": "`/harness veto` requires a proposal UID"}
-        proposal_uid, resolution_error = _resolve_state_veto_uid(repo_root, requested_proposal_parts[0])
+        proposal_uid, resolution_error = _resolve_state_veto_uid(write_root, requested_proposal_parts[0])
         if proposal_uid is None:
             return {
                 "update_id": update_id,
@@ -1141,19 +1236,31 @@ def handle_inbound_update(
     if validation_error:
         return {"update_id": update_id, "action": "ignored", "reason": validation_error}
     inbox_path, created = write_harness_owner_instruction(
-        repo_root,
+        write_root,
         parsed_for_write,
         source="telegram-operator",
         update_id=update_id,
         message_id=message.get("message_id"),
-        actor_id=from_user_id,
-        chat_id=chat_id,
+        actor_id=None if target_id else from_user_id,
+        chat_id=None if target_id else chat_id,
+        actor_hash=(
+            f"sha256:{hashlib.sha256(str(from_user_id).encode('utf-8')).hexdigest()[:16]}"
+            if target_id and from_user_id is not None
+            else None
+        ),
+        chat_hash=(
+            f"sha256:{hashlib.sha256(str(chat_id).encode('utf-8')).hexdigest()[:16]}"
+            if target_id
+            else None
+        ),
         title_prefix="telegram-owner",
+        **({"inbox_path": inbox_relative_path} if inbox_relative_path is not None else {}),
     )
     return {
         "update_id": update_id,
         "action": "inbox" if created else "duplicate",
         "command": parsed_for_write.get("command"),
+        "target_id": target_id,
         "path": _relative_to_repo(repo_root, inbox_path),
     }
 

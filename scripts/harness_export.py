@@ -102,6 +102,8 @@ STATIC_EXPORT_SOURCE_PATHS = (
     Path("tests/test_harness_cli.py"),
     Path("tests/test_harness_controller.py"),
     Path("tests/test_harness_export.py"),
+    Path("tests/test_harness_telegram_bridge.py"),
+    Path("tests/test_redis_relay.py"),
 )
 GENERATED_EXPORT_TEMPLATE_PATHS = (
     Path("CURRENT_STATE.md"),
@@ -136,6 +138,8 @@ STARTER_CONTROLLER_ONLY_SOURCE_PATHS = frozenset(
         Path("tests/test_harness_cli.py"),
         Path("tests/test_harness_controller.py"),
         Path("tests/test_harness_export.py"),
+        Path("tests/test_harness_telegram_bridge.py"),
+        Path("tests/test_redis_relay.py"),
     }
 )
 CONTROLLER_TEMPLATE_OVERRIDE_PATHS = frozenset(
@@ -164,6 +168,7 @@ SENSITIVE_PATH_PREFIXES = (
     Path("runs/autonomy"),
     Path("reports/harness-autonomy"),
     Path("exports"),
+    Path("tests"),
 )
 CONTROLLER_FORBIDDEN_PATH_PREFIXES = (
     Path("targets"),
@@ -911,6 +916,12 @@ def export_controller_bundle(root: Path, output_dir: Path, version: str | None =
                 "./harness target verify my-app",
                 "./harness target dashboard my-app",
                 "```",
+                "",
+                "Telegram/Redis owner commands are target-scoped in external mode:",
+                "",
+                "- Set `HARNESS_RELAY_TARGET_IDS=my-app` in the product bot/runtime that enqueues relay commands.",
+                "- Use `/harness note my-app ...` or `/harness answer my-app ...` so the signed target id reaches this controller.",
+                "- The controller drains to `targets/my-app/operator-inbox`; `target run --once` still fails closed before product lane execution.",
                 "",
                 "## Excluded Live State",
                 "",

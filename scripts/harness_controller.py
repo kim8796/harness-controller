@@ -13,6 +13,7 @@ from typing import Mapping, Sequence
 
 
 TARGET_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+RESERVED_TARGET_IDS = frozenset({"latest", "default", "all", "embedded"})
 TARGETS_DIR = Path("targets")
 TARGET_CONFIG_NAME = "target.json"
 TARGET_RUN_LOCK_NAME = "target-run.lock"
@@ -104,7 +105,7 @@ class StatePaths:
     def embedded(cls, root: Path, *, target_id: str = "embedded") -> "StatePaths":
         resolved = root.resolve()
         return cls(
-            target_id=validate_target_id(target_id),
+            target_id=validate_target_id(target_id, allow_reserved=True),
             controller_root=resolved,
             target_root=resolved,
             state_root=resolved,
@@ -292,10 +293,10 @@ def git_toplevel(path: Path) -> Path:
     return Path(result.stdout.strip()).resolve()
 
 
-def validate_target_id(target_id: str) -> str:
+def validate_target_id(target_id: str, *, allow_reserved: bool = False) -> str:
     if not TARGET_ID_PATTERN.fullmatch(target_id):
         raise ControllerError("target id must match [A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
-    if target_id in {".", ".."}:
+    if target_id in {".", ".."} or (target_id in RESERVED_TARGET_IDS and not allow_reserved):
         raise ControllerError("target id is reserved")
     return target_id
 

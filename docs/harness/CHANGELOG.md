@@ -1,5 +1,13 @@
 # Harness Changelog
 
+## 1.7.105 - 2026-05-12
+
+- Routed target-scoped Telegram/Redis owner instructions to `targets/<id>/operator-inbox` after controller target registry and sidecar validation.
+- Added `HARNESS_RELAY_TARGET_IDS` for product-bot multi-target allowlisting and Korean target-aware relay acknowledgements.
+- Changed relay target ids to reject invalid values instead of normalizing them.
+- Added controller CI/export coverage for target-aware relay and Telegram bridge tests.
+- Kept external target run execution fail-closed; this release changes routing only.
+
 ## 1.7.104 - 2026-05-12
 
 - Added target-scoped run locks for external controller preflight under `targets/<id>/locks/target-run.lock`.

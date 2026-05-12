@@ -20,6 +20,8 @@ MAX_RELAY_ARGUMENT_CHARS = 4000
 MAX_RELAY_PAYLOAD_CHARS = 12000
 MIN_RELAY_SIGNING_KEY_CHARS = 16
 _REPO_ID_SAFE_RE = re.compile(r"[^A-Za-z0-9._:-]+")
+_TARGET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_RESERVED_TARGET_IDS = frozenset({"latest", "default", "all", "embedded"})
 _SIGNATURE_PREFIX = "hmac-sha256:"
 _HASH_PREFIX = "sha256:"
 _IDENTIFIER_HASH_PREFIX = "hmac-sha256:"
@@ -64,8 +66,9 @@ def normalize_relay_target_id(value: object | None) -> str | None:
     raw = str(value or "").strip()
     if not raw:
         return None
-    normalized = _REPO_ID_SAFE_RE.sub("-", raw).strip("-")
-    return normalized or None
+    if not _TARGET_ID_RE.fullmatch(raw) or raw in _RESERVED_TARGET_IDS:
+        raise RelayEnvelopeError("invalid target_id")
+    return raw
 
 
 def owner_relay_scope_key(repo_id: object | None, target_id: object | None = None) -> str:
