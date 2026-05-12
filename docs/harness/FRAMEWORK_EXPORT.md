@@ -12,7 +12,7 @@
 
 ## Portable Starter Tooling
 
-`v1.7.97` 부터는 문서 복사형 starter 외에 repo-local/bundle-local `./harness` one-command CLI 를 제공한다. 긴 Python 명령은 세부 구현 경로로 남기고, 새 프로젝트 운영자는 먼저 `./harness new`, `./harness init`, `./harness complete-setup`, `./harness verify --loop-ready`, `./harness env check`, `./harness export`, `./harness upgrade` 를 쓴다. `v1.7.98` 부터는 product repo 에 harness runtime 파일을 커밋하지 않는 external controller preview 도 제공한다. `v1.7.99` 부터는 private controller repo 를 재현 가능하게 seed 하는 `./harness controller export <dir>` 를 제공하고, `v1.7.100` 부터는 controller bundle 이 자체 focused CI tests 를 함께 포함한다. `v1.7.101` 부터 이 focused tests 는 clean hosted runner 에서 git identity 없이도 통과하도록 자체 test identity 를 쓴다.
+`v1.7.97` 부터는 문서 복사형 starter 외에 repo-local/bundle-local `./harness` one-command CLI 를 제공한다. 긴 Python 명령은 세부 구현 경로로 남기고, 새 프로젝트 운영자는 먼저 `./harness new`, `./harness init`, `./harness complete-setup`, `./harness verify --loop-ready`, `./harness env check`, `./harness export`, `./harness upgrade` 를 쓴다. `v1.7.98` 부터는 product repo 에 harness runtime 파일을 커밋하지 않는 external controller preview 도 제공한다. `v1.7.99` 부터는 private controller repo 를 재현 가능하게 seed 하는 `./harness controller export <dir>` 를 제공하고, `v1.7.100` 부터는 controller bundle 이 자체 focused CI tests 를 함께 포함한다. `v1.7.101` 부터 이 focused tests 는 clean hosted runner 에서 git identity 없이도 통과하도록 자체 test identity 를 쓰며, `v1.7.102` 부터 controller workflow 는 Node 24-compatible official actions 를 쓴다.
 
 - `harness` 와 `scripts/harness_cli.py` 는 thin dispatcher 다. installer, wizard, export, status, launcher 로직을 새로 복제하지 않고 기존 script 를 호출한다.
 - `scripts/harness_controller.py` 는 external controller preview 의 `RootContext`, target registry, sidecar verification, read-only dashboard helper 를 맡는다. 이 helper 는 backlog/GOALS/run parser 를 새로 만들지 않는다.

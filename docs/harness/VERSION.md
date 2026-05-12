@@ -1,8 +1,13 @@
 # Harness Framework Version
 
-- Current Version: 1.7.101
+- Current Version: 1.7.102
 - Release Date: 2026-05-12
 - Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + on-demand export output.
+
+## What Changed In 1.7.102
+
+- Moved the controller GitHub Actions workflow to Node 24-compatible `actions/checkout@v6` and `actions/setup-python@v6`.
+- Kept this as a CI-only baseline before RootContext, multi-target execution, or Telegram target routing changes.
 
 ## What Changed In 1.7.101
 

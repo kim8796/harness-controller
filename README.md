@@ -1,4 +1,4 @@
-# Harness Controller Bundle v1.7.101
+# Harness Controller Bundle v1.7.102
 
 이 디렉토리는 product repo 밖에서 실행하는 external harness controller 배포 번들이다.
 product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는다.
@@ -109,7 +109,7 @@ product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는�
 - `tests/test_harness_cli.py`
 - `tests/test_harness_controller.py`
 - `tests/test_harness_export.py`
-- `docs/harness/releases/v1.7.101.md`
+- `docs/harness/releases/v1.7.102.md`
 
 ## Generated Controller Files
 

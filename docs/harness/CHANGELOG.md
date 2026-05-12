@@ -1,5 +1,10 @@
 # Harness Changelog
 
+## 1.7.102 - 2026-05-12
+
+- Updated the controller GitHub Actions workflow to Node 24-compatible `actions/checkout@v6` and `actions/setup-python@v6`.
+- Kept the change CI-only so external target execution, Telegram routing, and RootContext behavior remain unchanged.
+
 ## 1.7.101 - 2026-05-12
 
 - Made controller focused tests self-contained in clean CI runners by supplying local git author/committer identity for temporary commits.
