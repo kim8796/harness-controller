@@ -32,11 +32,73 @@ def test_root_context_embedded_preserves_existing_root_semantics(tmp_path: Path)
     root.mkdir()
 
     context = module.RootContext.embedded(root)
+    paths = module.StatePaths.embedded(root)
 
     assert context.mode == "embedded"
     assert context.controller_root == root.resolve()
     assert context.target_root == root.resolve()
     assert context.state_root == root.resolve()
+    assert paths.root_context() == context
+    assert paths.state_root == root.resolve()
+    assert paths.operator_inbox == root.resolve() / "operator-inbox"
+
+
+def test_state_paths_external_resolves_target_scoped_paths(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_git_repo(product)
+
+    record = module.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.0",
+    )
+    paths = record.state_paths(controller)
+    payload = json.loads((controller / "targets" / "demo" / "target.json").read_text(encoding="utf-8"))
+
+    assert paths.target_id == "demo"
+    assert paths.controller_root == controller.resolve()
+    assert paths.target_root == product.resolve()
+    assert paths.state_root == controller.resolve() / "targets" / "demo"
+    assert paths.target_config == controller.resolve() / "targets" / "demo" / "target.json"
+    assert paths.operator_inbox == controller.resolve() / "targets" / "demo" / "operator-inbox"
+    assert paths.operator_outbox == controller.resolve() / "targets" / "demo" / "operator-outbox"
+    assert paths.dashboard == controller.resolve() / "targets" / "demo" / "reports" / "operator-dashboard-latest.md"
+    assert payload["state_paths"]["operator_inbox"] == paths.operator_inbox.as_posix()
+    assert payload["root_context"] == paths.root_context().to_json()
+
+
+def test_state_paths_keep_targets_isolated(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product_a = tmp_path / "product-a"
+    product_b = tmp_path / "product-b"
+    controller.mkdir()
+    _init_git_repo(product_a)
+    _init_git_repo(product_b)
+
+    record_a = module.add_target(
+        controller_root=controller,
+        target_id="app",
+        repo=product_a,
+        branch="main",
+        controller_version="1.8.0",
+    )
+    record_b = module.add_target(
+        controller_root=controller,
+        target_id="admin",
+        repo=product_b,
+        branch="main",
+        controller_version="1.8.0",
+    )
+
+    assert record_a.state_paths(controller).operator_inbox == controller.resolve() / "targets" / "app" / "operator-inbox"
+    assert record_b.state_paths(controller).operator_inbox == controller.resolve() / "targets" / "admin" / "operator-inbox"
+    assert record_a.state_paths(controller).operator_inbox != record_b.state_paths(controller).operator_inbox
 
 
 def test_add_target_creates_controller_sidecar_without_product_state(tmp_path: Path) -> None:
@@ -237,6 +299,32 @@ def test_load_target_rejects_tampered_sidecar_state_root(tmp_path: Path) -> None
         assert "state_root mismatch" in str(exc)
     else:
         raise AssertionError("tampered state_root was accepted")
+
+
+def test_load_target_rejects_tampered_operator_inbox_path(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_git_repo(product)
+    module.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.0",
+    )
+    config = controller / "targets" / "demo" / "target.json"
+    payload = json.loads(config.read_text(encoding="utf-8"))
+    payload["state_paths"]["operator_inbox"] = str(controller / "targets" / "other" / "operator-inbox")
+    config.write_text(json.dumps(payload), encoding="utf-8")
+
+    try:
+        module.load_target(controller, "demo")
+    except module.ControllerError as exc:
+        assert "operator_inbox mismatch" in str(exc)
+    else:
+        raise AssertionError("tampered operator_inbox was accepted")
 
 
 def test_verify_target_reports_missing_registered_repo_without_crash(tmp_path: Path) -> None:

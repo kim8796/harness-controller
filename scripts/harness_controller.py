@@ -82,6 +82,108 @@ class RootContext:
 
 
 @dataclass(frozen=True)
+class StatePaths:
+    target_id: str
+    controller_root: Path
+    target_root: Path
+    state_root: Path
+    mode: str
+
+    @classmethod
+    def embedded(cls, root: Path, *, target_id: str = "embedded") -> "StatePaths":
+        resolved = root.resolve()
+        return cls(
+            target_id=validate_target_id(target_id),
+            controller_root=resolved,
+            target_root=resolved,
+            state_root=resolved,
+            mode="embedded",
+        )
+
+    @classmethod
+    def external(
+        cls,
+        *,
+        controller_root: Path,
+        target_id: str,
+        target_root: Path,
+        state_root: Path | None = None,
+    ) -> "StatePaths":
+        resolved_id = validate_target_id(target_id)
+        resolved_controller = controller_root.resolve()
+        resolved_target = target_root.resolve()
+        expected_state, _config_path = _validate_sidecar_paths(resolved_controller, resolved_id)
+        resolved_state = (state_root or expected_state).resolve()
+        if resolved_state != expected_state.resolve():
+            raise ControllerError("state root must match controller target sidecar")
+        if resolved_state.exists():
+            validate_sidecar_integrity(resolved_state)
+        _validate_root_boundary(
+            controller_root=resolved_controller,
+            target_root=resolved_target,
+            state_root=resolved_state,
+        )
+        return cls(
+            target_id=resolved_id,
+            controller_root=resolved_controller,
+            target_root=resolved_target,
+            state_root=resolved_state,
+            mode="external",
+        )
+
+    @property
+    def target_config(self) -> Path:
+        return self.state_root / TARGET_CONFIG_NAME
+
+    @property
+    def reports_dir(self) -> Path:
+        return self.state_root / "reports"
+
+    @property
+    def dashboard(self) -> Path:
+        return self.reports_dir / "operator-dashboard-latest.md"
+
+    @property
+    def operator_inbox(self) -> Path:
+        return self.state_root / "operator-inbox"
+
+    @property
+    def operator_outbox(self) -> Path:
+        return self.state_root / "operator-outbox"
+
+    @property
+    def state_dir(self) -> Path:
+        return self.state_root / "state"
+
+    @property
+    def locks_dir(self) -> Path:
+        return self.state_root / "locks"
+
+    def root_context(self) -> RootContext:
+        if self.mode == "embedded":
+            return RootContext.embedded(self.target_root)
+        return RootContext.external(
+            controller_root=self.controller_root,
+            target_root=self.target_root,
+            state_root=self.state_root,
+        )
+
+    def to_json(self) -> dict[str, str]:
+        return {
+            "target_id": self.target_id,
+            "controller_root": self.controller_root.as_posix(),
+            "target_root": self.target_root.as_posix(),
+            "state_root": self.state_root.as_posix(),
+            "operator_inbox": self.operator_inbox.as_posix(),
+            "operator_outbox": self.operator_outbox.as_posix(),
+            "reports": self.reports_dir.as_posix(),
+            "locks": self.locks_dir.as_posix(),
+            "state": self.state_dir.as_posix(),
+            "mode": self.mode,
+        }
+
+
+@dataclass(frozen=True)
 class TargetRecord:
     target_id: str
     repo: Path
@@ -92,14 +194,19 @@ class TargetRecord:
     updated_at: str
     profile: str = "telegram"
 
-    def root_context(self, controller_root: Path) -> RootContext:
-        return RootContext.external(
+    def state_paths(self, controller_root: Path) -> StatePaths:
+        return StatePaths.external(
             controller_root=controller_root,
+            target_id=self.target_id,
             target_root=self.repo,
             state_root=self.state_root,
         )
 
+    def root_context(self, controller_root: Path) -> RootContext:
+        return self.state_paths(controller_root).root_context()
+
     def to_json(self, controller_root: Path) -> dict[str, object]:
+        state_paths = self.state_paths(controller_root)
         return {
             "schema_version": 1,
             "target_id": self.target_id,
@@ -111,6 +218,7 @@ class TargetRecord:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "root_context": self.root_context(controller_root).to_json(),
+            "state_paths": state_paths.to_json(),
         }
 
     @classmethod
@@ -118,21 +226,25 @@ class TargetRecord:
         target_id = str(payload["target_id"])
         if target_id != expected_target_id:
             raise ControllerError("target registry id mismatch")
-        expected_state_root = target_state_root(controller_root, expected_target_id).resolve()
-        stored_state_root = Path(str(payload["state_root"])).resolve()
-        if stored_state_root != expected_state_root:
-            raise ControllerError("target registry state_root mismatch")
         repo = Path(str(payload["repo"])).resolve()
-        _validate_root_boundary(
+        state_paths = StatePaths.external(
             controller_root=controller_root,
+            target_id=expected_target_id,
             target_root=repo,
-            state_root=expected_state_root,
         )
+        stored_state_root = Path(str(payload["state_root"])).resolve()
+        if stored_state_root != state_paths.state_root:
+            raise ControllerError("target registry state_root mismatch")
+        stored_paths = payload.get("state_paths")
+        if isinstance(stored_paths, Mapping):
+            stored_operator_inbox = stored_paths.get("operator_inbox")
+            if stored_operator_inbox and Path(str(stored_operator_inbox)).resolve() != state_paths.operator_inbox:
+                raise ControllerError("target registry operator_inbox mismatch")
         return cls(
             target_id=target_id,
             repo=repo,
             branch=str(payload.get("branch") or "main"),
-            state_root=expected_state_root,
+            state_root=state_paths.state_root,
             controller_version=str(payload.get("controller_version") or "unknown"),
             created_at=str(payload.get("created_at") or ""),
             updated_at=str(payload.get("updated_at") or ""),
@@ -185,8 +297,14 @@ def target_state_root(controller_root: Path, target_id: str) -> Path:
     return targets_root(controller_root) / validate_target_id(target_id)
 
 
-def target_config_path(controller_root: Path, target_id: str) -> Path:
-    return target_state_root(controller_root, target_id) / TARGET_CONFIG_NAME
+def resolve_external_state_paths(*, controller_root: Path, target_id: str, target_root: Path) -> StatePaths:
+    state_root, _config_path = _validate_sidecar_paths(controller_root, target_id)
+    return StatePaths.external(
+        controller_root=controller_root,
+        target_id=target_id,
+        target_root=target_root,
+        state_root=state_root,
+    )
 
 
 def ensure_sidecar_dirs(state_root: Path) -> None:
@@ -349,12 +467,13 @@ def add_target(
 ) -> TargetRecord:
     resolved_id = validate_target_id(target_id)
     target_repo = git_toplevel(repo.resolve())
-    state_root, config_path = _validate_sidecar_paths(controller_root, resolved_id)
-    _validate_root_boundary(
+    state_paths = resolve_external_state_paths(
         controller_root=controller_root,
+        target_id=resolved_id,
         target_root=target_repo,
-        state_root=state_root,
     )
+    state_root = state_paths.state_root
+    config_path = state_paths.target_config
     if config_path.exists() and not force:
         raise ControllerError(f"target already exists: {resolved_id}")
     blockers = _target_preflight_blockers(target_repo)
@@ -478,10 +597,11 @@ def verify_target(record: TargetRecord) -> dict[str, object]:
 
 
 def write_dashboard(*, controller_root: Path, record: TargetRecord, verification: Mapping[str, object]) -> Path:
-    validate_sidecar_integrity(record.state_root)
-    report_dir = record.state_root / "reports"
+    state_paths = record.state_paths(controller_root)
+    validate_sidecar_integrity(state_paths.state_root)
+    report_dir = state_paths.reports_dir
     report_dir.mkdir(parents=True, exist_ok=True)
-    report = report_dir / "operator-dashboard-latest.md"
+    report = state_paths.dashboard
     blockers = verification.get("blockers") or []
     warnings = verification.get("warnings") or []
     text = "\n".join(
@@ -490,8 +610,8 @@ def write_dashboard(*, controller_root: Path, record: TargetRecord, verification
             "",
             f"- Target: `{record.target_id}`",
             f"- Product repo: `{record.repo.as_posix()}`",
-            f"- Controller root: `{controller_root.resolve().as_posix()}`",
-            f"- State root: `{record.state_root.as_posix()}`",
+            f"- Controller root: `{state_paths.controller_root.as_posix()}`",
+            f"- State root: `{state_paths.state_root.as_posix()}`",
             f"- Result: `{'ready' if verification.get('ok') else 'needs-attention'}`",
             f"- Blockers: `{', '.join(str(item) for item in blockers) if blockers else 'none'}`",
             f"- Warnings: `{', '.join(str(item) for item in warnings) if warnings else 'none'}`",
@@ -501,7 +621,7 @@ def write_dashboard(*, controller_root: Path, record: TargetRecord, verification
             "- 이 dashboard 는 read-only projection 이다.",
             "- product repo 에 harness runtime 파일을 자동으로 쓰지 않는다.",
             "- 외부 target 실행은 RootContext-aware autonomy core 승격 전까지 fail-closed 한다.",
-            "- Telegram 지시는 이후 target-aware relay 가 `targets/<id>/inbox` 로 materialize 한다.",
+            "- Telegram 지시는 이후 target-aware relay 가 `targets/<id>/operator-inbox` 로 materialize 한다.",
             "",
         ]
     )

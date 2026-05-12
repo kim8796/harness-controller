@@ -1,5 +1,11 @@
 # Harness Changelog
 
+## 1.7.103 - 2026-05-12
+
+- Added a canonical external controller `StatePaths` resolver for `target_id`, `controller_root`, `target_root`, and `state_root`.
+- Made target registry/dashboard path projection use the same resolver while preserving fail-closed external target execution.
+- Documented deterministic target-scoped operator inbox/outbox/report/lock/state paths as the handoff contract for future Telegram routing.
+
 ## 1.7.102 - 2026-05-12
 
 - Updated the controller GitHub Actions workflow to Node 24-compatible `actions/checkout@v6` and `actions/setup-python@v6`.

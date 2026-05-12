@@ -56,7 +56,7 @@
   - `goal-retry:<goal-id>` discovery cycle 이 goal 을 계속 `blocked` / `goal-retry-discovery` 로 남긴 채 product code 변경 없이 끝나면 성공 handoff 만 보내지 않고 `manual-review` Operator Decision Packet 으로 승격한다.
   - Telegram MarkdownV2 전송은 summary truncation 이후에도 reserved character 를 escape 해야 하며, 긴 local outbox 본문을 그대로 붙여 알림 실패나 operator 혼동을 만들면 안 된다.
 - portable starter 로 새 프로젝트를 만든 경우에도 loop 시작 전에는 `START_HERE.md` 의 quick start 와 first-loop readiness checklist 를 먼저 확인한다.
-  - `./harness controller export <dir>` 로 private controller repo 를 seed 하는 경우 v1.7.102 기준 controller bundle 은 Node 24-compatible controller CI workflow, hosted-runner-safe focused tests, generated controller-safe `tests/conftest.py` 를 함께 포함해야 한다. Starter bundle 은 workflow/test files 를 계속 제외한다.
+  - `./harness controller export <dir>` 로 private controller repo 를 seed 하는 경우 v1.7.103 기준 controller bundle 은 Node 24-compatible controller CI workflow, hosted-runner-safe focused tests, generated controller-safe `tests/conftest.py`, external target `StatePaths` resolver 를 함께 포함해야 한다. Starter bundle 은 workflow/test files 를 계속 제외한다.
   - `PRD`, `ARCHITECTURE`, `ADR`, `GOALS`, 첫 executable backlog, secrets 위치, `sync-state`, `status` 가 준비되기 전에는 unattended loop 를 시작하지 않는다.
 - backlog discovery 와 refill 은 `docs/harness/GOALS.md` 를 먼저 본다.
   - backlog 가 얇거나 비어 있을 때는 기존 backlog, PRD/ARCHITECTURE/ADR 와 함께 GOALS 기준으로 상위 방향을 맞춘다.
@@ -103,7 +103,7 @@ Portable starter 를 새 프로젝트에 적용할 때는 repo-local 또는 bund
 
 Starter CLI profile 은 `scripts/harness_profiles.py` 가 맡는다. 현재 지원 profile 은 `minimal` 과 `telegram` 뿐이며, Codex/Claude adapter 구성은 profile 이름이 아니라 starter scaffold 일부로 취급한다.
 
-External controller preview 는 product repo 에 harness 파일을 심지 않는 배포 경로다. Controller checkout 에서 `./harness controller doctor`, `./harness target add <id> --repo /path/to/product --branch main`, `./harness target verify <id>`, `./harness target dashboard <id>` 로 target 을 등록하고, state 는 controller 의 ignored `targets/<id>/` sidecar 아래에 둔다. Embedded mode 는 기존처럼 `controller_root == target_root == state_root` 이고, external mode 는 `controller_root`, `target_root`, `state_root` 를 분리한다. 현재 `./harness target run <id> --once` 는 RootContext-aware autonomy core 가 완성될 때까지 lane 을 시작하지 않는 fail-closed preflight 다.
+External controller preview 는 product repo 에 harness 파일을 심지 않는 배포 경로다. Controller checkout 에서 `./harness controller doctor`, `./harness target add <id> --repo /path/to/product --branch main`, `./harness target verify <id>`, `./harness target dashboard <id>` 로 target 을 등록하고, state 는 controller 의 ignored `targets/<id>/` sidecar 아래에 둔다. Embedded mode 는 기존처럼 `controller_root == target_root == state_root` 이고, external mode 는 `StatePaths` 가 `target_id`, `controller_root`, `target_root`, `state_root`, operator inbox/outbox/report/lock 경로를 단일 투영한다. 현재 `./harness target run <id> --once` 는 RootContext-aware autonomy core 가 완성될 때까지 lane 을 시작하지 않는 fail-closed preflight 다.
 
 기본 흐름:
 

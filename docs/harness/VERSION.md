@@ -1,8 +1,14 @@
 # Harness Framework Version
 
-- Current Version: 1.7.102
+- Current Version: 1.7.103
 - Release Date: 2026-05-12
 - Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + on-demand export output.
+
+## What Changed In 1.7.103
+
+- Added a canonical external controller `StatePaths` resolver for `target_id`, `controller_root`, `target_root`, and `state_root`.
+- Routed target registry/dashboard path projection through `StatePaths` while keeping `./harness target run <id> --once` fail-closed.
+- Exposed deterministic target-scoped operator inbox/outbox/report/lock/state paths for the later Telegram target routing phase without changing relay behavior.
 
 ## What Changed In 1.7.102
 

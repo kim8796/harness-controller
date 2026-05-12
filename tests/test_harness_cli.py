@@ -402,6 +402,51 @@ def test_external_target_verify_handles_missing_registered_repo(monkeypatch, tmp
     assert "target-missing" in payload["blockers"]
 
 
+def test_external_target_run_once_remains_fail_closed_without_product_mutation(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.0")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    capsys.readouterr()
+    before = subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout
+
+    assert module.main(["target", "run", "demo", "--once"]) == 2
+    output = capsys.readouterr().out
+    after = subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout
+
+    assert "lane 실행: not started" in output
+    assert "RootContext-aware autonomy core" in output
+    assert before == after == ""
+    assert (controller / "targets" / "demo" / "reports" / "operator-dashboard-latest.md").exists()
+    assert not (product / "runs").exists()
+    assert not (product / "reports").exists()
+
+
 def test_external_target_add_missing_repo_fails_closed(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_module()
     controller = tmp_path / "controller"
