@@ -1,5 +1,11 @@
 # Harness Changelog
 
+## 1.7.104 - 2026-05-12
+
+- Added target-scoped run locks for external controller preflight under `targets/<id>/locks/target-run.lock`.
+- Kept external target run fail-closed while proving same-target lock conflicts and different-target independence.
+- Left Telegram routing, Redis relay, and product-changing target execution unchanged.
+
 ## 1.7.103 - 2026-05-12
 
 - Added a canonical external controller `StatePaths` resolver for `target_id`, `controller_root`, `target_root`, and `state_root`.

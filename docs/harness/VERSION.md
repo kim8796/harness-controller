@@ -1,8 +1,14 @@
 # Harness Framework Version
 
-- Current Version: 1.7.103
+- Current Version: 1.7.104
 - Release Date: 2026-05-12
 - Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + on-demand export output.
+
+## What Changed In 1.7.104
+
+- Added target-scoped external controller run locks under `targets/<id>/locks/target-run.lock`.
+- Made `./harness target run <id> --once` acquire/release the target lock while still failing closed before lane execution.
+- Verified same-target lock conflicts fail closed and different targets remain independent.
 
 ## What Changed In 1.7.103
 

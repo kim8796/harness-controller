@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,6 +15,7 @@ from typing import Mapping, Sequence
 TARGET_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 TARGETS_DIR = Path("targets")
 TARGET_CONFIG_NAME = "target.json"
+TARGET_RUN_LOCK_NAME = "target-run.lock"
 PRODUCT_HARNESS_MARKERS = (
     Path("harness"),
     Path("HARNESS.md"),
@@ -49,6 +51,15 @@ SIDECAR_DIRS = (
 
 class ControllerError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class TargetRunLock:
+    target_id: str
+    path: Path
+    owner: str
+    token: str
+    acquired_at: str
 
 
 @dataclass(frozen=True)
@@ -371,6 +382,13 @@ def validate_sidecar_integrity(state_root: Path) -> list[str]:
     symlink_paths = [relative.as_posix() for relative in SIDECAR_DIRS if (state_root / relative).is_symlink()]
     if symlink_paths:
         raise ControllerError("sidecar path must not be a symlink: " + ", ".join(symlink_paths))
+    file_paths = [
+        relative.as_posix()
+        for relative in SIDECAR_DIRS
+        if (state_root / relative).exists() and not (state_root / relative).is_dir()
+    ]
+    if file_paths:
+        raise ControllerError("sidecar path must be a directory: " + ", ".join(file_paths))
     return [relative.as_posix() for relative in SIDECAR_DIRS if not (state_root / relative).exists()]
 
 
@@ -627,3 +645,74 @@ def write_dashboard(*, controller_root: Path, record: TargetRecord, verification
     )
     report.write_text(text, encoding="utf-8")
     return report
+
+
+def target_run_lock_path(*, controller_root: Path, record: TargetRecord) -> Path:
+    return record.state_paths(controller_root).locks_dir / TARGET_RUN_LOCK_NAME
+
+
+def acquire_target_run_lock(
+    *,
+    controller_root: Path,
+    record: TargetRecord,
+    owner: str,
+) -> TargetRunLock:
+    state_paths = record.state_paths(controller_root)
+    validate_sidecar_integrity(state_paths.state_root)
+    locks_dir = state_paths.locks_dir
+    if locks_dir.is_symlink():
+        raise ControllerError("target lock directory must not be a symlink")
+    if locks_dir.exists() and not locks_dir.is_dir():
+        raise ControllerError("target lock path must be a directory")
+    locks_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = state_paths.locks_dir / TARGET_RUN_LOCK_NAME
+    if lock_path.is_symlink():
+        raise ControllerError("target run lock must not be a symlink")
+    acquired_at = datetime.now().isoformat(timespec="seconds")
+    token = secrets.token_hex(16)
+    payload = {
+        "schema_version": 1,
+        "target_id": record.target_id,
+        "owner": owner,
+        "token": token,
+        "acquired_at": acquired_at,
+    }
+    try:
+        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        detail = describe_target_run_lock(lock_path)
+        raise ControllerError(f"target run already locked: {record.target_id} ({detail})") from exc
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.write("\n")
+    return TargetRunLock(target_id=record.target_id, path=lock_path, owner=owner, token=token, acquired_at=acquired_at)
+
+
+def release_target_run_lock(lock: TargetRunLock) -> None:
+    if lock.path.is_symlink():
+        lock.path.unlink(missing_ok=True)
+        return
+    if lock.path.exists():
+        try:
+            payload = json.loads(lock.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ControllerError("target run lock is not readable") from exc
+        if (
+            str(payload.get("target_id")) != lock.target_id
+            or str(payload.get("owner")) != lock.owner
+            or str(payload.get("token")) != lock.token
+        ):
+            raise ControllerError("target run lock owner mismatch")
+        lock.path.unlink()
+
+
+def describe_target_run_lock(path: Path) -> str:
+    if path.is_symlink():
+        return "symlink"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "unreadable"
+    owner = str(payload.get("owner") or "unknown")
+    acquired_at = str(payload.get("acquired_at") or "unknown")
+    return f"owner={owner}, acquired_at={acquired_at}"

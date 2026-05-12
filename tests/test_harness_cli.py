@@ -445,6 +445,43 @@ def test_external_target_run_once_remains_fail_closed_without_product_mutation(
     assert (controller / "targets" / "demo" / "reports" / "operator-dashboard-latest.md").exists()
     assert not (product / "runs").exists()
     assert not (product / "reports").exists()
+    assert not (controller / "targets" / "demo" / "locks" / "target-run.lock").exists()
+
+
+def test_external_target_run_once_blocks_same_target_lock_without_blocking_other_target(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product_a = tmp_path / "product-a"
+    product_b = tmp_path / "product-b"
+    controller.mkdir()
+    for product in (product_a, product_b):
+        product.mkdir()
+        subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+        (product / "README.md").write_text("# Product\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+        subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.0")
+
+    assert module.main(["target", "add", "app", "--repo", str(product_a)]) == 0
+    assert module.main(["target", "add", "admin", "--repo", str(product_b)]) == 0
+    capsys.readouterr()
+    dashboard = controller / "targets" / "app" / "reports" / "operator-dashboard-latest.md"
+    dashboard.write_text("original dashboard\n", encoding="utf-8")
+    lock_path = controller / "targets" / "app" / "locks" / "target-run.lock"
+    lock_path.write_text("{}\n", encoding="utf-8")
+
+    assert module.main(["target", "run", "app", "--once"]) == 2
+    assert "already locked" in capsys.readouterr().out
+    assert dashboard.read_text(encoding="utf-8") == "original dashboard\n"
+    assert module.main(["target", "run", "admin", "--once"]) == 2
+    output = capsys.readouterr().out
+    assert "external target run preflight 완료" in output
+    assert "already locked" not in output
+    assert lock_path.exists()
+    assert not (controller / "targets" / "admin" / "locks" / "target-run.lock").exists()
 
 
 def test_external_target_add_missing_repo_fails_closed(monkeypatch, tmp_path: Path, capsys) -> None:

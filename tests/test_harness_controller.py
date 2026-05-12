@@ -101,6 +101,98 @@ def test_state_paths_keep_targets_isolated(tmp_path: Path) -> None:
     assert record_a.state_paths(controller).operator_inbox != record_b.state_paths(controller).operator_inbox
 
 
+def test_target_run_lock_is_target_scoped_and_released(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product_a = tmp_path / "product-a"
+    product_b = tmp_path / "product-b"
+    controller.mkdir()
+    _init_git_repo(product_a)
+    _init_git_repo(product_b)
+    record_a = module.add_target(
+        controller_root=controller,
+        target_id="app",
+        repo=product_a,
+        branch="main",
+        controller_version="1.8.0",
+    )
+    record_b = module.add_target(
+        controller_root=controller,
+        target_id="admin",
+        repo=product_b,
+        branch="main",
+        controller_version="1.8.0",
+    )
+
+    lock_a = module.acquire_target_run_lock(controller_root=controller, record=record_a, owner="test")
+    try:
+        try:
+            module.acquire_target_run_lock(controller_root=controller, record=record_a, owner="second")
+        except module.ControllerError as exc:
+            assert "already locked" in str(exc)
+        else:
+            raise AssertionError("same target lock was acquired twice")
+        lock_b = module.acquire_target_run_lock(controller_root=controller, record=record_b, owner="other")
+        module.release_target_run_lock(lock_b)
+        assert not lock_b.path.exists()
+    finally:
+        module.release_target_run_lock(lock_a)
+    assert not lock_a.path.exists()
+
+
+def test_target_run_lock_release_rejects_replaced_lock(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_git_repo(product)
+    record = module.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.0",
+    )
+
+    lock = module.acquire_target_run_lock(controller_root=controller, record=record, owner="test")
+    lock.path.write_text(
+        json.dumps({"schema_version": 1, "target_id": "demo", "owner": "other", "token": "other"}),
+        encoding="utf-8",
+    )
+    try:
+        module.release_target_run_lock(lock)
+    except module.ControllerError as exc:
+        assert "owner mismatch" in str(exc)
+    else:
+        raise AssertionError("replaced lock was released")
+    lock.path.unlink()
+
+
+def test_target_run_lock_rejects_locks_file(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_git_repo(product)
+    record = module.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.0",
+    )
+    locks = controller / "targets" / "demo" / "locks"
+    locks.rmdir()
+    locks.write_text("not a directory\n", encoding="utf-8")
+
+    try:
+        module.acquire_target_run_lock(controller_root=controller, record=record, owner="test")
+    except module.ControllerError as exc:
+        assert "sidecar path must be a directory" in str(exc)
+    else:
+        raise AssertionError("regular-file locks path was accepted")
+
+
 def test_add_target_creates_controller_sidecar_without_product_state(tmp_path: Path) -> None:
     module = _load_module()
     controller = tmp_path / "controller"
@@ -257,6 +349,32 @@ def test_verify_and_dashboard_reject_nested_sidecar_symlink(tmp_path: Path) -> N
         assert "sidecar path must not be a symlink" in str(exc)
     else:
         raise AssertionError("dashboard write followed a nested sidecar symlink")
+
+
+def test_target_run_lock_rejects_symlink(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    outside_lock = tmp_path / "outside.lock"
+    controller.mkdir()
+    _init_git_repo(product)
+    record = module.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.0",
+    )
+    lock_path = module.target_run_lock_path(controller_root=controller, record=record)
+    lock_path.symlink_to(outside_lock)
+
+    try:
+        module.acquire_target_run_lock(controller_root=controller, record=record, owner="test")
+    except module.ControllerError as exc:
+        assert "lock" in str(exc)
+        assert "symlink" in str(exc)
+    else:
+        raise AssertionError("symlinked target run lock was accepted")
 
 
 def test_list_targets_rejects_symlinked_targets_directory(tmp_path: Path) -> None:

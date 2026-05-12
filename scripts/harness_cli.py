@@ -1085,8 +1085,14 @@ def command_target_run(args: argparse.Namespace) -> int:
     if not args.once:
         print("error: external target run은 bounded smoke만 허용합니다. --once 를 붙이세요.")
         return 2
+    lock: harness_controller.TargetRunLock | None = None
     try:
         record = _load_controller_target(args.target_id)
+        lock = harness_controller.acquire_target_run_lock(
+            controller_root=repo_root(),
+            record=record,
+            owner=f"pid:{os.getpid()}",
+        )
         verification = harness_controller.verify_target(record)
         report = harness_controller.write_dashboard(
             controller_root=repo_root(),
@@ -1100,6 +1106,7 @@ def command_target_run(args: argparse.Namespace) -> int:
         print("external target run preflight 완료")
         print(f"- 대상: `{record.target_id}`")
         print(f"- dashboard: `{report.as_posix()}`")
+        print(f"- lock: acquired/released `{lock.path.as_posix()}`")
         print("- lane 실행: not started")
         print("- 이유: external product diff 실행은 RootContext-aware autonomy core 승격 후 활성화합니다.")
         print("- product repo 변경: no")
@@ -1107,6 +1114,9 @@ def command_target_run(args: argparse.Namespace) -> int:
     except harness_controller.ControllerError as exc:
         print(f"error: {exc}")
         return 2
+    finally:
+        if lock is not None:
+            harness_controller.release_target_run_lock(lock)
 
 
 def _shim_dir(raw_prefix: Path) -> Path:
