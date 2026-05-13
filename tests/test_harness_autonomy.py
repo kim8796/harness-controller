@@ -8426,7 +8426,9 @@ def test_running_lane_heartbeat_refreshes_active_lane_state(monkeypatch: pytest.
         workspace_key="persistent-branch:autonomy/main-v3",
         interval_seconds=0.01,
     )
-    time.sleep(0.05)
+    deadline = time.monotonic() + 1.0
+    while not calls and time.monotonic() < deadline:
+        time.sleep(0.01)
     module.stop_running_lane_heartbeat(stop_event, thread)
 
     assert calls

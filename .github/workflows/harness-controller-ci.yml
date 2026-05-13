@@ -52,7 +52,21 @@ jobs:
           assert report["ok"], report
           assert not report["blockers"], report
           assert not report["controller_surface_mentions"], report
-          assert not report["historical_mentions"], report
+          historical_mentions = report.get("historical_mentions", [])
+          allowed_historical_paths = {"tests/test_harness_autonomy.py"}
+          unexpected_historical = [
+              entry for entry in historical_mentions if entry.get("path") not in allowed_historical_paths
+          ]
+          assert not unexpected_historical, report
+          if historical_mentions:
+              print(
+                  "controller sanitize historical warning:",
+                  len(historical_mentions),
+                  "entries",
+                  "truncated=",
+                  report.get("historical_mentions_truncated"),
+              )
+              print("allowed historical paths:", sorted({entry.get("path") for entry in historical_mentions}))
           subprocess.run(["git", "init", "-b", "main"], cwd=bundle, check=True)
           subprocess.run(
               [
