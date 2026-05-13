@@ -1,8 +1,29 @@
 # Harness Framework Version
 
-- Current Version: 1.8.8
+- Current Version: 1.8.11
 - Release Date: 2026-05-13
-- Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + on-demand export output.
+- Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + controller release-history-preserving export + generated coverage artifact exclusion + on-demand export output.
+
+## What Changed In 1.8.11
+
+- Removed generated `coverage-summary.txt` from canonical export source paths so exported controller repos can pass `scripts/harness_export.py --check` without carrying stale local coverage output.
+- Kept controller/starter bundles free of generated coverage artifacts and local absolute path residue.
+- Added controller export regression coverage for this exclusion.
+- No target execution, backlog transition, product commit, product push, Telegram, or Redis behavior changed.
+
+## What Changed In 1.8.10
+
+- Preserved v1.8+ controller release notes in `./harness controller export` so refreshing the private `harness-controller` repo from a bundle does not delete tracked controller release history.
+- Kept older v1.7 embedded/project-specific release notes out of the sanitized controller bundle.
+- Added focused export coverage for prior/current controller release note preservation.
+- No target execution, backlog transition, product commit, product push, Telegram, or Redis behavior changed.
+
+## What Changed In 1.8.9
+
+- Added `./harness target backlog commit <target> --run <implementation-run> --message "<msg>"` as the explicit backlog-bound local product commit gate.
+- The command is dry-run by default; `--apply` stages and commits only the product paths recorded by passing `--implement-backlog-once` evidence.
+- Commit mode requires the sidecar backlog to already be `completed`, the `Completed-Run` metadata to match the implementation run, unchanged product HEAD, matching dirty paths, and matching product diff fingerprint.
+- Product push, Telegram-triggered product commits, and backlog state mutation remain disabled in this command.
 
 ## What Changed In 1.8.8
 

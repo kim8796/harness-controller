@@ -8,6 +8,7 @@
 - `./harness target run <id> --execute-backlog-once` 는 선택 sidecar backlog 에 묶인 local product diff smoke 만 만들고 AI 구현 lane / backlog 완료 / commit / push 는 시작하지 않는다.
 - `./harness target run <id> --implement-backlog-once` 는 선택 sidecar backlog 를 AI implementer 에 넘겨 local product diff 만 만들고 backlog 완료 / commit / push 는 시작하지 않는다.
 - `./harness target backlog transition <id> --status completed|blocked|manual-review` 는 dry-run first sidecar backlog 상태 변경 gate 다.
+- `./harness target backlog commit <id> --run <implementation-run> --message "<msg>"` 는 completed sidecar backlog 의 implementation diff 를 local product commit 으로 닫는 dry-run first gate 다.
 - product-changing external smoke 는 `./harness target run <id> --execute-once` 명시 opt-in 으로만 켠다.
 - `./harness target run <id> --execute-once --commit` 은 deterministic smoke file 을 local commit 으로 닫지만 push 는 하지 않는다.
 - `./harness target run <id> --execute-once --commit --push` 는 advanced smoke 로 registered branch 를 갱신할 수 있으므로 product repo push automation 이 실행될 수 있다.

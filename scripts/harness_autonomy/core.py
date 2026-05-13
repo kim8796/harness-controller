@@ -8790,6 +8790,11 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
         "product_execution": "enabled" if context.product_execution_enabled else "disabled",
         "product_implementation": "enabled" if context.product_implementation_enabled else "disabled",
         "product_diff_paths": [path.as_posix() for path in product_diff_paths],
+        "product_diff_fingerprint": (
+            controller.product_diff_fingerprint(context.target_root, [path.as_posix() for path in product_diff_paths])
+            if product_diff_paths
+            else ""
+        ),
         "product_commit": "enabled" if context.product_commit_enabled else "disabled",
         "product_commit_sha": product_commit_sha,
         "product_commit_message": (

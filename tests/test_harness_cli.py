@@ -74,6 +74,92 @@ def _write_sidecar_backlog(controller: Path, target_id: str = "demo") -> Path:
     return backlog
 
 
+def _init_product_repo(path: Path, *, configure_identity: bool = False) -> str:
+    path.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, text=True, capture_output=True, env=_git_env())
+    if configure_identity:
+        subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=path, check=True, env=_git_env())
+        subprocess.run(["git", "config", "user.email", "harness-test@example.invalid"], cwd=path, check=True, env=_git_env())
+    (path / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=path, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=path, check=True, env=_git_env())
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=path,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.strip()
+
+
+def _product_git_status(path: Path) -> list[str]:
+    return subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=path,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.splitlines()
+
+
+def _product_head(path: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=path,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.strip()
+
+
+def _create_completed_sidecar_backlog_with_product_diff(module, controller: Path, product: Path, capsys) -> str:
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    _write_sidecar_backlog(controller)
+    capsys.readouterr()
+    command = "printf 'implemented\\n' > feature.txt && printf 'Implementation done\\n'"
+    assert (
+        module.main(
+            [
+                "target",
+                "run",
+                "demo",
+                "--implement-backlog-once",
+                "--runner",
+                "custom",
+                "--command-template",
+                command,
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    evidence_path = next((controller / "targets" / "demo" / "runs" / "harness").glob("*/generated-evidence.json"))
+    run_id = evidence_path.parent.name
+    assert (
+        module.main(
+            [
+                "target",
+                "backlog",
+                "transition",
+                "demo",
+                "--status",
+                "completed",
+                "--run",
+                run_id,
+                "--reason",
+                "implementation accepted",
+                "--apply",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    return run_id
+
+
 def test_run_requires_once_and_delegates_bounded_launcher(monkeypatch) -> None:
     module = _load_module()
     calls: list[tuple[str, list[str]]] = []
@@ -1132,6 +1218,198 @@ def test_external_target_backlog_transition_completed_rejects_stale_product_diff
     assert "product diff no longer matches" in output
     assert backlog.exists()
     assert not (controller / "targets" / "demo" / "backlog" / "completed" / "BL-demo.md").exists()
+
+
+def test_external_target_backlog_commit_dry_run_does_not_commit(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    head_before = _init_product_repo(product, configure_identity=True)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.8")
+
+    run_id = _create_completed_sidecar_backlog_with_product_diff(module, controller, product, capsys)
+
+    assert (
+        module.main(
+            [
+                "target",
+                "backlog",
+                "commit",
+                "demo",
+                "--run",
+                run_id,
+                "--message",
+                "feat: implement demo backlog",
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+
+    assert "dry-run 완료" in output
+    assert "product repo 변경: 없음" in output
+    assert _product_head(product) == head_before
+    assert _product_git_status(product) == ["?? feature.txt"]
+    assert not list((controller / "targets" / "demo" / "runs" / "harness").glob("*/product-commit-receipt.json"))
+    _assert_no_product_harness_pollution(product)
+
+
+def test_external_target_backlog_commit_apply_creates_product_commit_only(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    head_before = _init_product_repo(product, configure_identity=True)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.8")
+
+    run_id = _create_completed_sidecar_backlog_with_product_diff(module, controller, product, capsys)
+
+    assert (
+        module.main(
+            [
+                "target",
+                "backlog",
+                "commit",
+                "demo",
+                "--run",
+                run_id,
+                "--message",
+                "feat: implement demo backlog",
+                "--apply",
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    head_after = _product_head(product)
+    commit_message = subprocess.run(
+        ["git", "log", "-1", "--pretty=%s"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.strip()
+    commit_diff = subprocess.run(
+        ["git", "diff-tree", "--no-commit-id", "--name-status", "-r", "HEAD"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.splitlines()
+
+    assert "적용 완료" in output
+    assert "product push: 없음" in output
+    assert "product commit:" in output
+    assert head_after != head_before
+    assert _product_git_status(product) == []
+    assert commit_message == "feat: implement demo backlog"
+    assert commit_diff == ["A\tfeature.txt"]
+    _assert_no_product_harness_pollution(product)
+    receipts = list((controller / "targets" / "demo" / "runs" / "harness").glob("*/product-commit-receipt.json"))
+    assert receipts
+    receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+    assert receipt["operation"] == "backlog-product-commit"
+    assert receipt["status"] == "pass"
+    assert receipt["product_commit_sha"] == head_after
+    assert receipt["product_push"] == "disabled"
+    assert receipt["implementation_run_id"] == run_id
+    assert receipt["backlog_id"] == "BL-demo"
+    assert receipt["product_diff_paths"] == ["feature.txt"]
+    assert receipt["product_head_before"] == head_before
+    assert receipt["product_head_after"] == head_after
+
+
+def test_external_target_backlog_commit_requires_completed_backlog(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product, configure_identity=True)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.8")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    _write_sidecar_backlog(controller)
+    capsys.readouterr()
+    command = "printf 'implemented\\n' > feature.txt && printf 'Implementation done\\n'"
+    assert (
+        module.main(
+            [
+                "target",
+                "run",
+                "demo",
+                "--implement-backlog-once",
+                "--runner",
+                "custom",
+                "--command-template",
+                command,
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    run_id = next((controller / "targets" / "demo" / "runs" / "harness").glob("*/generated-evidence.json")).parent.name
+
+    assert (
+        module.main(
+            [
+                "target",
+                "backlog",
+                "commit",
+                "demo",
+                "--run",
+                run_id,
+                "--message",
+                "feat: implement demo backlog",
+                "--apply",
+            ]
+        )
+        == 2
+    )
+    output = capsys.readouterr().out
+
+    assert "requires completed sidecar backlog" in output
+    assert _product_git_status(product) == ["?? feature.txt"]
+    assert not list((controller / "targets" / "demo" / "runs" / "harness").glob("*/product-commit-receipt.json"))
+
+
+def test_external_target_backlog_commit_rejects_stale_product_diff(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product, configure_identity=True)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.8")
+    run_id = _create_completed_sidecar_backlog_with_product_diff(module, controller, product, capsys)
+    (product / "feature.txt").write_text("changed after evidence\n", encoding="utf-8")
+
+    assert (
+        module.main(
+            [
+                "target",
+                "backlog",
+                "commit",
+                "demo",
+                "--run",
+                run_id,
+                "--message",
+                "feat: implement demo backlog",
+                "--apply",
+            ]
+        )
+        == 2
+    )
+    output = capsys.readouterr().out
+
+    assert "product diff no longer matches" in output
+    assert _product_git_status(product) == ["?? feature.txt"]
+    assert not list((controller / "targets" / "demo" / "runs" / "harness").glob("*/product-commit-receipt.json"))
 
 
 def test_external_target_backlog_transition_manual_review_updates_sidecar_only(

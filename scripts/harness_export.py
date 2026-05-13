@@ -98,7 +98,6 @@ STATIC_EXPORT_SOURCE_PATHS = (
     Path("docs/harness/MANIFEST.md"),
     Path("docs/harness/VERSION.md"),
     Path("docs/harness/CHANGELOG.md"),
-    Path("coverage-summary.txt"),
     Path("tests/conftest.py"),
     Path("tests/test_harness_autonomy.py"),
     Path("tests/test_harness_cli.py"),
@@ -123,16 +122,8 @@ STARTER_TEMPLATE_OVERRIDE_PATHS = frozenset(
     }
 )
 STARTER_OPTIONAL_POLICY_DOC = Path("docs/harness/POLICY.md")
-STARTER_EXCLUDED_SOURCE_PATHS = frozenset(
-    {
-        Path("coverage-summary.txt"),
-    }
-)
-CONTROLLER_EXCLUDED_SOURCE_PATHS = frozenset(
-    {
-        Path("coverage-summary.txt"),
-    }
-)
+STARTER_EXCLUDED_SOURCE_PATHS = frozenset()
+CONTROLLER_EXCLUDED_SOURCE_PATHS = frozenset()
 STARTER_CONTROLLER_ONLY_SOURCE_PATHS = frozenset(
     {
         Path("requirements.txt"),
@@ -242,6 +233,26 @@ def build_controller_source_paths(version: str) -> tuple[Path, ...]:
             continue
         selected.append(path)
     return tuple(dict.fromkeys(selected))
+
+
+def controller_release_note_paths(root: Path) -> tuple[Path, ...]:
+    release_root = root / "docs" / "harness" / "releases"
+    if not release_root.exists():
+        return ()
+    release_pattern = re.compile(r"^v(?P<major>[0-9]+)\.(?P<minor>[0-9]+)\.(?P<patch>[0-9]+)\.md$")
+    selected: list[Path] = []
+    for path in release_root.glob("v*.md"):
+        match = release_pattern.fullmatch(path.name)
+        if match is None:
+            continue
+        major = int(match.group("major"))
+        minor = int(match.group("minor"))
+        if (major, minor) < (1, 8):
+            continue
+        selected.append(Path("docs") / "harness" / "releases" / path.name)
+    return tuple(
+        sorted(selected, key=lambda item: item.as_posix())
+    )
 
 
 def missing_export_source_paths(root: Path, version: str | None = None) -> tuple[Path, ...]:
@@ -587,6 +598,7 @@ def controller_claude_template() -> str:
         - `./harness target run <id> --execute-backlog-once` 는 선택 sidecar backlog 에 묶인 local product diff smoke 만 만들고 AI 구현 lane / backlog 완료 / commit / push 는 시작하지 않는다.
         - `./harness target run <id> --implement-backlog-once` 는 선택 sidecar backlog 를 AI implementer 에 넘겨 local product diff 만 만들고 backlog 완료 / commit / push 는 시작하지 않는다.
         - `./harness target backlog transition <id> --status completed|blocked|manual-review` 는 dry-run first sidecar backlog 상태 변경 gate 다.
+        - `./harness target backlog commit <id> --run <implementation-run> --message "<msg>"` 는 completed sidecar backlog 의 implementation diff 를 local product commit 으로 닫는 dry-run first gate 다.
         - product-changing external smoke 는 `./harness target run <id> --execute-once` 명시 opt-in 으로만 켠다.
         - `./harness target run <id> --execute-once --commit` 은 deterministic smoke file 을 local commit 으로 닫지만 push 는 하지 않는다.
         - `./harness target run <id> --execute-once --commit --push` 는 advanced smoke 로 registered branch 를 갱신할 수 있으므로 product repo push automation 이 실행될 수 있다.
@@ -896,7 +908,7 @@ def export_controller_bundle(root: Path, output_dir: Path, version: str | None =
     bundle_dir = _validate_controller_bundle_output(root, output_dir, force=force)
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
-    source_paths = build_controller_source_paths(resolved_version)
+    source_paths = tuple(dict.fromkeys((*build_controller_source_paths(resolved_version), *controller_release_note_paths(root))))
     generated_templates = build_controller_generated_templates(resolved_version)
 
     for relative_path in source_paths:
@@ -940,6 +952,7 @@ def export_controller_bundle(root: Path, output_dir: Path, version: str | None =
                 "- `target run --execute-backlog-once` selects that sidecar backlog item and creates only an uncommitted backlog-bound `product-smoke-change.txt`; it is not full AI implementation, does not complete the backlog, and does not commit or push.",
                 "- `target run --implement-backlog-once` runs one AI implementer lane for that selected sidecar backlog and leaves local product diffs only; it does not complete the backlog, commit, or push.",
                 "- `target backlog transition my-app --status completed --run <run-id>` dry-runs backlog completion; add `--apply` only after reviewing the product diff.",
+                "- `target backlog commit my-app --run <run-id> --message \"feat: ...\"` dry-runs a local product commit for a completed sidecar backlog; add `--apply` only after reviewing the exact diff.",
                 "- Backlog-bound smoke report: `targets/<target_id>/reports/target-run-latest.md`; rollback: `git -C <target_repo> clean -f -- product-smoke-change.txt`.",
                 "- `target run --execute-once` is the explicit product diff smoke and creates only uncommitted `product-smoke-change.txt`.",
                 "- `target run --execute-once --commit` commits exactly that smoke file locally and still does not push.",

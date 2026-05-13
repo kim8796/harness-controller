@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import secrets
@@ -39,6 +40,10 @@ PRODUCT_DIFF_SMOKE_PUSH_CAUTION = (
 PRODUCT_IMPLEMENTATION_ROLLBACK_CAUTION = (
     "This implementation gate leaves local product changes uncommitted. Review `git status --short` "
     "and revert only the intended product diff; no automatic rollback is performed."
+)
+PRODUCT_BACKLOG_COMMIT_ROLLBACK_CAUTION = (
+    "This backlog commit gate creates a local product commit only. Only reset it if HEAD is still "
+    "the recorded commit and no later product work was added on top."
 )
 BACKLOG_TRANSITION_STATUSES = ("completed", "blocked", "manual-review")
 PRODUCT_HARNESS_MARKERS = (
@@ -1035,7 +1040,10 @@ def target_status_paths(status_lines: Sequence[str]) -> list[str]:
         line = raw_line.rstrip()
         if not line:
             continue
-        path = line[3:] if len(line) >= 4 else line
+        if "\t" in line:
+            path = line.split("\t")[-1]
+        else:
+            path = line[3:] if len(line) >= 4 else line
         if " -> " in path:
             path = path.split(" -> ", 1)[1]
         path = path.strip()
@@ -1165,6 +1173,9 @@ def _completed_transition_backlog_ref_from_evidence(
     current_paths = target_status_paths(current_status)
     if current_paths != expected_paths:
         raise ControllerError("target product diff no longer matches implementation evidence")
+    expected_fingerprint = str(evidence.get("product_diff_fingerprint") or "")
+    if expected_fingerprint and product_diff_fingerprint(record.repo, expected_paths) != expected_fingerprint:
+        raise ControllerError("target product diff no longer matches implementation evidence")
     verification = verify_target(record)
     post_blockers = [blocker for blocker in target_run_blockers(verification) if blocker != "target-git-dirty"]
     if post_blockers:
@@ -1179,6 +1190,26 @@ def _completed_transition_backlog_ref_from_evidence(
     if not backlog_path.startswith("backlog/queued/"):
         raise ControllerError("completed transition evidence must point to queued sidecar backlog")
     return backlog_path, evidence, evidence_path
+
+
+def _completed_backlog_item_for_commit(record: TargetRecord, state_paths: StatePaths, run_id: str):
+    _, evidence, evidence_path = _completed_transition_backlog_ref_from_evidence(record, state_paths, run_id)
+    backlog_payload = evidence.get("external_backlog")
+    if not isinstance(backlog_payload, Mapping):
+        raise ControllerError("commit evidence is missing external_backlog")
+    backlog_id = str(backlog_payload.get("id") or "").strip()
+    if not backlog_id:
+        raise ControllerError("commit evidence external_backlog is missing id")
+    item = _discover_sidecar_backlog_item(state_paths, backlog_id)
+    if str(item.status) != "completed":
+        raise ControllerError("backlog commit requires completed sidecar backlog")
+    from harness_autonomy import read_backlog_metadata
+
+    metadata = read_backlog_metadata(state_paths.state_root / item.path)
+    safe_run_id = _safe_evidence_run_id(run_id)
+    if str(metadata.get("completed_run") or "") != safe_run_id:
+        raise ControllerError("completed backlog does not reference the implementation run")
+    return item, evidence, evidence_path
 
 
 def _allocate_transition_run_dir(state_paths: StatePaths) -> Path:
@@ -1197,6 +1228,25 @@ def _allocate_transition_run_dir(state_paths: StatePaths) -> Path:
         state_root=state_paths.state_root,
         path=candidate,
         label="backlog transition evidence directory",
+    )
+
+
+def _allocate_backlog_commit_run_dir(state_paths: StatePaths) -> Path:
+    runs_root = _prepare_sidecar_directory_for_write(
+        state_root=state_paths.state_root,
+        path=state_paths.state_root / "runs" / "harness",
+        label="backlog commit evidence root",
+    )
+    base = f"external-{state_paths.target_id}-backlog-commit-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    candidate = runs_root / base
+    suffix = 1
+    while candidate.exists():
+        suffix += 1
+        candidate = runs_root / f"{base}-{suffix}"
+    return _prepare_sidecar_directory_for_write(
+        state_root=state_paths.state_root,
+        path=candidate,
+        label="backlog commit evidence directory",
     )
 
 
@@ -1374,6 +1424,283 @@ def transition_sidecar_backlog(
             ]
         ),
         label="backlog transition report",
+    )
+    return applied_payload
+
+
+def _safe_product_diff_paths(paths: Sequence[str]) -> list[str]:
+    cleaned: list[str] = []
+    for raw in paths:
+        text = str(raw or "").strip()
+        path = Path(text)
+        if not text or text in {".", ".."}:
+            raise ControllerError("product diff path is invalid")
+        if path.is_absolute() or ".." in path.parts or path.parts[0] == ".git":
+            raise ControllerError("product diff path must be a safe repository-relative path")
+        normalized = path.as_posix()
+        if normalized in cleaned:
+            raise ControllerError("product diff paths must not contain duplicates")
+        cleaned.append(normalized)
+    if not cleaned:
+        raise ControllerError("product diff paths are required")
+    return cleaned
+
+
+def product_diff_fingerprint(target_root: Path, paths: Sequence[str]) -> str:
+    safe_paths = _safe_product_diff_paths(paths)
+    entries: list[dict[str, str | int | list[str]]] = []
+    for rel in safe_paths:
+        status_result = git(["status", "--porcelain=v1", "--", rel], cwd=target_root)
+        if status_result.returncode != 0:
+            detail = (status_result.stderr or status_result.stdout).strip()
+            raise ControllerError(f"target product diff status read failed: {detail}")
+        status_lines = [line.rstrip() for line in status_result.stdout.splitlines() if line.rstrip()]
+        root = target_root / rel
+        if root.is_symlink():
+            entries.append(
+                {
+                    "path": rel,
+                    "status": status_lines,
+                    "type": "symlink",
+                    "target": os.readlink(root),
+                }
+            )
+        elif root.is_file():
+            content = root.read_bytes()
+            entries.append(
+                {
+                    "path": rel,
+                    "status": status_lines,
+                    "type": "file",
+                    "size": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+            )
+        elif root.is_dir():
+            for child in sorted(path for path in root.rglob("*") if path.name != ".git"):
+                child_rel = child.relative_to(target_root).as_posix()
+                if child.is_symlink():
+                    entries.append(
+                        {
+                            "path": child_rel,
+                            "status": status_lines,
+                            "type": "symlink",
+                            "target": os.readlink(child),
+                        }
+                    )
+                elif child.is_file():
+                    content = child.read_bytes()
+                    entries.append(
+                        {
+                            "path": child_rel,
+                            "status": status_lines,
+                            "type": "file",
+                            "size": len(content),
+                            "sha256": hashlib.sha256(content).hexdigest(),
+                        }
+                    )
+            if not any(str(entry["path"]).startswith(rel.rstrip("/") + "/") for entry in entries):
+                entries.append({"path": rel, "status": status_lines, "type": "directory"})
+        else:
+            entries.append({"path": rel, "status": status_lines, "type": "missing"})
+    payload = json.dumps(entries, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def product_backlog_commit_rollback_command(target_root: Path, before_head: str) -> str:
+    return f"git -C {shlex.quote(target_root.as_posix())} reset --hard {shlex.quote(before_head)}"
+
+
+def commit_product_backlog_diff(target_root: Path, *, paths: Sequence[str], message: str) -> str:
+    safe_paths = _safe_product_diff_paths(paths)
+    message_text = _single_line_metadata(message)
+    if not message_text:
+        raise ControllerError("product commit message is required")
+    if not target_git_identity_ready(target_root):
+        raise ControllerError("target git identity is not configured for backlog product commit")
+    add_result = git(["add", "--", *safe_paths], cwd=target_root)
+    if add_result.returncode != 0:
+        detail = (add_result.stderr or add_result.stdout).strip()
+        raise ControllerError(f"target backlog product staging failed: {detail}")
+    staged_result = git(["diff", "--cached", "--name-only", "--", *safe_paths], cwd=target_root)
+    if staged_result.returncode != 0:
+        detail = (staged_result.stderr or staged_result.stdout).strip()
+        raise ControllerError(f"target backlog product staged diff read failed: {detail}")
+    staged_paths = [line.strip() for line in staged_result.stdout.splitlines() if line.strip()]
+    if staged_paths != safe_paths:
+        raise ControllerError("staged product paths do not match implementation evidence")
+    commit_result = git(
+        [
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--no-verify",
+            "--no-gpg-sign",
+            "-m",
+            message_text,
+            "--",
+            *safe_paths,
+        ],
+        cwd=target_root,
+    )
+    if commit_result.returncode != 0:
+        detail = (commit_result.stderr or commit_result.stdout).strip()
+        raise ControllerError(f"target backlog product commit failed: {detail}")
+    return target_git_head(target_root)
+
+
+def commit_sidecar_backlog_product_diff(
+    *,
+    controller_root: Path,
+    record: TargetRecord,
+    run_id: str,
+    message: str,
+    apply: bool = False,
+) -> dict[str, Any]:
+    safe_run_id = _safe_evidence_run_id(run_id)
+    message_text = _single_line_metadata(message)
+    if not message_text:
+        raise ControllerError("product commit message is required")
+    state_paths = record.state_paths(controller_root)
+    validate_sidecar_backlog_integrity(state_paths)
+    item, evidence, evidence_path = _completed_backlog_item_for_commit(record, state_paths, safe_run_id)
+    expected_paths = _safe_product_diff_paths([str(path) for path in evidence.get("product_diff_paths") or [] if str(path)])
+    expected_fingerprint = str(evidence.get("product_diff_fingerprint") or "").strip()
+    if not expected_fingerprint:
+        raise ControllerError("implementation evidence lacks product diff fingerprint; rerun implementation with current controller")
+    before_head = target_git_head(record.repo)
+    before_status = target_git_status_lines(record.repo)
+    if target_status_paths(before_status) != expected_paths:
+        raise ControllerError("target product diff no longer matches implementation evidence")
+    current_fingerprint = product_diff_fingerprint(record.repo, expected_paths)
+    if current_fingerprint != expected_fingerprint:
+        raise ControllerError("target product diff no longer matches implementation evidence")
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "target_id": record.target_id,
+        "status": "planned",
+        "applied": bool(apply),
+        "operation": "backlog-product-commit",
+        "implementation_run_id": safe_run_id,
+        "evidence_path": evidence_path.as_posix(),
+        "backlog_id": str(item.item_id),
+        "backlog_title": str(item.title),
+        "backlog_path": item.path.as_posix(),
+        "product_head_before": before_head,
+        "product_head_after": before_head,
+        "product_status_before": before_status,
+        "product_status_after": before_status,
+        "product_diff_paths": expected_paths,
+        "product_diff_fingerprint": current_fingerprint,
+        "product_commit": "enabled" if apply else "dry-run",
+        "product_commit_sha": "",
+        "product_commit_message": message_text,
+        "product_commit_diff": [],
+        "product_push": "disabled",
+        "hook_policy": "core.hooksPath=/dev/null; commit.gpgsign=false; --no-verify; --no-gpg-sign",
+        "rollback_guidance": [
+            PRODUCT_BACKLOG_COMMIT_ROLLBACK_CAUTION,
+            product_backlog_commit_rollback_command(record.repo, before_head),
+        ],
+        "receipt_path": "",
+        "generated_evidence_path": "",
+    }
+    if not apply:
+        return payload
+
+    commit_sha = commit_product_backlog_diff(record.repo, paths=expected_paths, message=message_text)
+    after_head = target_git_head(record.repo)
+    after_status = target_git_status_lines(record.repo)
+    post_blockers: list[str] = []
+    if commit_sha != after_head:
+        post_blockers.append("target-head-unexpected")
+    if target_git_parent(record.repo, "HEAD") != before_head:
+        post_blockers.append("target-head-parent-unexpected")
+    if after_status:
+        post_blockers.append("target-git-status-changed")
+    commit_diff = product_diff_smoke_commit_diff_lines(record.repo)
+    if target_status_paths(commit_diff) != expected_paths:
+        post_blockers.append("target-product-commit-diff-unexpected")
+    post_verification = verify_target(record)
+    for blocker in target_run_blockers(post_verification):
+        if blocker not in post_blockers:
+            post_blockers.append(blocker)
+    if post_blockers:
+        raise ControllerError("target product commit post-check failed: " + ", ".join(post_blockers))
+
+    run_dir = _allocate_backlog_commit_run_dir(state_paths)
+    applied_payload = dict(payload)
+    applied_payload.update(
+        {
+            "status": "pass",
+            "applied": True,
+            "product_head_after": after_head,
+            "product_status_after": after_status,
+            "product_commit_sha": commit_sha,
+            "product_commit_diff": commit_diff,
+            "receipt_path": (run_dir / "product-commit-receipt.json").as_posix(),
+            "generated_evidence_path": (run_dir / "generated-evidence.json").as_posix(),
+            "applied_at": datetime.now().isoformat(timespec="seconds"),
+        }
+    )
+    _write_sidecar_json(
+        state_paths.state_root,
+        run_dir / "product-commit-receipt.json",
+        applied_payload,
+        label="backlog product commit receipt",
+    )
+    _write_sidecar_json(
+        state_paths.state_root,
+        run_dir / "generated-evidence.json",
+        applied_payload,
+        label="backlog product commit generated evidence",
+    )
+    _write_sidecar_text(
+        state_paths.state_root,
+        run_dir / "generated-evidence.md",
+        "\n".join(
+            [
+                "# Generated Evidence",
+                "",
+                f"- Target ID: `{record.target_id}`",
+                "- Operation: `backlog-product-commit`",
+                "- Applied: `true`",
+                f"- Backlog: `{item.item_id}`",
+                f"- Implementation run: `{safe_run_id}`",
+                f"- Product commit: `{commit_sha}`",
+                "- Product push: `disabled`",
+                f"- Product diff paths: `{', '.join(expected_paths)}`",
+                "",
+            ]
+        ),
+        label="backlog product commit generated evidence markdown",
+    )
+    _write_sidecar_text(
+        state_paths.state_root,
+        run_dir / "report.md",
+        "\n".join(
+            [
+                "# External Backlog Product Commit",
+                "",
+                f"- Target: `{record.target_id}`",
+                f"- Backlog: `{item.item_id}`",
+                f"- Implementation run: `{safe_run_id}`",
+                f"- Product commit: `{commit_sha}`",
+                "- Product push: `disabled`",
+                f"- Product head before: `{before_head}`",
+                f"- Product head after: `{after_head}`",
+                f"- Product diff paths: `{', '.join(expected_paths)}`",
+                "",
+                "## Rollback Guidance",
+                "",
+                f"- {PRODUCT_BACKLOG_COMMIT_ROLLBACK_CAUTION}",
+                f"- `{product_backlog_commit_rollback_command(record.repo, before_head)}`",
+                "",
+            ]
+        ),
+        label="backlog product commit report",
     )
     return applied_payload
 

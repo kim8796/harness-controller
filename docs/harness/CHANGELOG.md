@@ -1,5 +1,24 @@
 # Harness Changelog
 
+## 1.8.11 - 2026-05-13
+
+- Removed generated `coverage-summary.txt` from canonical export source paths.
+- Fixed exported controller repos so `python3 scripts/harness_export.py --check` no longer requires a stale local coverage artifact.
+- Kept controller/starter bundles free of coverage output and local absolute path residue.
+
+## 1.8.10 - 2026-05-13
+
+- Preserved v1.8+ release notes in controller-safe exports so private `harness-controller` refreshes do not delete tracked release history.
+- Kept older embedded/project-specific v1.7 release notes out of the sanitized controller bundle.
+- Added export regression coverage for prior and current controller release notes.
+
+## 1.8.9 - 2026-05-13
+
+- Added `./harness target backlog commit <target> --run <implementation-run> --message "<msg>"` for explicit local product commits after a completed sidecar backlog implementation.
+- Kept the command dry-run by default; `--apply` commits only evidence-listed product paths and records receipt/evidence in the controller sidecar.
+- Added product diff fingerprinting to implementation evidence so stale same-path content changes fail closed before transition or commit.
+- Kept product push, Telegram-triggered product commits, and backlog state mutation out of this gate.
+
 ## 1.8.8 - 2026-05-13
 
 - Added `./harness target backlog transition <target> --status completed|blocked|manual-review` for explicit external controller sidecar backlog state changes after implementation evidence.
