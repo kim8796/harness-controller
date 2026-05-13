@@ -36,6 +36,10 @@ PRODUCT_DIFF_SMOKE_PUSH_CAUTION = (
     "automation. No automatic remote rollback is performed; coordinate with the branch owner and use "
     "an operator-reviewed revert or repo-policy recovery."
 )
+PRODUCT_IMPLEMENTATION_ROLLBACK_CAUTION = (
+    "This implementation gate leaves local product changes uncommitted. Review `git status --short` "
+    "and revert only the intended product diff; no automatic rollback is performed."
+)
 PRODUCT_HARNESS_MARKERS = (
     Path("harness"),
     Path("HARNESS.md"),
@@ -1011,6 +1015,37 @@ def product_diff_smoke_status_lines() -> list[str]:
     return [f"?? {PRODUCT_DIFF_SMOKE_FILE.as_posix()}"]
 
 
+def target_status_paths(status_lines: Sequence[str]) -> list[str]:
+    paths: list[str] = []
+    for raw_line in status_lines:
+        line = raw_line.rstrip()
+        if not line:
+            continue
+        path = line[3:] if len(line) >= 4 else line
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        path = path.strip()
+        if path:
+            paths.append(path)
+    return list(dict.fromkeys(paths))
+
+
+def product_implementation_rollback_guidance(target_root: Path, status_lines: Sequence[str]) -> list[str]:
+    paths = target_status_paths(status_lines)
+    if not paths:
+        return [PRODUCT_IMPLEMENTATION_ROLLBACK_CAUTION]
+    quoted_paths = " ".join(shlex.quote(path) for path in paths[:12])
+    guidance = [
+        PRODUCT_IMPLEMENTATION_ROLLBACK_CAUTION,
+        f"Inspect: git -C {shlex.quote(target_root.as_posix())} status --short",
+        f"Tracked rollback candidate: git -C {shlex.quote(target_root.as_posix())} restore --staged --worktree -- {quoted_paths}",
+        f"Untracked rollback candidate: git -C {shlex.quote(target_root.as_posix())} clean -f -- {quoted_paths}",
+    ]
+    if len(paths) > 12:
+        guidance.append(f"{len(paths) - 12} additional changed path(s) omitted from rollback command preview.")
+    return guidance
+
+
 def product_diff_smoke_rollback_command(target_root: Path | None = None) -> str:
     if target_root is None:
         return f"git clean -f -- {PRODUCT_DIFF_SMOKE_FILE.as_posix()}"
@@ -1191,6 +1226,8 @@ def write_target_run_smoke_report(
 
     if lane_execution == "plan-only":
         title = "# External Target Run Backlog Plan Smoke"
+    elif lane_execution == "backlog-implementation":
+        title = "# External Target Run Backlog Implementation"
     elif lane_execution == "backlog-product-diff-smoke":
         title = "# External Target Run Backlog-Bound Product Diff Smoke"
     elif product_diff_execution == "enabled":
@@ -1279,6 +1316,7 @@ def write_target_run_smoke_report(
             "- `--once` smoke 는 target boundary 검증만 수행한다.",
             "- `--plan-once` smoke 는 sidecar backlog 후보만 고르고 product repo 를 변경하지 않는다.",
             "- `--execute-backlog-once` smoke 는 선택 sidecar backlog 에 묶인 deterministic product diff 만 만들며 backlog 를 완료 처리하지 않는다.",
+            "- `--implement-backlog-once` 는 선택 sidecar backlog 를 AI implementer 에 넘겨 local product diff 만 만들며 backlog 완료/commit/push 는 하지 않는다.",
             "- `--execute-once` smoke 는 명시 opt-in 일 때만 product diff 를 만든다.",
             "- `--execute-once --commit` smoke 는 deterministic product diff 를 local commit 으로 닫지만 push 하지 않는다.",
             "- `--execute-once --commit --push` smoke 는 remote branch 를 갱신하는 externally visible 검증이다.",

@@ -571,7 +571,11 @@ def test_external_target_run_requires_exactly_one_mode(monkeypatch, tmp_path: Pa
     assert "하나만 명시" in capsys.readouterr().out
     assert module.main(["target", "run", "demo", "--execute-once", "--execute-backlog-once"]) == 2
     assert "하나만 명시" in capsys.readouterr().out
+    assert module.main(["target", "run", "demo", "--implement-backlog-once", "--execute-backlog-once"]) == 2
+    assert "하나만 명시" in capsys.readouterr().out
     assert module.main(["target", "run", "demo", "--execute-backlog-once", "--commit"]) == 2
+    assert "`--commit`은 `--execute-once`" in capsys.readouterr().out
+    assert module.main(["target", "run", "demo", "--implement-backlog-once", "--commit"]) == 2
     assert "`--commit`은 `--execute-once`" in capsys.readouterr().out
     assert module.main(["target", "run", "demo", "--execute-backlog-once", "--push"]) == 2
     assert "`--push`는 `--execute-once --commit`" in capsys.readouterr().out
@@ -594,7 +598,9 @@ def test_external_target_run_help_describes_commit_gate(capsys) -> None:
     assert excinfo.value.code == 0
     assert "--plan-once" in output
     assert "--execute-backlog-once" in output
+    assert "--implement-backlog-once" in output
     assert "no AI" in output
+    assert "local product diff only" in output
     assert "implementation lane" in output
     assert "no backlog completion" in output
     assert "no commit" in output
@@ -835,6 +841,174 @@ def test_external_target_run_execute_backlog_once_creates_backlog_bound_product_
     ]
     assert outbox_files
     assert "선택 backlog BL-demo" in outbox_files[0].read_text(encoding="utf-8")
+    assert not (controller / "targets" / "demo" / "locks" / "target-run.lock").exists()
+
+
+def test_external_target_run_implement_backlog_once_creates_local_product_diff_only(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    head_before = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.strip()
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.5")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product), "--display-name", "Demo App"]) == 0
+    assert module.main(["target", "alias", "add", "demo", "app"]) == 0
+    backlog = _write_sidecar_backlog(controller)
+    before_backlog_body = backlog.read_text(encoding="utf-8")
+    capsys.readouterr()
+
+    command = "printf 'implemented\\n' > feature.txt && printf 'Implementation done\\n'"
+    assert (
+        module.main(
+            [
+                "target",
+                "run",
+                "@app",
+                "--implement-backlog-once",
+                "--runner",
+                "custom",
+                "--command-template",
+                command,
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    status_after = subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.splitlines()
+    head_after = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.strip()
+
+    assert "backlog 구현 lane 완료" in output
+    assert "대상 ID: `demo`" in output
+    assert "선택 backlog: `BL-demo` (`backlog/queued/BL-demo.md`)" in output
+    assert "AI 제품 구현 lane: 실행 완료" in output
+    assert "선택 backlog 기반 AI 구현 local diff" in output
+    assert "product commit/push: 없음" in output
+    assert "backlog 상태 변경: 없음" in output
+    assert "feature.txt" in output
+    assert status_after == ["?? feature.txt"]
+    assert head_before == head_after
+    assert (product / "feature.txt").read_text(encoding="utf-8") == "implemented\n"
+    assert backlog.read_text(encoding="utf-8") == before_backlog_body
+    _assert_no_product_harness_pollution(product)
+    evidence_paths = list((controller / "targets" / "demo" / "runs" / "harness").glob("*/generated-evidence.json"))
+    assert evidence_paths
+    evidence = json.loads(evidence_paths[0].read_text(encoding="utf-8"))
+    assert evidence["root_context"]["target_id"] == "demo"
+    assert evidence["product_implementation"] == "enabled"
+    assert evidence["product_commit"] == "disabled"
+    assert evidence["product_push"] == "disabled"
+    assert evidence["lane_execution"] == "backlog-implementation"
+    assert evidence["product_diff_paths"] == ["feature.txt"]
+    assert evidence["external_backlog"]["id"] == "BL-demo"
+    assert evidence["implementation_lane"]["returncode"] == 0
+    smoke_report = controller / "targets" / "demo" / "reports" / "target-run-latest.md"
+    smoke_body = smoke_report.read_text(encoding="utf-8")
+    assert "# External Target Run Backlog Implementation" in smoke_body
+    assert "Lane execution: `backlog-implementation`" in smoke_body
+    assert "Expected Product Diff\n\n- `feature.txt`" in smoke_body
+    outbox_files = [
+        path for path in (controller / "targets" / "demo" / "operator-outbox").glob("*.md")
+        if path.name != "README.md"
+    ]
+    assert outbox_files
+    assert "AI 구현 lane" in outbox_files[0].read_text(encoding="utf-8")
+    assert not (controller / "targets" / "demo" / "locks" / "target-run.lock").exists()
+
+
+def test_external_target_run_implement_backlog_once_blocks_harness_pollution(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    head_before = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.strip()
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.5")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    _write_sidecar_backlog(controller)
+    capsys.readouterr()
+
+    command = "printf '# bad\\n' > HARNESS.md && printf 'polluted\\n'"
+    assert (
+        module.main(
+            [
+                "target",
+                "run",
+                "demo",
+                "--implement-backlog-once",
+                "--runner",
+                "custom",
+                "--command-template",
+                command,
+            ]
+        )
+        == 2
+    )
+    output = capsys.readouterr().out
+    head_after = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.strip()
+    smoke_body = (controller / "targets" / "demo" / "reports" / "target-run-latest.md").read_text(encoding="utf-8")
+
+    assert "target run 중단" in output
+    assert "target-harness-files-present" in output
+    assert "external-state-plumbing-failed" in output
+    assert "product commit/push: 없음" in output
+    assert "backlog 완료 처리: 없음" in output
+    assert head_before == head_after
+    assert (product / "HARNESS.md").exists()
+    assert "Result: `blocked`" in smoke_body
+    assert "Lane execution: `backlog-implementation`" in smoke_body
+    assert "HARNESS.md" in smoke_body
     assert not (controller / "targets" / "demo" / "locks" / "target-run.lock").exists()
 
 

@@ -1,5 +1,12 @@
 # Harness Changelog
 
+## 1.8.6 - 2026-05-13
+
+- Added `./harness target run <target> --implement-backlog-once` as the first external controller real implementation gate.
+- Reused sidecar queued auto backlog selection and hidden RootContext revalidation before running the implementer.
+- Runs one implementer lane in the target product repo and leaves only local product diffs; no backlog completion, commit, push, or Telegram-triggered execution is enabled.
+- Records implementer runner evidence, selected backlog metadata, product before/after HEAD/status, changed paths, and rollback guidance in controller sidecar reports/outbox.
+
 ## 1.8.5 - 2026-05-13
 
 - Added `./harness target run <target> --execute-backlog-once` as a backlog-bound local product diff smoke.

@@ -737,6 +737,7 @@ class AutonomyRootContext:
     inbox_processed_path: Path
     outbox_path: Path
     product_execution_enabled: bool = False
+    product_implementation_enabled: bool = False
     product_commit_enabled: bool = False
     product_push_enabled: bool = False
     external_backlog_id: str = ""
@@ -757,6 +758,7 @@ class AutonomyRootContext:
             "inbox_processed_path": self.inbox_processed_path.as_posix(),
             "outbox_path": self.outbox_path.as_posix(),
             "product_execution_enabled": self.product_execution_enabled,
+            "product_implementation_enabled": self.product_implementation_enabled,
             "product_commit_enabled": self.product_commit_enabled,
             "product_push_enabled": self.product_push_enabled,
             "external_backlog_id": self.external_backlog_id,
@@ -8359,6 +8361,7 @@ def resolve_autonomy_root_context(args: argparse.Namespace) -> AutonomyRootConte
             inbox_processed_path=DEFAULT_INBOX_PROCESSED_PATH,
             outbox_path=DEFAULT_OUTBOX_PATH,
             product_execution_enabled=True,
+            product_implementation_enabled=False,
             product_commit_enabled=False,
             product_push_enabled=False,
         )
@@ -8389,7 +8392,11 @@ def resolve_autonomy_root_context(args: argparse.Namespace) -> AutonomyRootConte
         inbox_path=external_paths["inbox_path"],
         inbox_processed_path=external_paths["inbox_processed_path"],
         outbox_path=external_paths["outbox_path"],
-        product_execution_enabled=bool(getattr(args, "external_product_execution", False)),
+        product_execution_enabled=bool(
+            getattr(args, "external_product_execution", False)
+            or getattr(args, "external_product_implementation", False)
+        ),
+        product_implementation_enabled=bool(getattr(args, "external_product_implementation", False)),
         product_commit_enabled=bool(getattr(args, "external_product_commit", False)),
         product_push_enabled=bool(getattr(args, "external_product_push", False)),
         external_backlog_id=str(getattr(args, "external_backlog_id", "") or "").strip(),
@@ -8458,6 +8465,54 @@ def _external_backlog_contract_payload(context: AutonomyRootContext, record: Any
     raise AutonomyError("external backlog path was not discovered by canonical backlog parser")
 
 
+def build_external_product_implementation_prompt(
+    context: AutonomyRootContext,
+    *,
+    backlog_payload: Mapping[str, str],
+    backlog_text: str,
+) -> str:
+    return "\n".join(
+        [
+            "# External Harness Product Implementation",
+            "",
+            "You are the implementer for an external harness controller target.",
+            "",
+            "## Hard Boundaries",
+            "",
+            f"- Target product repo: `{context.target_root}`",
+            f"- Controller root: `{context.controller_root}`",
+            f"- Sidecar state root: `{context.state_root}`",
+            f"- Target ID: `{context.target_id}`",
+            "- Edit only product files inside the target product repo.",
+            "- Do not write harness state, reports, runs, backlog, targets, `.env*`, or harness scripts into the product repo.",
+            "- Do not commit, push, start long-running servers, or mutate external services.",
+            "- Leave backlog state unchanged; this gate is local diff only.",
+            "- If the task is unsafe or underspecified, leave product files unchanged and explain the blocker.",
+            "",
+            "## Selected Sidecar Backlog",
+            "",
+            f"- ID: `{backlog_payload.get('id', '')}`",
+            f"- Path: `{backlog_payload.get('path', '')}`",
+            f"- Title: `{backlog_payload.get('title', '')}`",
+            f"- Priority: `{backlog_payload.get('priority', '')}`",
+            f"- Goal: `{backlog_payload.get('goal', '')}`",
+            "",
+            "## Backlog Body",
+            "",
+            "```markdown",
+            backlog_text.strip(),
+            "```",
+            "",
+            "## Required Output",
+            "",
+            "- Implement the smallest product-only local diff that satisfies the backlog acceptance criteria.",
+            "- In your final response, summarize changed product files and validation performed.",
+            "- If no implementation is possible, return a clear blocker instead of inventing harness state.",
+            "",
+        ]
+    )
+
+
 def _allocate_external_run_dir(state_root: Path, target_id: str, requested_run_id: str | None) -> Path:
     run_id = requested_run_id or (
         f"external-{slugify(target_id)}-rootcontext-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
@@ -8490,12 +8545,18 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
     if str(lock_payload.get("target_id") or "") != context.target_id or str(lock_payload.get("token") or "") != lock_token:
         raise AutonomyError("external target lock owner mismatch")
     controller = _controller_support()
+    if context.product_implementation_enabled and not context.product_execution_enabled:
+        raise AutonomyError("external product implementation requires product execution")
+    if context.product_implementation_enabled and (context.product_commit_enabled or context.product_push_enabled):
+        raise AutonomyError("external product implementation is local diff only; commit/push are disabled")
     if context.product_commit_enabled and not context.product_execution_enabled:
         raise AutonomyError("external product commit requires product execution")
     if context.product_push_enabled and not context.product_commit_enabled:
         raise AutonomyError("external product push requires product commit")
     record = controller.load_target(context.controller_root, context.target_id)
     backlog_payload = _external_backlog_contract_payload(context, record)
+    if context.product_implementation_enabled and backlog_payload is None:
+        raise AutonomyError("external product implementation requires a selected sidecar backlog")
     if backlog_payload and (context.product_commit_enabled or context.product_push_enabled):
         raise AutonomyError("external backlog-bound smoke does not allow commit or push")
     verification = controller.verify_target(record)
@@ -8544,7 +8605,56 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
     product_push_remote_after = ""
     product_push_error = ""
     expected_status_after: list[str] = []
-    if context.product_execution_enabled:
+    implementation_lane_result: RunnerInvocation | None = None
+    if context.product_implementation_enabled:
+        if backlog_payload is None:
+            raise AutonomyError("external product implementation requires selected backlog payload")
+        backlog_relative = Path(backlog_payload["path"])
+        backlog_text = read_text(context.state_root / backlog_relative)
+        implementation_selection = SelectedTask(
+            mode="execute",
+            task_slug=run_dir.name,
+            title=f"External target implementation for {context.target_id}: {backlog_payload['id']}",
+            backlog_path=backlog_relative,
+            source=f"external-backlog-implementation:{context.target_id}:{backlog_payload['id']}",
+        )
+        timeout_budget = resolve_lane_timeout_budget(
+            context.state_root,
+            implementation_selection,
+            lane="implementer",
+            fixed_override_seconds=fixed_runner_timeout_seconds_from_args(args),
+            cap_seconds=adaptive_timeout_cap_seconds_from_args(args),
+        )
+        implementation_prompt = build_external_product_implementation_prompt(
+            context,
+            backlog_payload=backlog_payload,
+            backlog_text=backlog_text,
+        )
+        implementation_lane_result = run_lane(
+            "implementer",
+            repo_root=context.controller_root,
+            worktree_path=context.target_root,
+            run_dir=run_dir,
+            report_dir=report_dir,
+            runner=str(getattr(args, "runner", "codex") or "codex"),
+            runner_model=getattr(args, "runner_model", None),
+            codex_global_skills=tuple(getattr(args, "codex_global_skill", ())),
+            command_template=getattr(args, "command_template", None),
+            prompt=implementation_prompt,
+            timeout_seconds=timeout_budget.timeout_seconds,
+        )
+        _write_external_sidecar_text(
+            context.state_root,
+            run_dir / "implementer.md",
+            implementation_lane_result.response_text,
+            label="external implementation response",
+        )
+        if implementation_lane_result.returncode != 0:
+            raise AutonomyError(
+                "external product implementation lane failed with exit code "
+                f"{implementation_lane_result.returncode}"
+            )
+    elif context.product_execution_enabled:
         relative = controller.PRODUCT_DIFF_SMOKE_FILE
         if relative.is_absolute() or ".." in relative.parts:
             raise AutonomyError("external product smoke path is invalid")
@@ -8599,6 +8709,12 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
             )
             if product_push_remote_after != product_commit_sha:
                 raise AutonomyError("external target push smoke remote head is unexpected")
+    elif context.product_implementation_enabled:
+        if before_head != after_head:
+            raise AutonomyError("external product implementation must not create commits")
+        if not after_status:
+            raise AutonomyError("external product implementation made no product diff")
+        product_diff_paths = [Path(path) for path in controller.target_status_paths(after_status)]
     elif after_status != expected_status_after or before_head != after_head:
         raise AutonomyError("external target changed unexpectedly during target run smoke")
     post_verification = controller.verify_target(record)
@@ -8611,7 +8727,9 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
         mode="external",
         task_slug=run_dir.name,
         title=(
-            f"External target backlog product diff smoke for {context.target_id}: {backlog_payload['id']}"
+            f"External target backlog implementation for {context.target_id}: {backlog_payload['id']}"
+            if context.product_implementation_enabled and backlog_payload
+            else f"External target backlog product diff smoke for {context.target_id}: {backlog_payload['id']}"
             if backlog_payload
             else
             f"External target product diff smoke for {context.target_id}"
@@ -8620,7 +8738,9 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
         ),
         backlog_path=None,
         source=(
-            f"external-backlog-product-diff:{context.target_id}:{backlog_payload['id']}"
+            f"external-backlog-implementation:{context.target_id}:{backlog_payload['id']}"
+            if context.product_implementation_enabled and backlog_payload
+            else f"external-backlog-product-diff:{context.target_id}:{backlog_payload['id']}"
             if backlog_payload
             else
             f"external-product-diff:{context.target_id}"
@@ -8628,11 +8748,12 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
             else f"external-rootcontext:{context.target_id}"
         ),
     )
-    diff_summary = (
-        DiffSummary(1, len(controller.PRODUCT_DIFF_SMOKE_CONTENT.splitlines()), 0, tuple(product_diff_paths))
-        if context.product_execution_enabled
-        else DiffSummary(0, 0, 0, tuple())
-    )
+    if context.product_implementation_enabled:
+        diff_summary = parse_diff_summary(context.target_root)
+    elif context.product_execution_enabled:
+        diff_summary = DiffSummary(1, len(controller.PRODUCT_DIFF_SMOKE_CONTENT.splitlines()), 0, tuple(product_diff_paths))
+    else:
+        diff_summary = DiffSummary(0, 0, 0, tuple())
     outcome = CycleOutcome(
         status="completed" if context.product_execution_enabled else "no-op",
         selection=selection,
@@ -8645,7 +8766,9 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
         diff_summary=diff_summary,
         significant=context.product_execution_enabled,
         runner_model_summary=(
-            "external product smoke; product push enabled"
+            "external product implementation; local diff only"
+            if context.product_implementation_enabled
+            else "external product smoke; product push enabled"
             if context.product_push_enabled
             else "external product diff smoke; product commit/push disabled"
             if context.product_execution_enabled
@@ -8665,6 +8788,7 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
         "product_status_before": before_status,
         "product_status_after": after_status,
         "product_execution": "enabled" if context.product_execution_enabled else "disabled",
+        "product_implementation": "enabled" if context.product_implementation_enabled else "disabled",
         "product_diff_paths": [path.as_posix() for path in product_diff_paths],
         "product_commit": "enabled" if context.product_commit_enabled else "disabled",
         "product_commit_sha": product_commit_sha,
@@ -8682,6 +8806,18 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
         "product_push_error": product_push_error,
         "product_push_caution": controller.PRODUCT_DIFF_SMOKE_PUSH_CAUTION if context.product_push_enabled else "",
         "external_backlog": backlog_payload,
+        "implementation_lane": (
+            {
+                "returncode": implementation_lane_result.returncode,
+                "runner_model": implementation_lane_result.runner_model or "",
+                "prompt_path": implementation_lane_result.prompt_path.as_posix(),
+                "response_path": implementation_lane_result.response_path.as_posix(),
+                "stdout_path": implementation_lane_result.stdout_path.as_posix(),
+                "stderr_path": implementation_lane_result.stderr_path.as_posix(),
+            }
+            if implementation_lane_result is not None
+            else None
+        ),
         "rollback_guidance": (
             [
                 controller.PRODUCT_DIFF_SMOKE_PUSH_CAUTION,
@@ -8691,6 +8827,8 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
             if context.product_push_enabled
             else [controller.product_diff_smoke_commit_rollback_command(context.target_root, before_head)]
             if context.product_commit_enabled
+            else controller.product_implementation_rollback_guidance(context.target_root, after_status)
+            if context.product_implementation_enabled
             else [controller.product_diff_smoke_rollback_command(context.target_root)]
             if context.product_execution_enabled
             else []
@@ -8700,9 +8838,17 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
             if context.product_push_enabled
             else controller.PRODUCT_DIFF_SMOKE_COMMIT_ROLLBACK_CAUTION
             if context.product_commit_enabled
+            else controller.PRODUCT_IMPLEMENTATION_ROLLBACK_CAUTION
+            if context.product_implementation_enabled
             else ""
         ),
-        "lane_execution": "backlog-product-diff-smoke" if backlog_payload else "not-started",
+        "lane_execution": (
+            "backlog-implementation"
+            if context.product_implementation_enabled
+            else "backlog-product-diff-smoke"
+            if backlog_payload
+            else "not-started"
+        ),
         "verification": verification,
         "post_verification": post_verification,
     }
@@ -8718,6 +8864,7 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
         payload,
         label="external generated evidence json",
     )
+    lane_execution_label = str(payload["lane_execution"])
     _write_external_sidecar_text(
         context.state_root,
         generated_evidence_md_path,
@@ -8731,7 +8878,8 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
                 f"- Target root: `{context.target_root}`",
                 f"- State root: `{context.state_root}`",
                 f"- Product execution: `{'enabled' if context.product_execution_enabled else 'disabled'}`",
-                f"- Lane execution: `{'backlog-product-diff-smoke' if backlog_payload else 'not-started'}`",
+                f"- Product implementation: `{'enabled' if context.product_implementation_enabled else 'disabled'}`",
+                f"- Lane execution: `{lane_execution_label}`",
                 f"- External backlog: `{backlog_payload['id'] if backlog_payload else 'none'}`",
                 f"- External backlog path: `{backlog_payload['path'] if backlog_payload else 'none'}`",
                 f"- Product diff: `{', '.join(path.as_posix() for path in product_diff_paths) if product_diff_paths else 'none'}`",
@@ -8751,7 +8899,7 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
     )
     report_body = cycle_report_markdown(
         outcome,
-        [],
+        [implementation_lane_result] if implementation_lane_result is not None else [],
         manager_decision=None,
         reviewer_decision=None,
         verifier_result=None,
@@ -8767,7 +8915,8 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
         + f"- state_root: `{context.state_root}`\n"
         + "- 상태 배관 점검: `완료`\n"
         + f"- 제품 변경 실행: `{'활성화' if context.product_execution_enabled else '비활성화'}`\n"
-        + f"- lane 실행: `{'backlog-product-diff-smoke' if backlog_payload else '시작 안 함'}`\n"
+        + f"- product implementation: `{'활성화' if context.product_implementation_enabled else '비활성화'}`\n"
+        + f"- lane 실행: `{lane_execution_label if lane_execution_label != 'not-started' else '시작 안 함'}`\n"
         + (
             f"- 선택 backlog: `{backlog_payload['id']}` (`{backlog_payload['path']}`)\n"
             if backlog_payload
@@ -8794,7 +8943,7 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
         )
         + (
             f"- rollback 주의: `{payload['rollback_safety_note']}`\n"
-            if context.product_commit_enabled
+            if context.product_commit_enabled or context.product_implementation_enabled
             else ""
         )
         + (
@@ -8824,12 +8973,13 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
             "target_id": context.target_id,
             "root_context": context.to_json(),
             "product_execution": "enabled" if context.product_execution_enabled else "disabled",
+            "product_implementation": "enabled" if context.product_implementation_enabled else "disabled",
             "product_diff_paths": [path.as_posix() for path in product_diff_paths],
             "product_commit": "enabled" if context.product_commit_enabled else "disabled",
             "product_commit_sha": product_commit_sha,
             "product_push": "enabled" if context.product_push_enabled else "disabled",
             "product_push_sha": product_push_sha,
-            "lane_execution": "backlog-product-diff-smoke" if backlog_payload else "not-started",
+            "lane_execution": lane_execution_label,
             "external_backlog": backlog_payload,
             "worktree_path": str(context.target_root),
             "state_source": outcome.state_source,
@@ -8844,7 +8994,7 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
             f"다음 확인: ./harness target status {context.target_id} 또는 "
             f"./harness target dashboard {context.target_id}."
             + (
-                f" product smoke rollback: {payload['rollback_guidance'][0]}"
+                f" product rollback: {payload['rollback_guidance'][0]}"
                 if context.product_execution_enabled
                 else " 제품 변경 실행은 비활성화입니다."
             )
@@ -8854,7 +9004,9 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
         source=selection.source,
         changed_paths=[path.as_posix() for path in product_diff_paths],
         operator_summary=(
-            f"대상 {context.target_id}: 선택 backlog {backlog_payload['id']}에 묶인 product diff smoke가 완료되었습니다."
+            f"대상 {context.target_id}: 선택 backlog {backlog_payload['id']} 구현 lane이 local diff를 만들었습니다."
+            if context.product_implementation_enabled and backlog_payload
+            else f"대상 {context.target_id}: 선택 backlog {backlog_payload['id']}에 묶인 product diff smoke가 완료되었습니다."
             if backlog_payload
             else
             f"대상 {context.target_id}: product diff smoke가 완료되었습니다."
@@ -8862,7 +9014,9 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
             else f"대상 {context.target_id}: 상태 배관 점검이 완료되었습니다."
         ),
         operator_result=(
-            "선택 sidecar backlog에 묶인 local product diff smoke가 완료됐습니다. AI 구현 lane, backlog 완료 처리, commit, push는 없습니다."
+            "선택 sidecar backlog AI 구현 lane이 완료됐습니다. local product diff만 남겼고 backlog 완료 처리, commit, push는 없습니다."
+            if context.product_implementation_enabled and backlog_payload
+            else "선택 sidecar backlog에 묶인 local product diff smoke가 완료됐습니다. AI 구현 lane, backlog 완료 처리, commit, push는 없습니다."
             if backlog_payload
             else "명시 opt-in product smoke local commit이 완료됐습니다. push는 없습니다."
             if context.product_commit_enabled and not context.product_push_enabled
@@ -8882,7 +9036,7 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
             )
             + (
                 f" 주의: {payload['rollback_safety_note']}"
-                if context.product_commit_enabled
+                if context.product_commit_enabled or context.product_implementation_enabled
                 else ""
             )
             + (
@@ -8896,6 +9050,7 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
                 f"- 대상 ID: `{context.target_id}`\n"
                 f"- sidecar state root: `{context.state_root}`\n"
                 f"- 제품 변경 실행: `{'활성화' if context.product_execution_enabled else '비활성화'}`\n"
+                f"- product implementation: `{'활성화' if context.product_implementation_enabled else '비활성화'}`\n"
                 + (
                     f"- 선택 backlog: `{backlog_payload['id']}` (`{backlog_payload['path']}`)\n"
                     if backlog_payload
@@ -8922,7 +9077,7 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
                     if context.product_push_enabled
                     else ""
                 )
-                + "- lane 실행: `시작 안 함`"
+                + f"- lane 실행: `{lane_execution_label if lane_execution_label != 'not-started' else '시작 안 함'}`"
             )
         },
         outbox_path=context.outbox_path,
@@ -10424,6 +10579,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-root", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--target-id", help=argparse.SUPPRESS)
     parser.add_argument("--external-product-execution", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--external-product-implementation", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--external-product-commit", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--external-product-push", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--external-backlog-id", help=argparse.SUPPRESS)
