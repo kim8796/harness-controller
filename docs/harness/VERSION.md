@@ -1,8 +1,14 @@
 # Harness Framework Version
 
-- Current Version: 1.8.3
+- Current Version: 1.8.4
 - Release Date: 2026-05-13
 - Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + on-demand export output.
+
+## What Changed In 1.8.4
+
+- Added `./harness target run <id|@alias|@default> --plan-once` as a sidecar backlog plan gate.
+- The new mode reuses the canonical backlog discovery/selection path against `targets/<id>/backlog`, reports the selected executable backlog item, and leaves product HEAD/status unchanged.
+- Kept general product-changing autonomy disabled; `--plan-once` starts no lane and creates no product diff, commit, or push.
 
 ## What Changed In 1.8.3
 

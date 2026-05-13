@@ -1,5 +1,12 @@
 # Harness Changelog
 
+## 1.8.4 - 2026-05-13
+
+- Added `./harness target run <target> --plan-once` as a sidecar backlog plan gate before opening general product-changing autonomy.
+- Reused the canonical backlog parser/selector against `targets/<id>/backlog` and recorded the selected queued auto item in the target run report.
+- Kept product repo HEAD/status unchanged and left diff, commit, push, and general autonomy execution disabled for this mode.
+- Fail closed with `no-executable-sidecar-backlog` when the external sidecar has no queued auto backlog item.
+
 ## 1.8.3 - 2026-05-13
 
 - Added `./harness target run <target> --execute-once --commit --push` as the explicit external product smoke push gate.

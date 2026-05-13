@@ -90,9 +90,82 @@ def test_state_paths_external_resolves_target_scoped_paths(tmp_path: Path) -> No
     assert paths.target_config == controller.resolve() / "targets" / "demo" / "target.json"
     assert paths.operator_inbox == controller.resolve() / "targets" / "demo" / "operator-inbox"
     assert paths.operator_outbox == controller.resolve() / "targets" / "demo" / "operator-outbox"
+    assert paths.backlog_dir == controller.resolve() / "targets" / "demo" / "backlog"
+    assert paths.backlog_queued_dir == controller.resolve() / "targets" / "demo" / "backlog" / "queued"
     assert paths.dashboard == controller.resolve() / "targets" / "demo" / "reports" / "operator-dashboard-latest.md"
     assert payload["state_paths"]["operator_inbox"] == paths.operator_inbox.as_posix()
+    assert payload["state_paths"]["backlog_queued"] == paths.backlog_queued_dir.as_posix()
     assert payload["root_context"] == paths.root_context().to_json()
+    assert module.validate_sidecar_backlog_integrity(paths) == []
+
+
+def test_sidecar_backlog_symlink_fails_closed(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_git_repo(product)
+
+    record = module.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.4",
+    )
+    paths = record.state_paths(controller)
+    queued = paths.backlog_queued_dir
+    for child in queued.iterdir():
+        if child.is_file():
+            child.unlink()
+    queued.rmdir()
+    queued.symlink_to(product)
+
+    with pytest.raises(module.ControllerError, match="sidecar backlog path must not be a symlink"):
+        module.validate_sidecar_backlog_integrity(paths)
+
+
+def test_sidecar_backlog_file_symlink_fails_closed(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_git_repo(product)
+
+    record = module.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.4",
+    )
+    paths = record.state_paths(controller)
+    link = paths.backlog_queued_dir / "BL-linked.md"
+    link.symlink_to(product / "README.md")
+
+    with pytest.raises(module.ControllerError, match="sidecar backlog file must not be a symlink"):
+        module.validate_sidecar_backlog_integrity(paths)
+
+
+def test_sidecar_backlog_non_regular_markdown_fails_closed(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_git_repo(product)
+
+    record = module.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.4",
+    )
+    paths = record.state_paths(controller)
+    (paths.backlog_queued_dir / "BL-directory.md").mkdir()
+
+    with pytest.raises(module.ControllerError, match="sidecar backlog file must be a regular file"):
+        module.validate_sidecar_backlog_integrity(paths)
 
 
 def test_state_paths_keep_targets_isolated(tmp_path: Path) -> None:

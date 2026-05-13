@@ -67,6 +67,13 @@ SIDECAR_DIRS = (
     Path("state"),
     Path("locks"),
 )
+BACKLOG_SIDECAR_DIRS = (
+    Path("backlog"),
+    Path("backlog/queued"),
+    Path("backlog/active"),
+    Path("backlog/blocked"),
+    Path("backlog/completed"),
+)
 
 
 class ControllerError(RuntimeError):
@@ -189,6 +196,14 @@ class StatePaths:
         return self.reports_dir / "target-run-latest.md"
 
     @property
+    def backlog_dir(self) -> Path:
+        return self.state_root / "backlog"
+
+    @property
+    def backlog_queued_dir(self) -> Path:
+        return self.backlog_dir / "queued"
+
+    @property
     def operator_inbox(self) -> Path:
         return self.state_root / "operator-inbox"
 
@@ -222,6 +237,8 @@ class StatePaths:
             "operator_inbox": self.operator_inbox.as_posix(),
             "operator_outbox": self.operator_outbox.as_posix(),
             "reports": self.reports_dir.as_posix(),
+            "backlog": self.backlog_dir.as_posix(),
+            "backlog_queued": self.backlog_queued_dir.as_posix(),
             "locks": self.locks_dir.as_posix(),
             "state": self.state_dir.as_posix(),
             "mode": self.mode,
@@ -376,7 +393,7 @@ def resolve_external_state_paths(*, controller_root: Path, target_id: str, targe
 def ensure_sidecar_dirs(state_root: Path) -> None:
     if state_root.is_symlink():
         raise ControllerError(f"target sidecar directory must not be a symlink: {state_root.as_posix()}")
-    for relative in SIDECAR_DIRS:
+    for relative in (*SIDECAR_DIRS, *BACKLOG_SIDECAR_DIRS):
         path = state_root / relative
         if path.is_symlink():
             raise ControllerError(f"sidecar path must not be a symlink: {path.as_posix()}")
@@ -445,6 +462,31 @@ def validate_sidecar_integrity(state_root: Path) -> list[str]:
     if file_paths:
         raise ControllerError("sidecar path must be a directory: " + ", ".join(file_paths))
     return [relative.as_posix() for relative in SIDECAR_DIRS if not (state_root / relative).exists()]
+
+
+def validate_sidecar_backlog_integrity(state_paths: StatePaths) -> list[str]:
+    validate_sidecar_integrity(state_paths.state_root)
+    resolved_state = state_paths.state_root.resolve()
+    missing: list[str] = []
+    for relative in BACKLOG_SIDECAR_DIRS:
+        path = state_paths.state_root / relative
+        if path.is_symlink():
+            raise ControllerError(f"sidecar backlog path must not be a symlink: {path.as_posix()}")
+        if path.exists() and not path.is_dir():
+            raise ControllerError(f"sidecar backlog path must be a directory: {path.as_posix()}")
+        if path.exists() and not _path_is_relative_to(path.resolve(), resolved_state):
+            raise ControllerError("sidecar backlog path must stay inside target state root")
+        if not path.exists():
+            missing.append(relative.as_posix())
+    if state_paths.backlog_dir.exists():
+        for entry in sorted(state_paths.backlog_dir.rglob("*.md")):
+            if entry.is_symlink():
+                raise ControllerError(f"sidecar backlog file must not be a symlink: {entry.as_posix()}")
+            if not entry.is_file():
+                raise ControllerError(f"sidecar backlog file must be a regular file: {entry.as_posix()}")
+            if not _path_is_relative_to(entry.resolve(), resolved_state):
+                raise ControllerError("sidecar backlog file must stay inside target state root")
+    return missing
 
 
 def _prepare_sidecar_file_for_write(*, state_root: Path, path: Path, label: str) -> Path:
@@ -1088,6 +1130,7 @@ def write_dashboard(*, controller_root: Path, record: TargetRecord, verification
             "- 이 dashboard 는 read-only projection 이다.",
             "- product repo 에 harness runtime 파일을 자동으로 쓰지 않는다.",
             "- `target run --once` 는 read-only/no-op smoke 로 target boundary 만 검증할 수 있다.",
+            "- `target run --plan-once` 는 sidecar backlog 후보만 고르고 product repo 를 변경하지 않는다.",
             "- `target run --execute-once` 는 deterministic product diff smoke 를 만들 수 있다.",
             "- `target run --execute-once --commit` 은 그 smoke 파일만 local commit 으로 닫고 push 하지 않는다.",
             "- `target run --execute-once --commit --push` 는 advanced smoke 로 remote branch 를 갱신할 수 있다.",
@@ -1129,6 +1172,7 @@ def write_target_run_smoke_report(
     expected_product_paths: Sequence[str] = (),
     product_commit_diff: Sequence[str] = (),
     rollback_guidance: Sequence[str] = (),
+    planned_backlog: Mapping[str, str] | None = None,
 ) -> Path:
     state_paths = record.state_paths(controller_root)
     validate_sidecar_integrity(state_paths.state_root)
@@ -1145,14 +1189,16 @@ def write_target_run_smoke_report(
             return ["- none"]
         return [f"- `{line}`" for line in lines]
 
-    title = (
-        "# External Target Run Product Diff Smoke"
-        if product_diff_execution == "enabled"
-        else "# External Target Run Read-Only Smoke"
-    )
+    if lane_execution == "plan-only":
+        title = "# External Target Run Backlog Plan Smoke"
+    elif product_diff_execution == "enabled":
+        title = "# External Target Run Product Diff Smoke"
+    else:
+        title = "# External Target Run Read-Only Smoke"
     expected_lines = [f"- `{path}`" for path in expected_product_paths] if expected_product_paths else ["- none"]
     commit_diff_lines = [f"- `{line}`" for line in product_commit_diff] if product_commit_diff else ["- none"]
     rollback_lines = [f"- `{line}`" for line in rollback_guidance] if rollback_guidance else ["- none"]
+    plan = dict(planned_backlog or {})
     if product_push_execution == "enabled":
         rollback_condition_lines = [f"- {PRODUCT_DIFF_SMOKE_PUSH_CAUTION}"]
     elif product_commit_execution == "enabled":
@@ -1187,6 +1233,11 @@ def write_target_run_smoke_report(
             f"- Product push remote after: `{product_push_remote_after or 'none'}`",
             f"- Product push command: `{push_command}`",
             f"- Product push error: `{product_push_error or 'none'}`",
+            f"- Planned backlog id: `{plan.get('id', 'none')}`",
+            f"- Planned backlog path: `{plan.get('path', 'none')}`",
+            f"- Planned backlog title: `{plan.get('title', 'none')}`",
+            f"- Planned backlog priority: `{plan.get('priority', 'none')}`",
+            f"- Planned backlog goal: `{plan.get('goal', 'none')}`",
             "",
             "## Product Git Status Before",
             "",
@@ -1212,9 +1263,19 @@ def write_target_run_smoke_report(
             "",
             *rollback_condition_lines,
             "",
+            "## Planned Backlog",
+            "",
+            f"- ID: `{plan.get('id', 'none')}`",
+            f"- Path: `{plan.get('path', 'none')}`",
+            f"- Title: `{plan.get('title', 'none')}`",
+            f"- Priority: `{plan.get('priority', 'none')}`",
+            f"- Goal: `{plan.get('goal', 'none')}`",
+            f"- Autonomy execute: `{plan.get('autonomy_execute', 'none')}`",
+            "",
             "## Operator Guidance",
             "",
             "- `--once` smoke 는 target boundary 검증만 수행한다.",
+            "- `--plan-once` smoke 는 sidecar backlog 후보만 고르고 product repo 를 변경하지 않는다.",
             "- `--execute-once` smoke 는 명시 opt-in 일 때만 product diff 를 만든다.",
             "- `--execute-once --commit` smoke 는 deterministic product diff 를 local commit 으로 닫지만 push 하지 않는다.",
             "- `--execute-once --commit --push` smoke 는 remote branch 를 갱신하는 externally visible 검증이다.",

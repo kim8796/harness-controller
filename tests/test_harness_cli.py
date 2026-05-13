@@ -49,6 +49,31 @@ def _assert_no_product_harness_pollution(product: Path) -> None:
         assert not any((product / "scripts").glob("harness*"))
 
 
+def _write_sidecar_backlog(controller: Path, target_id: str = "demo") -> Path:
+    backlog = controller / "targets" / target_id / "backlog" / "queued" / "BL-demo.md"
+    backlog.parent.mkdir(parents=True, exist_ok=True)
+    backlog.write_text(
+        "\n".join(
+            [
+                "ID: BL-demo",
+                "Title: Demo sidecar task",
+                "Status: queued",
+                "Priority: P1",
+                "Goal: external-demo",
+                "Source: test",
+                "Autonomy-Execute: auto",
+                "",
+                "## Summary",
+                "",
+                "- Plan-only external target task.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return backlog
+
+
 def test_run_requires_once_and_delegates_bounded_launcher(monkeypatch) -> None:
     module = _load_module()
     calls: list[tuple[str, list[str]]] = []
@@ -538,6 +563,10 @@ def test_external_target_run_requires_exactly_one_mode(monkeypatch, tmp_path: Pa
     assert "하나만 명시" in capsys.readouterr().out
     assert module.main(["target", "run", "demo", "--once", "--execute-once"]) == 2
     assert "하나만 명시" in capsys.readouterr().out
+    assert module.main(["target", "run", "demo", "--once", "--plan-once"]) == 2
+    assert "하나만 명시" in capsys.readouterr().out
+    assert module.main(["target", "run", "demo", "--plan-once", "--execute-once"]) == 2
+    assert "하나만 명시" in capsys.readouterr().out
     assert subprocess.run(
         ["git", "status", "--porcelain=v1"],
         cwd=product,
@@ -556,12 +585,310 @@ def test_external_target_run_help_describes_commit_gate(capsys) -> None:
 
     output = capsys.readouterr().out
     assert excinfo.value.code == 0
+    assert "--plan-once" in output
     assert "--commit" in output
     assert "--execute-once only" in output
     assert "local unpushed smoke" in output
     assert "commit; skips hooks/GPG signing" in output
     assert "skips hooks/GPG signing" in output
     assert "not a shared product" in output
+
+
+def test_external_target_run_plan_once_reports_sidecar_backlog_without_product_diff(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    head_before = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.strip()
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.4")
+    discovered_roots: list[Path] = []
+    original_discover = module.harness_loop.discover_backlog_items
+
+    def spy_discover(root: Path):
+        discovered_roots.append(root)
+        return original_discover(root)
+
+    monkeypatch.setattr(module.harness_loop, "discover_backlog_items", spy_discover)
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    assert module.main(["target", "alias", "add", "demo", "app"]) == 0
+    _write_sidecar_backlog(controller)
+    capsys.readouterr()
+
+    assert module.main(["target", "run", "@app", "--plan-once"]) == 0
+    output = capsys.readouterr().out
+    head_after = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.strip()
+    status_after = subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout
+
+    assert "외부 target backlog 계획 점검 완료" in output
+    assert "대상 ID: `demo`" in output
+    assert "계획된 backlog: `BL-demo`" in output
+    assert "lane 실행: 시작 안 함 (plan-only)" in output
+    assert "제품 변경 실행: 비활성화" in output
+    assert head_before == head_after
+    assert status_after == ""
+    assert not (product / "product-smoke-change.txt").exists()
+    _assert_no_product_harness_pollution(product)
+    assert not (controller / "targets" / "demo" / "runs" / "harness").exists()
+    smoke_report = controller / "targets" / "demo" / "reports" / "target-run-latest.md"
+    smoke_body = smoke_report.read_text(encoding="utf-8")
+    assert "# External Target Run Backlog Plan Smoke" in smoke_body
+    assert "Result: `planned`" in smoke_body
+    assert "Lane execution: `plan-only`" in smoke_body
+    assert "Product diff execution: `disabled`" in smoke_body
+    assert "Planned backlog id: `BL-demo`" in smoke_body
+    assert "Planned backlog path: `backlog/queued/BL-demo.md`" in smoke_body
+    assert "Demo sidecar task" in smoke_body
+    assert not (controller / "targets" / "demo" / "locks" / "target-run.lock").exists()
+    assert discovered_roots == [controller.resolve() / "targets" / "demo"]
+
+
+def test_external_target_run_plan_once_ignores_product_root_backlog_decoy(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    product_decoy = product / "backlog" / "queued" / "BL-product.md"
+    product_decoy.parent.mkdir(parents=True)
+    product_decoy.write_text(
+        "\n".join(
+            [
+                "ID: BL-product",
+                "Title: Product root decoy",
+                "Status: queued",
+                "Priority: P0",
+                "Autonomy-Execute: auto",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "README.md", "backlog/queued/BL-product.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.4")
+    monkeypatch.setattr(module.harness_controller, "_existing_harness_markers", lambda root: [])
+    monkeypatch.setattr(module.harness_controller, "_tracked_harness_markers", lambda root: [])
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    _write_sidecar_backlog(controller)
+    capsys.readouterr()
+
+    assert module.main(["target", "run", "demo", "--plan-once"]) == 0
+    output = capsys.readouterr().out
+
+    assert "계획된 backlog: `BL-demo`" in output
+    assert "BL-product" not in output
+    smoke_body = (controller / "targets" / "demo" / "reports" / "target-run-latest.md").read_text(encoding="utf-8")
+    assert "Planned backlog id: `BL-demo`" in smoke_body
+    assert "Product root decoy" not in smoke_body
+    assert subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout == ""
+
+
+def test_external_target_run_plan_once_blocks_without_executable_sidecar_backlog(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.4")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    capsys.readouterr()
+
+    assert module.main(["target", "run", "demo", "--plan-once"]) == 2
+    output = capsys.readouterr().out
+    status_after = subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout
+
+    assert "target run 계획 중단" in output
+    assert "no-executable-sidecar-backlog" in output
+    assert "Status: queued" in output
+    assert "lane 실행: 시작 안 함 (plan-only)" in output
+    assert "제품 변경 실행: 비활성화" in output
+    assert "product diff/commit/push: 없음" in output
+    assert status_after == ""
+    assert not (product / "product-smoke-change.txt").exists()
+    _assert_no_product_harness_pollution(product)
+    smoke_body = (controller / "targets" / "demo" / "reports" / "target-run-latest.md").read_text(encoding="utf-8")
+    assert "Result: `blocked`" in smoke_body
+    assert "no-executable-sidecar-backlog" in smoke_body
+    assert "Product diff execution: `disabled`" in smoke_body
+
+
+def test_external_target_run_plan_once_blocks_manual_review_only_backlog(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.4")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    backlog = controller / "targets" / "demo" / "backlog" / "queued" / "BL-manual.md"
+    backlog.write_text(
+        "\n".join(
+            [
+                "ID: BL-manual",
+                "Title: Manual review task",
+                "Status: queued",
+                "Priority: P0",
+                "Autonomy-Execute: manual-review",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    capsys.readouterr()
+
+    assert module.main(["target", "run", "demo", "--plan-once"]) == 2
+    output = capsys.readouterr().out
+
+    assert "no-executable-sidecar-backlog" in output
+    assert subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout == ""
+    smoke_body = (controller / "targets" / "demo" / "reports" / "target-run-latest.md").read_text(encoding="utf-8")
+    assert "Planned backlog id: `none`" in smoke_body
+
+
+def test_external_target_run_plan_once_blocks_symlinked_backlog_file(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.4")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    link = controller / "targets" / "demo" / "backlog" / "queued" / "BL-linked.md"
+    link.symlink_to(product / "README.md")
+    capsys.readouterr()
+
+    assert module.main(["target", "run", "demo", "--plan-once"]) == 2
+    output = capsys.readouterr().out
+
+    assert "sidecar-backlog-invalid" in output
+    assert "sidecar backlog file must not be a symlink" in output
+    assert subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout == ""
+    smoke_body = (controller / "targets" / "demo" / "reports" / "target-run-latest.md").read_text(encoding="utf-8")
+    assert "Lane execution: `plan-only`" in smoke_body
+    assert "Product diff execution: `disabled`" in smoke_body
+
+
+def test_external_target_run_plan_once_uses_plan_wording_on_target_blocker(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.4")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    _write_sidecar_backlog(controller)
+    (product / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+    capsys.readouterr()
+
+    assert module.main(["target", "run", "demo", "--plan-once"]) == 2
+    output = capsys.readouterr().out
+
+    assert "target run 계획 중단" in output
+    assert "lane 실행: 시작 안 함 (plan-only)" in output
+    assert "제품 변경 실행: 비활성화" in output
+    assert "product diff/commit/push: 없음" in output
+    assert "./harness target status demo" in output
+    assert "./harness target dashboard demo" in output
+    smoke_body = (controller / "targets" / "demo" / "reports" / "target-run-latest.md").read_text(encoding="utf-8")
+    assert "Lane execution: `plan-only`" in smoke_body
+    assert "Product diff execution: `disabled`" in smoke_body
+    assert "target-git-dirty" in smoke_body
 
 
 def test_external_target_run_execute_once_creates_product_only_diff(
@@ -882,6 +1209,8 @@ def test_external_target_run_commit_requires_execute_once(monkeypatch, tmp_path:
 
     assert module.main(["target", "run", "demo", "--once", "--commit"]) == 2
     assert "--commit" in capsys.readouterr().out
+    assert module.main(["target", "run", "demo", "--plan-once", "--commit"]) == 2
+    assert "--commit" in capsys.readouterr().out
     assert module.main(["target", "run", "demo", "--commit"]) == 2
     assert "하나만 명시" in capsys.readouterr().out
     assert not (product / "product-smoke-change.txt").exists()
@@ -904,6 +1233,8 @@ def test_external_target_run_push_requires_execute_once_commit(monkeypatch, tmp_
     capsys.readouterr()
 
     assert module.main(["target", "run", "demo", "--execute-once", "--push"]) == 2
+    assert "--push" in capsys.readouterr().out
+    assert module.main(["target", "run", "demo", "--plan-once", "--push"]) == 2
     assert "--push" in capsys.readouterr().out
     assert module.main(["target", "run", "demo", "--once", "--commit", "--push"]) == 2
     assert "--commit" in capsys.readouterr().out
