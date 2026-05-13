@@ -311,7 +311,10 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "target run --once` runs a RootContext-aware read-only/no-op smoke with state plumbing" in readme
     assert "target run --execute-once` is the explicit product diff smoke" in readme
     assert "product-smoke-change.txt" in readme
-    assert "without commit/push" in readme
+    assert "target run --execute-once --commit` commits exactly that smoke file locally" in readme
+    assert "does not push" in readme
+    assert "skips hooks/GPG signing" in readme
+    assert "git reset --hard <before-head>" in readme
     assert "Harness Controller Adapter" in (bundle / "AGENTS.md").read_text(encoding="utf-8")
     product_marker = "MINI" + "APP"
     assert product_marker not in (bundle / "docs" / "harness" / "GOALS.md").read_text(encoding="utf-8")

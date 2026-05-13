@@ -1101,6 +1101,7 @@ def _run_target_autonomy_state_plumbing(
     *,
     lock: harness_controller.TargetRunLock,
     product_execution: bool = False,
+    product_commit: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     root = repo_root()
     from harness_autonomy import AutonomyError, main as autonomy_main
@@ -1122,6 +1123,8 @@ def _run_target_autonomy_state_plumbing(
     ]
     if product_execution:
         forwarded.append("--external-product-execution")
+    if product_commit:
+        forwarded.append("--external-product-commit")
     forwarded.extend(
         [
             "run-once",
@@ -1150,6 +1153,10 @@ def _run_target_autonomy_state_plumbing(
 def command_target_run(args: argparse.Namespace) -> int:
     if bool(args.once) == bool(args.execute_once):
         print("error: target run은 `--once` 또는 `--execute-once` 중 하나만 명시하세요.")
+        return 2
+    product_commit = bool(getattr(args, "commit", False))
+    if product_commit and not bool(args.execute_once):
+        print("error: `--commit`은 `--execute-once`와 함께만 사용할 수 있습니다.")
         return 2
     product_execution = bool(args.execute_once)
     lock: harness_controller.TargetRunLock | None = None
@@ -1188,11 +1195,14 @@ def command_target_run(args: argparse.Namespace) -> int:
                 after_head="",
                 lock=lock,
                 product_diff_execution="enabled" if product_execution else "disabled",
+                product_commit_execution="enabled" if product_commit else "disabled",
                 expected_product_paths=(
                     [harness_controller.PRODUCT_DIFF_SMOKE_FILE.as_posix()] if product_execution else []
                 ),
                 rollback_guidance=(
-                    [harness_controller.product_diff_smoke_rollback_command(record.repo)] if product_execution else []
+                    [harness_controller.product_diff_smoke_rollback_command(record.repo)]
+                    if product_execution and not product_commit
+                    else []
                 ),
             )
             _render_target_verify_text(verification)
@@ -1201,29 +1211,60 @@ def command_target_run(args: argparse.Namespace) -> int:
             print(f"- smoke report: `{smoke_report.as_posix()}`")
             return 2
         before_head = harness_controller.target_git_head(record.repo)
-        plumbing_result = _run_target_autonomy_state_plumbing(record, lock=lock, product_execution=product_execution)
+        plumbing_result = _run_target_autonomy_state_plumbing(
+            record,
+            lock=lock,
+            product_execution=product_execution,
+            product_commit=product_commit,
+        )
         after_status = harness_controller.target_git_status_lines(record.repo)
         after_head = harness_controller.target_git_head(record.repo)
         expected_after_status = (
-            harness_controller.product_diff_smoke_status_lines() if product_execution else before_status
+            []
+            if product_commit
+            else harness_controller.product_diff_smoke_status_lines()
+            if product_execution
+            else before_status
         )
         head_changed = before_head != after_head
+        product_commit_sha = after_head if product_commit and head_changed else ""
+        product_commit_diff: list[str] = []
         post_verification = harness_controller.verify_target(record)
         post_markers = post_verification.get("harness_markers", [])
         post_blockers: list[str] = []
         if after_status != expected_after_status:
             post_blockers.append("target-git-status-changed")
-        if head_changed:
+        if product_commit:
+            if not head_changed:
+                post_blockers.append("target-head-not-advanced")
+            else:
+                try:
+                    if harness_controller.target_git_parent(record.repo, "HEAD") != before_head:
+                        post_blockers.append("target-head-parent-unexpected")
+                    product_commit_diff = harness_controller.product_diff_smoke_commit_diff_lines(record.repo)
+                except harness_controller.ControllerError as exc:
+                    post_blockers.append(str(exc))
+                expected_diff = [f"A\t{harness_controller.PRODUCT_DIFF_SMOKE_FILE.as_posix()}"]
+                if product_commit_diff != expected_diff:
+                    post_blockers.append("target-product-commit-diff-unexpected")
+        elif head_changed:
             post_blockers.append("target-head-changed")
         if post_markers:
             post_blockers.append("target-harness-files-present")
         if plumbing_result.returncode != 0:
             post_blockers.append("external-state-plumbing-failed")
         for blocker in harness_controller.target_run_blockers(post_verification):
-            if product_execution and blocker == "target-git-dirty" and after_status == expected_after_status:
+            if product_execution and not product_commit and blocker == "target-git-dirty" and after_status == expected_after_status:
                 continue
             if blocker not in post_blockers:
                 post_blockers.append(blocker)
+        rollback_guidance: list[str] = []
+        if product_commit and product_commit_sha:
+            rollback_guidance.append(harness_controller.product_diff_smoke_commit_rollback_command(record.repo, before_head))
+        elif product_commit:
+            rollback_guidance.extend(harness_controller.product_diff_smoke_partial_rollback_commands(record.repo))
+        elif product_execution:
+            rollback_guidance.append(harness_controller.product_diff_smoke_rollback_command(record.repo))
         smoke_report = harness_controller.write_target_run_smoke_report(
             controller_root=repo_root(),
             record=record,
@@ -1236,12 +1277,13 @@ def command_target_run(args: argparse.Namespace) -> int:
             after_head=after_head,
             lock=lock,
             product_diff_execution="enabled" if product_execution else "disabled",
+            product_commit_execution="enabled" if product_commit else "disabled",
+            product_commit_sha=product_commit_sha,
             expected_product_paths=(
                 [harness_controller.PRODUCT_DIFF_SMOKE_FILE.as_posix()] if product_execution else []
             ),
-            rollback_guidance=(
-                [harness_controller.product_diff_smoke_rollback_command(record.repo)] if product_execution else []
-            ),
+            product_commit_diff=product_commit_diff,
+            rollback_guidance=rollback_guidance,
         )
         if post_blockers:
             print("target run 중단: product repo 상태가 예상과 다릅니다.")
@@ -1262,8 +1304,17 @@ def command_target_run(args: argparse.Namespace) -> int:
             print("- lane 실행: 시작 안 함")
             print("- 제품 변경 실행: 명시 opt-in smoke")
             print(f"- product diff: {harness_controller.PRODUCT_DIFF_SMOKE_FILE.as_posix()}")
-            print("- product commit/push: 없음")
-            print(f"- rollback: `{harness_controller.product_diff_smoke_rollback_command(record.repo)}`")
+            if product_commit:
+                print(f"- product commit: {product_commit_sha}")
+                print("- product push: 없음")
+                print("- 주의: product working tree 는 clean하지만 HEAD가 local smoke commit 1개 전진했습니다.")
+                print("- 주의: 이 smoke commit은 hooks/GPG signing을 건너뛰며 공유용 product commit이 아닙니다.")
+            else:
+                print("- product commit/push: 없음")
+            if rollback_guidance:
+                print(f"- rollback: `{rollback_guidance[0]}`")
+                if product_commit:
+                    print(f"- rollback 주의: {harness_controller.PRODUCT_DIFF_SMOKE_COMMIT_ROLLBACK_CAUTION}")
         else:
             print("- lane 실행: 시작 안 함 (read-only/no-op smoke only)")
             print("- 제품 변경 실행: 비활성화")
@@ -1646,6 +1697,14 @@ def build_parser() -> argparse.ArgumentParser:
     target_run.add_argument("target", help=target_selector_help)
     target_run.add_argument("--once", action="store_true")
     target_run.add_argument("--execute-once", action="store_true", help="Explicitly create one local product diff smoke.")
+    target_run.add_argument(
+        "--commit",
+        action="store_true",
+        help=(
+            "With --execute-once only, create a local unpushed smoke commit; "
+            "skips hooks/GPG signing and is not a shared product commit."
+        ),
+    )
     target_run.set_defaults(func=command_target_run)
     target_alias = target_subparsers.add_parser("alias", help="Manage target aliases used as explicit @selectors.")
     target_alias_subparsers = target_alias.add_subparsers(dest="target_alias_command", required=True)

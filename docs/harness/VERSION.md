@@ -1,8 +1,15 @@
 # Harness Framework Version
 
-- Current Version: 1.8.1
+- Current Version: 1.8.2
 - Release Date: 2026-05-13
 - Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + on-demand export output.
+
+## What Changed In 1.8.2
+
+- Added explicit local smoke commit gate: `./harness target run <id|@alias|@default> --execute-once --commit`.
+- Kept `--once` read-only/no-op and `--execute-once` uncommitted; commit mode is valid only with `--execute-once`.
+- The commit gate stages and commits exactly `product-smoke-change.txt`, skips hooks/GPG signing command-locally, records before/after HEAD/status, commit SHA, commit diff, no-push state, and rollback guidance in controller sidecar evidence.
+- Product push remains disabled and the smoke commit is a local verification artifact, not a normal shared product commit.
 
 ## What Changed In 1.8.1
 

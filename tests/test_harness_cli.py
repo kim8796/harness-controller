@@ -531,6 +531,22 @@ def test_external_target_run_requires_exactly_one_mode(monkeypatch, tmp_path: Pa
     ).stdout == ""
 
 
+def test_external_target_run_help_describes_commit_gate(capsys) -> None:
+    module = _load_module()
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.main(["target", "run", "--help"])
+
+    output = capsys.readouterr().out
+    assert excinfo.value.code == 0
+    assert "--commit" in output
+    assert "--execute-once only" in output
+    assert "local unpushed smoke" in output
+    assert "commit; skips hooks/GPG signing" in output
+    assert "skips hooks/GPG signing" in output
+    assert "not a shared product" in output
+
+
 def test_external_target_run_execute_once_creates_product_only_diff(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
@@ -602,6 +618,263 @@ def test_external_target_run_execute_once_creates_product_only_diff(
     assert "product-smoke-change.txt" in smoke_body
     assert f"git -C {product.as_posix()} clean -f -- product-smoke-change.txt" in smoke_body
     assert not (controller / "targets" / "demo" / "locks" / "target-run.lock").exists()
+
+
+def test_external_target_run_execute_once_commit_creates_exact_local_commit(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    remote = tmp_path / "remote.git"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "config", "user.email", "harness-test@example.invalid"], cwd=product, check=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, text=True, capture_output=True, env=_git_env())
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=product, check=True, env=_git_env())
+    before_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.strip()
+    before_remote = subprocess.run(
+        ["git", "ls-remote", "origin", "refs/heads/main"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.split()[0]
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.0")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    capsys.readouterr()
+
+    assert module.main(["target", "run", "demo", "--execute-once", "--commit"]) == 0
+    output = capsys.readouterr().out
+    after_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.strip()
+    parent = subprocess.run(
+        ["git", "rev-parse", "HEAD^"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.strip()
+    status_after = subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout
+    commit_diff = subprocess.run(
+        ["git", "diff-tree", "--no-commit-id", "--name-status", "-r", "HEAD"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.splitlines()
+    after_remote = subprocess.run(
+        ["git", "ls-remote", "origin", "refs/heads/main"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.split()[0]
+
+    assert "product commit:" in output
+    assert "product push: 없음" in output
+    assert "HEAD가 local smoke commit 1개 전진" in output
+    assert "hooks/GPG signing을 건너뛰며" in output
+    assert "Only run the reset rollback if HEAD is still the recorded local smoke commit" in output
+    assert after_head != before_head
+    assert parent == before_head
+    assert status_after == ""
+    assert commit_diff == ["A\tproduct-smoke-change.txt"]
+    assert before_remote == after_remote
+    assert not (product / "runs").exists()
+    assert not (product / "reports").exists()
+    assert not (product / "backlog").exists()
+    assert not (product / "targets").exists()
+    assert not (product / "HARNESS.md").exists()
+    assert not (product / "scripts" / "harness_cli.py").exists()
+    evidence_paths = list((controller / "targets" / "demo" / "runs" / "harness").glob("*/generated-evidence.json"))
+    assert evidence_paths
+    evidence = json.loads(evidence_paths[0].read_text(encoding="utf-8"))
+    assert evidence["product_execution"] == "enabled"
+    assert evidence["product_commit"] == "enabled"
+    assert evidence["product_commit_sha"] == after_head
+    assert evidence["product_push"] == "disabled"
+    assert evidence["product_commit_diff"] == ["A\tproduct-smoke-change.txt"]
+    assert "Only run the reset rollback" in evidence["rollback_safety_note"]
+    assert before_head in " ".join(evidence["rollback_guidance"])
+    autonomy_reports = list((controller / "targets" / "demo" / "reports" / "harness-autonomy").glob("*/report.md"))
+    assert autonomy_reports
+    autonomy_report = autonomy_reports[0].read_text(encoding="utf-8")
+    assert "local smoke commit 은 hooks/GPG signing" in autonomy_report
+    assert "rollback 주의" in autonomy_report
+    outbox_files = [
+        path for path in (controller / "targets" / "demo" / "operator-outbox").glob("*.md")
+        if path.name != "README.md"
+    ]
+    assert outbox_files
+    outbox_body = outbox_files[0].read_text(encoding="utf-8")
+    assert "local smoke commit 은 hooks/GPG signing" in outbox_body
+    assert "rollback 주의" in outbox_body
+    smoke_report = controller / "targets" / "demo" / "reports" / "target-run-latest.md"
+    smoke_body = smoke_report.read_text(encoding="utf-8")
+    assert "Product commit: `enabled`" in smoke_body
+    assert f"Product commit sha: `{after_head}`" in smoke_body
+    assert "Product push: `disabled`" in smoke_body
+    assert "A\tproduct-smoke-change.txt" in smoke_body
+    assert before_head in smoke_body
+    assert "Rollback Conditions" in smoke_body
+    assert "Only run the reset rollback" in smoke_body
+
+
+def test_external_target_run_commit_requires_execute_once(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.0")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    capsys.readouterr()
+
+    assert module.main(["target", "run", "demo", "--once", "--commit"]) == 2
+    assert "--commit" in capsys.readouterr().out
+    assert module.main(["target", "run", "demo", "--commit"]) == 2
+    assert "하나만 명시" in capsys.readouterr().out
+    assert not (product / "product-smoke-change.txt").exists()
+
+
+def test_external_target_run_execute_once_commit_requires_identity_before_write(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    fake_home = tmp_path / "empty-home"
+    controller.mkdir()
+    product.mkdir()
+    fake_home.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setattr(module.harness_controller, "target_git_identity_ready", lambda target_root: False)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.0")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    capsys.readouterr()
+
+    assert module.main(["target", "run", "demo", "--execute-once", "--commit"]) == 2
+    output = capsys.readouterr().out
+    assert "git user.name and user.email" in output
+    assert not (product / "product-smoke-change.txt").exists()
+    assert subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout == ""
+
+
+def test_external_target_run_execute_once_commit_suppresses_hooks_and_gpg_signing(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "config", "user.email", "harness-test@example.invalid"], cwd=product, check=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "config", "commit.gpgsign", "true"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "config", "user.signingkey", "missing-harness-test-key"], cwd=product, check=True, env=_git_env())
+    hook = product / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\necho ran > hook-ran\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.0")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    capsys.readouterr()
+
+    assert module.main(["target", "run", "demo", "--execute-once", "--commit"]) == 0
+    assert not (product / "hook-ran").exists()
+
+
+def test_external_target_run_execute_once_commit_failure_reports_rollback(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "config", "user.email", "harness-test@example.invalid"], cwd=product, check=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.0")
+
+    def fail_commit(target_root: Path) -> str:
+        raise module.harness_controller.ControllerError("simulated smoke commit failure")
+
+    monkeypatch.setattr(module.harness_controller, "commit_product_diff_smoke", fail_commit)
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    capsys.readouterr()
+
+    assert module.main(["target", "run", "demo", "--execute-once", "--commit"]) == 2
+    output = capsys.readouterr().out
+    smoke_report = controller / "targets" / "demo" / "reports" / "target-run-latest.md"
+    smoke_body = smoke_report.read_text(encoding="utf-8")
+
+    assert "external-state-plumbing-failed" in output
+    assert "simulated smoke commit failure" in output
+    assert "git -C" in smoke_body
+    assert "restore --staged -- product-smoke-change.txt" in smoke_body
+    assert "clean -f -- product-smoke-change.txt" in smoke_body
 
 
 def test_external_target_run_execute_once_uses_canonical_id_for_alias_selector(

@@ -1,5 +1,13 @@
 # Harness Changelog
 
+## 1.8.2 - 2026-05-13
+
+- Added `./harness target run <target> --execute-once --commit` as the explicit local product smoke commit gate.
+- Preserved `--once` as read-only/no-op and `--execute-once` as an uncommitted product diff smoke.
+- Limited commit mode to exactly `product-smoke-change.txt`, with exact pathspec staging, no push, and command-local hook/GPG signing suppression.
+- Added sidecar report/evidence fields for commit SHA, commit diff, before/after HEAD/status, rollback guidance, and no-push state.
+- Fail closed when commit mode is requested without `--execute-once`, when target git identity is missing, or when post-commit status/parent/diff checks do not match the deterministic smoke contract.
+
 ## 1.8.1 - 2026-05-13
 
 - Added explicit `./harness target run <target> --execute-once` product diff smoke for external controller targets.

@@ -727,6 +727,7 @@ class AutonomyRootContext:
     inbox_processed_path: Path
     outbox_path: Path
     product_execution_enabled: bool = False
+    product_commit_enabled: bool = False
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -742,6 +743,7 @@ class AutonomyRootContext:
             "inbox_processed_path": self.inbox_processed_path.as_posix(),
             "outbox_path": self.outbox_path.as_posix(),
             "product_execution_enabled": self.product_execution_enabled,
+            "product_commit_enabled": self.product_commit_enabled,
         }
 
 
@@ -8339,6 +8341,7 @@ def resolve_autonomy_root_context(args: argparse.Namespace) -> AutonomyRootConte
             inbox_processed_path=DEFAULT_INBOX_PROCESSED_PATH,
             outbox_path=DEFAULT_OUTBOX_PATH,
             product_execution_enabled=True,
+            product_commit_enabled=False,
         )
     if not raw_target_id:
         raise AutonomyError("external autonomy mode requires --target-id")
@@ -8368,6 +8371,7 @@ def resolve_autonomy_root_context(args: argparse.Namespace) -> AutonomyRootConte
         inbox_processed_path=external_paths["inbox_processed_path"],
         outbox_path=external_paths["outbox_path"],
         product_execution_enabled=bool(getattr(args, "external_product_execution", False)),
+        product_commit_enabled=bool(getattr(args, "external_product_commit", False)),
     )
 
 
@@ -8407,6 +8411,8 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
     if str(lock_payload.get("target_id") or "") != context.target_id or str(lock_payload.get("token") or "") != lock_token:
         raise AutonomyError("external target lock owner mismatch")
     controller = _controller_support()
+    if context.product_commit_enabled and not context.product_execution_enabled:
+        raise AutonomyError("external product commit requires product execution")
     record = controller.load_target(context.controller_root, context.target_id)
     verification = controller.verify_target(record)
     run_blockers = controller.target_run_blockers(verification)
@@ -8416,6 +8422,8 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
     before_head = controller.target_git_head(context.target_root)
     if before_status:
         raise AutonomyError("external target must be clean before target run smoke")
+    if context.product_commit_enabled and not controller.target_git_identity_ready(context.target_root):
+        raise AutonomyError("external product commit requires target git user.name and user.email")
     run_dir = _allocate_external_run_dir(context.state_root, context.target_id, getattr(args, "run_id", None))
     report_dir = context.state_root / DEFAULT_REPORTS_ROOT / run_dir.name
     _ensure_external_sidecar_directory(context.state_root, report_dir, label="external autonomy report directory")
@@ -8438,6 +8446,8 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
     ):
         _ensure_external_sidecar_file(context.state_root, sidecar_path, label=label)
     product_diff_paths: list[Path] = []
+    product_commit_sha = ""
+    product_commit_diff: list[str] = []
     expected_status_after: list[str] = []
     if context.product_execution_enabled:
         relative = controller.PRODUCT_DIFF_SMOKE_FILE
@@ -8456,10 +8466,25 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
         except FileExistsError as exc:
             raise AutonomyError(f"external product smoke file already exists: {relative.as_posix()}") from exc
         product_diff_paths.append(relative)
-        expected_status_after = controller.product_diff_smoke_status_lines()
+        if context.product_commit_enabled:
+            try:
+                product_commit_sha = controller.commit_product_diff_smoke(context.target_root)
+                product_commit_diff = controller.product_diff_smoke_commit_diff_lines(context.target_root)
+            except controller.ControllerError as exc:
+                raise AutonomyError(f"external product smoke commit failed: {exc}") from exc
+        else:
+            expected_status_after = controller.product_diff_smoke_status_lines()
     after_status = controller.target_git_status_lines(context.target_root)
     after_head = controller.target_git_head(context.target_root)
-    if after_status != expected_status_after or before_head != after_head:
+    if context.product_commit_enabled:
+        expected_diff = [f"A\t{controller.PRODUCT_DIFF_SMOKE_FILE.as_posix()}"]
+        if after_status or before_head == after_head:
+            raise AutonomyError("external target commit smoke did not finish cleanly")
+        if controller.target_git_parent(context.target_root, "HEAD") != before_head:
+            raise AutonomyError("external target commit smoke parent is unexpected")
+        if product_commit_diff != expected_diff:
+            raise AutonomyError("external target commit smoke diff is unexpected")
+    elif after_status != expected_status_after or before_head != after_head:
         raise AutonomyError("external target changed unexpectedly during target run smoke")
     post_verification = controller.verify_target(record)
     post_blockers = controller.target_run_blockers(post_verification)
@@ -8503,7 +8528,7 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
             if context.product_execution_enabled
             else "external RootContext state plumbing; product execution disabled"
         ),
-        commit_sha=None,
+        commit_sha=product_commit_sha or None,
         persistent_sync=None,
         lane_runners=effective_lane_runners_from_args(args),
         lane_runner_summary=lane_runner_summary(effective_lane_runners_from_args(args)),
@@ -8518,13 +8543,23 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
         "product_status_after": after_status,
         "product_execution": "enabled" if context.product_execution_enabled else "disabled",
         "product_diff_paths": [path.as_posix() for path in product_diff_paths],
+        "product_commit": "enabled" if context.product_commit_enabled else "disabled",
+        "product_commit_sha": product_commit_sha,
+        "product_commit_message": (
+            controller.PRODUCT_DIFF_SMOKE_COMMIT_MESSAGE if context.product_commit_enabled else ""
+        ),
+        "product_commit_diff": product_commit_diff,
         "rollback_guidance": (
-            [controller.product_diff_smoke_rollback_command(context.target_root)]
+            [controller.product_diff_smoke_commit_rollback_command(context.target_root, before_head)]
+            if context.product_commit_enabled
+            else [controller.product_diff_smoke_rollback_command(context.target_root)]
             if context.product_execution_enabled
             else []
         ),
-        "product_commit": "disabled",
         "product_push": "disabled",
+        "rollback_safety_note": (
+            controller.PRODUCT_DIFF_SMOKE_COMMIT_ROLLBACK_CAUTION if context.product_commit_enabled else ""
+        ),
         "lane_execution": "not-started",
         "verification": verification,
         "post_verification": post_verification,
@@ -8556,8 +8591,11 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
                 f"- Product execution: `{'enabled' if context.product_execution_enabled else 'disabled'}`",
                 "- Lane execution: `not-started`",
                 f"- Product diff: `{', '.join(path.as_posix() for path in product_diff_paths) if product_diff_paths else 'none'}`",
-                "- Product commit/push: `none`",
-                f"- Rollback: `{controller.product_diff_smoke_rollback_command(context.target_root) if context.product_execution_enabled else 'none'}`",
+                f"- Product commit: `{'enabled' if context.product_commit_enabled else 'disabled'}`",
+                f"- Product commit sha: `{product_commit_sha or 'none'}`",
+                "- Product push: `disabled`",
+                f"- Rollback: `{payload['rollback_guidance'][0] if payload['rollback_guidance'] else 'none'}`",
+                f"- Rollback caution: `{payload['rollback_safety_note'] or 'none'}`",
                 "",
             ]
         ),
@@ -8587,10 +8625,22 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
             if product_diff_paths
             else "- product diff/commit/push: `없음`\n"
         )
-        + "- product commit/push: `없음`\n"
+        + f"- product commit: `{'활성화' if context.product_commit_enabled else '비활성화'}`\n"
+        + f"- product commit sha: `{product_commit_sha or 'none'}`\n"
+        + "- product push: `없음`\n"
         + (
-            f"- rollback: `{controller.product_diff_smoke_rollback_command(context.target_root)}`\n"
+            f"- rollback: `{payload['rollback_guidance'][0]}`\n"
             if context.product_execution_enabled
+            else ""
+        )
+        + (
+            f"- rollback 주의: `{payload['rollback_safety_note']}`\n"
+            if context.product_commit_enabled
+            else ""
+        )
+        + (
+            "- local smoke commit 은 hooks/GPG signing 을 건너뛰는 검증용 커밋이며 공유용 product commit 이 아니다.\n"
+            if context.product_commit_enabled
             else ""
         )
     )
@@ -8611,7 +8661,8 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
             "root_context": context.to_json(),
             "product_execution": "enabled" if context.product_execution_enabled else "disabled",
             "product_diff_paths": [path.as_posix() for path in product_diff_paths],
-            "product_commit": "disabled",
+            "product_commit": "enabled" if context.product_commit_enabled else "disabled",
+            "product_commit_sha": product_commit_sha,
             "product_push": "disabled",
             "lane_execution": "not-started",
             "worktree_path": str(context.target_root),
@@ -8627,7 +8678,7 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
             f"다음 확인: ./harness target status {context.target_id} 또는 "
             f"./harness target dashboard {context.target_id}."
             + (
-                f" product diff rollback: {controller.product_diff_smoke_rollback_command(context.target_root)}"
+                f" product smoke rollback: {payload['rollback_guidance'][0]}"
                 if context.product_execution_enabled
                 else " 제품 변경 실행은 비활성화입니다."
             )
@@ -8642,7 +8693,9 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
             else f"대상 {context.target_id}: 상태 배관 점검이 완료되었습니다."
         ),
         operator_result=(
-            "명시 opt-in product diff smoke가 완료됐습니다. commit/push는 없습니다."
+            "명시 opt-in product smoke local commit이 완료됐습니다. push는 없습니다."
+            if context.product_commit_enabled
+            else "명시 opt-in product diff smoke가 완료됐습니다. commit/push는 없습니다."
             if context.product_execution_enabled
             else "제품 변경 실행은 비활성화이고 lane 실행은 시작하지 않았습니다. product diff/commit/push는 없습니다."
         ),
@@ -8650,8 +8703,13 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
             f"다음 확인 명령: ./harness target status {context.target_id} 또는 "
             f"./harness target dashboard {context.target_id}"
             + (
-                f". 되돌리려면 `{controller.product_diff_smoke_rollback_command(context.target_root)}`"
+                f". 되돌리려면 `{payload['rollback_guidance'][0]}`"
                 if context.product_execution_enabled
+                else ""
+            )
+            + (
+                f" 주의: {payload['rollback_safety_note']}"
+                if context.product_commit_enabled
                 else ""
             )
         ),
@@ -8661,8 +8719,16 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
                 f"- sidecar state root: `{context.state_root}`\n"
                 f"- 제품 변경 실행: `{'활성화' if context.product_execution_enabled else '비활성화'}`\n"
                 f"- product diff: `{', '.join(path.as_posix() for path in product_diff_paths) if product_diff_paths else '없음'}`\n"
-                "- commit/push: `없음`\n"
-                "- lane 실행: `시작 안 함`"
+                f"- product commit: `{'활성화' if context.product_commit_enabled else '비활성화'}`\n"
+                f"- product commit sha: `{product_commit_sha or '없음'}`\n"
+                "- product push: `없음`\n"
+                + (
+                    f"- rollback 주의: `{payload['rollback_safety_note']}`\n"
+                    "- local smoke commit 은 hooks/GPG signing 을 건너뛰며 공유용 product commit 이 아니다.\n"
+                    if context.product_commit_enabled
+                    else ""
+                )
+                + "- lane 실행: `시작 안 함`"
             )
         },
         outbox_path=context.outbox_path,
@@ -10164,6 +10230,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-root", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--target-id", help=argparse.SUPPRESS)
     parser.add_argument("--external-product-execution", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--external-product-commit", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--external-lock-owned", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--external-lock-token", help=argparse.SUPPRESS)
     parser.add_argument("--control-path", type=Path, default=DEFAULT_CONTROL_PATH)

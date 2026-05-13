@@ -26,6 +26,11 @@ PRODUCT_DIFF_SMOKE_CONTENT = (
     "commit=disabled\n"
     "push=disabled\n"
 )
+PRODUCT_DIFF_SMOKE_COMMIT_MESSAGE = "chore: harness product diff smoke"
+PRODUCT_DIFF_SMOKE_COMMIT_ROLLBACK_CAUTION = (
+    "Only run the reset rollback if HEAD is still the recorded local smoke commit "
+    "and no later product work was added on top."
+)
 PRODUCT_HARNESS_MARKERS = (
     Path("harness"),
     Path("HARNESS.md"),
@@ -864,6 +869,21 @@ def target_git_head(target_root: Path) -> str:
     return result.stdout.strip()
 
 
+def target_git_parent(target_root: Path, commit: str = "HEAD") -> str:
+    result = git(["rev-parse", f"{commit}^"], cwd=target_root)
+    if result.returncode != 0:
+        raise ControllerError("target git parent read failed")
+    return result.stdout.strip()
+
+
+def target_git_identity_ready(target_root: Path) -> bool:
+    for var_name in ("GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"):
+        result = git(["var", var_name], cwd=target_root)
+        if result.returncode != 0 or not result.stdout.strip():
+            return False
+    return True
+
+
 def product_diff_smoke_status_lines() -> list[str]:
     return [f"?? {PRODUCT_DIFF_SMOKE_FILE.as_posix()}"]
 
@@ -890,6 +910,55 @@ def product_diff_smoke_is_tracked(target_root: Path) -> bool:
     if result.returncode == 1:
         return False
     raise ControllerError("target git ls-files failed")
+
+
+def product_diff_smoke_commit_rollback_command(target_root: Path, before_head: str) -> str:
+    return f"git -C {shlex.quote(target_root.as_posix())} reset --hard {shlex.quote(before_head)}"
+
+
+def product_diff_smoke_partial_rollback_commands(target_root: Path) -> list[str]:
+    path = PRODUCT_DIFF_SMOKE_FILE.as_posix()
+    return [
+        f"git -C {shlex.quote(target_root.as_posix())} restore --staged -- {path}",
+        f"git -C {shlex.quote(target_root.as_posix())} clean -f -- {path}",
+    ]
+
+
+def product_diff_smoke_commit_diff_lines(target_root: Path, commit: str = "HEAD") -> list[str]:
+    result = git(["diff-tree", "--no-commit-id", "--name-status", "-r", commit], cwd=target_root)
+    if result.returncode != 0:
+        raise ControllerError("target git commit diff read failed")
+    return [line.rstrip() for line in result.stdout.splitlines() if line.rstrip()]
+
+
+def commit_product_diff_smoke(target_root: Path) -> str:
+    if not target_git_identity_ready(target_root):
+        raise ControllerError("target git identity is not configured for local smoke commit")
+    path = PRODUCT_DIFF_SMOKE_FILE.as_posix()
+    add_result = git(["add", "--", path], cwd=target_root)
+    if add_result.returncode != 0:
+        detail = (add_result.stderr or add_result.stdout).strip()
+        raise ControllerError(f"target product smoke staging failed: {detail}")
+    commit_result = git(
+        [
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--no-verify",
+            "--no-gpg-sign",
+            "-m",
+            PRODUCT_DIFF_SMOKE_COMMIT_MESSAGE,
+            "--",
+            path,
+        ],
+        cwd=target_root,
+    )
+    if commit_result.returncode != 0:
+        detail = (commit_result.stderr or commit_result.stdout).strip()
+        raise ControllerError(f"target product smoke commit failed: {detail}")
+    return target_git_head(target_root)
 
 
 def write_dashboard(*, controller_root: Path, record: TargetRecord, verification: Mapping[str, object]) -> Path:
@@ -927,7 +996,9 @@ def write_dashboard(*, controller_root: Path, record: TargetRecord, verification
             "- 이 dashboard 는 read-only projection 이다.",
             "- product repo 에 harness runtime 파일을 자동으로 쓰지 않는다.",
             "- `target run --once` 는 read-only/no-op smoke 로 target boundary 만 검증할 수 있다.",
-            "- product-changing autonomy lane 은 RootContext-aware execution phase 전까지 비활성화돼 있다.",
+            "- `target run --execute-once` 는 deterministic product diff smoke 를 만들 수 있다.",
+            "- `target run --execute-once --commit` 은 그 smoke 파일만 local commit 으로 닫고 push 하지 않는다.",
+            "- 일반 product-changing autonomy lane 과 push 는 아직 별도 gate 전까지 비활성화돼 있다.",
             "- Telegram 지시는 target-aware relay 가 `targets/<id>/operator-inbox` 로 materialize 한다.",
             "- operator selector 는 canonical id 또는 `@alias`, `@default` 를 쓸 수 있지만 sidecar/Redis/signature 에는 canonical target id 만 남긴다.",
             "",
@@ -950,8 +1021,11 @@ def write_target_run_smoke_report(
     after_head: str,
     lock: TargetRunLock,
     product_diff_execution: str = "disabled",
+    product_commit_execution: str = "disabled",
+    product_commit_sha: str = "",
     lane_execution: str = "not-started",
     expected_product_paths: Sequence[str] = (),
+    product_commit_diff: Sequence[str] = (),
     rollback_guidance: Sequence[str] = (),
 ) -> Path:
     state_paths = record.state_paths(controller_root)
@@ -975,7 +1049,13 @@ def write_target_run_smoke_report(
         else "# External Target Run Read-Only Smoke"
     )
     expected_lines = [f"- `{path}`" for path in expected_product_paths] if expected_product_paths else ["- none"]
+    commit_diff_lines = [f"- `{line}`" for line in product_commit_diff] if product_commit_diff else ["- none"]
     rollback_lines = [f"- `{line}`" for line in rollback_guidance] if rollback_guidance else ["- none"]
+    rollback_condition_lines = (
+        [f"- {PRODUCT_DIFF_SMOKE_COMMIT_ROLLBACK_CAUTION}"]
+        if product_commit_execution == "enabled"
+        else ["- none"]
+    )
     text = "\n".join(
         [
             title,
@@ -992,7 +1072,9 @@ def write_target_run_smoke_report(
             f"- Product diff execution: `{product_diff_execution}`",
             f"- Product HEAD before: `{before_head or 'unknown'}`",
             f"- Product HEAD after: `{after_head or 'unknown'}`",
-            "- Product commit: `disabled`",
+            f"- Product commit: `{product_commit_execution}`",
+            f"- Product commit sha: `{product_commit_sha or 'none'}`",
+            f"- Product commit message: `{PRODUCT_DIFF_SMOKE_COMMIT_MESSAGE if product_commit_execution == 'enabled' else 'none'}`",
             "- Product push: `disabled`",
             "",
             "## Product Git Status Before",
@@ -1007,16 +1089,25 @@ def write_target_run_smoke_report(
             "",
             *expected_lines,
             "",
+            "## Product Commit Diff",
+            "",
+            *commit_diff_lines,
+            "",
             "## Rollback Guidance",
             "",
             *rollback_lines,
+            "",
+            "## Rollback Conditions",
+            "",
+            *rollback_condition_lines,
             "",
             "## Operator Guidance",
             "",
             "- `--once` smoke 는 target boundary 검증만 수행한다.",
             "- `--execute-once` smoke 는 명시 opt-in 일 때만 product diff 를 만든다.",
+            "- `--execute-once --commit` smoke 는 deterministic product diff 를 local commit 으로 닫지만 push 하지 않는다.",
             "- product repo 에 harness runtime/state 파일을 쓰지 않는다.",
-            "- commit/push 는 별도 gate 전까지 비활성화돼 있다.",
+            "- local smoke commit 은 hooks/GPG signing 을 건너뛰는 검증용 커밋이며 공유용 product commit 이 아니다.",
             "",
         ]
     )

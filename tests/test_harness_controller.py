@@ -624,6 +624,47 @@ def test_target_run_report_write_rejects_report_file_symlink(tmp_path: Path) -> 
     assert leak.read_text(encoding="utf-8") == "do not overwrite\n"
 
 
+def test_product_diff_smoke_commit_helper_uses_exact_file_and_no_push(tmp_path: Path) -> None:
+    module = _load_module()
+    product = tmp_path / "product"
+    remote = tmp_path / "remote.git"
+    _init_git_repo(product)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "config", "user.email", "harness-test@example.invalid"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, text=True, capture_output=True, env=_git_env())
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=product, check=True, env=_git_env())
+    before_head = module.target_git_head(product)
+    before_remote = subprocess.run(
+        ["git", "ls-remote", "origin", "refs/heads/main"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.split()[0]
+    (product / module.PRODUCT_DIFF_SMOKE_FILE).write_text(module.PRODUCT_DIFF_SMOKE_CONTENT, encoding="utf-8")
+
+    after_head = module.commit_product_diff_smoke(product)
+    after_remote = subprocess.run(
+        ["git", "ls-remote", "origin", "refs/heads/main"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.split()[0]
+
+    assert after_head != before_head
+    assert module.target_git_parent(product) == before_head
+    assert module.target_git_status_lines(product) == []
+    assert module.product_diff_smoke_commit_diff_lines(product) == ["A\tproduct-smoke-change.txt"]
+    assert before_remote == after_remote
+    assert before_head in module.product_diff_smoke_commit_rollback_command(product, before_head)
+
+
 def test_target_run_blockers_include_detached_head(tmp_path: Path) -> None:
     module = _load_module()
     controller = tmp_path / "controller"

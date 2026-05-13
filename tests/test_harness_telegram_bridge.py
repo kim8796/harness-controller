@@ -1196,6 +1196,62 @@ def test_drain_redis_relay_materializes_target_queue_to_sidecar(
     assert "Relay-Target-ID: first" in body
 
 
+def test_drain_redis_relay_commit_text_only_materializes_owner_instruction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    from harness_autonomy import relay
+    from scripts import harness_controller
+
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _add_controller_target(controller, "app", product)
+    store = _FakeRelayStore()
+    monkeypatch.setenv(module.RELAY_ENABLED_ENV, "true")
+    monkeypatch.setenv(module.RELAY_SIGNING_KEY_ENV, SIGNING_KEY)
+    monkeypatch.setenv(module.BRIDGE_OPERATOR_USER_IDS_ENV, "42")
+
+    def fail_commit(target_root: Path) -> str:
+        raise AssertionError("relay drain must not invoke product commit helper")
+
+    monkeypatch.setattr(harness_controller, "commit_product_diff_smoke", fail_commit)
+    envelope = relay.build_owner_relay_envelope(
+        {
+            "command": "/harness note",
+            "action": "note",
+            "argument": "latest run app --execute-once --commit 검토",
+            "canonical": "true",
+            "read_only": "false",
+        },
+        repo_id="controller",
+        target_id="app",
+        source="telegram-product-bot",
+        actor_user_id=42,
+        chat_id=123456789,
+        telegram_update_id=451,
+        signing_key=SIGNING_KEY,
+    )
+    relay.enqueue_owner_relay(store, envelope)
+
+    result = module.drain_redis_relay_once(controller, store=store, repo_id="controller", target_id="app")
+
+    assert result["materialized"] == 1
+    assert not (product / "product-smoke-change.txt").exists()
+    assert not (product / "runs").exists()
+    assert not (controller / "targets" / "app" / "runs" / "harness").exists()
+    inbox_files = [
+        path for path in (controller / "targets" / "app" / "operator-inbox").glob("*.md")
+        if path.name != "README.md"
+    ]
+    assert len(inbox_files) == 1
+    body = inbox_files[0].read_text(encoding="utf-8")
+    assert "--commit" in body
+    assert "--external-product-commit" not in body
+    assert "Relay-Target-ID: app" in body
+
+
 def test_drain_redis_relay_dead_letters_unknown_target_without_inbox(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

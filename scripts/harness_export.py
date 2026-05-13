@@ -581,7 +581,8 @@ def controller_claude_template() -> str:
 
         - 비밀값은 환경변수와 ignored `.env` 파일에서만 읽는다.
         - `targets/**`는 controller-local sidecar이며 product repo에 커밋하지 않는다.
-        - product-changing external smoke 는 `./harness target run <id> --execute-once` 명시 opt-in 으로만 켜고 commit/push 는 하지 않는다.
+        - product-changing external smoke 는 `./harness target run <id> --execute-once` 명시 opt-in 으로만 켠다.
+        - `./harness target run <id> --execute-once --commit` 은 deterministic smoke file 을 local commit 으로 닫지만 push 는 하지 않는다.
         """
     )
 
@@ -928,7 +929,10 @@ def export_controller_bundle(root: Path, output_dir: Path, version: str | None =
                 "- Optional: set `HARNESS_RELAY_TARGET_ALIASES=app=my-app` and `HARNESS_RELAY_TARGET_ID=my-app` for `@app` / `@default` selectors.",
                 "- Use `/harness note my-app ...`, `/harness note @app ...`, or `/harness answer @default ...`; the signed canonical target id reaches this controller.",
                 "- The controller drains to `targets/my-app/operator-inbox`; `target run --once` runs a RootContext-aware read-only/no-op smoke with state plumbing.",
-                "- `target run --execute-once` is the explicit product diff smoke and creates only `product-smoke-change.txt` without commit/push.",
+                "- `target run --execute-once` is the explicit product diff smoke and creates only uncommitted `product-smoke-change.txt`.",
+                "- `target run --execute-once --commit` commits exactly that smoke file locally and still does not push.",
+                "- That local smoke commit skips hooks/GPG signing and is not a shared product commit.",
+                "- Roll back a smoke commit only while HEAD is still that commit: use the `git reset --hard <before-head>` command recorded in `targets/<id>/reports/target-run-latest.md`.",
                 "",
                 "## Excluded Live State",
                 "",
