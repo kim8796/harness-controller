@@ -4,10 +4,9 @@ import os
 from pathlib import Path
 from typing import Mapping
 
-from harness_autonomy.relay import MIN_RELAY_SIGNING_KEY_CHARS
-
 HARNESS_TELEGRAM_BOT_TOKEN_ENV = "HARNESS_TELEGRAM_BOT_TOKEN"
 TELEGRAM_BOT_TOKEN_ENV = "TELEGRAM_BOT_TOKEN"
+MIN_RELAY_SIGNING_KEY_CHARS = 16
 ENV_FILE_NAMES = (".env", ".env.harness.generated")
 TELEGRAM_RELAY_ENV_KEYS = (
     "HARNESS_TELEGRAM_BRIDGE_ENABLED",

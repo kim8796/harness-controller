@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import secrets
@@ -1094,6 +1096,46 @@ def command_target_dashboard(args: argparse.Namespace) -> int:
         return 2
 
 
+def _run_target_autonomy_state_plumbing(
+    record: harness_controller.TargetRecord,
+    *,
+    lock: harness_controller.TargetRunLock,
+) -> subprocess.CompletedProcess[str]:
+    root = repo_root()
+    from harness_autonomy import main as autonomy_main
+
+    forwarded = [
+        "--root",
+        str(root),
+        "--controller-root",
+        str(root),
+        "--target-id",
+        record.target_id,
+        "--target-root",
+        str(record.repo),
+        "--state-root",
+        str(record.state_root),
+        "--external-lock-owned",
+        "--external-lock-token",
+        lock.token,
+        "run-once",
+        "--mode",
+        "auto",
+        "--runner",
+        "codex",
+        "--runner-model",
+        "auto",
+        "--git-backup",
+        "off",
+    ]
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        returncode = autonomy_main(forwarded)
+    command = ("harness_autonomy.py", *forwarded)
+    return subprocess.CompletedProcess(command, returncode, stdout.getvalue(), stderr.getvalue())
+
+
 def command_target_run(args: argparse.Namespace) -> int:
     if not args.once:
         print("error: external target run은 read-only/no-op smoke만 허용합니다. --once 를 붙이세요.")
@@ -1140,6 +1182,7 @@ def command_target_run(args: argparse.Namespace) -> int:
             print(f"- smoke report: `{smoke_report.as_posix()}`")
             return 2
         before_head = harness_controller.target_git_head(record.repo)
+        plumbing_result = _run_target_autonomy_state_plumbing(record, lock=lock)
         after_status = harness_controller.target_git_status_lines(record.repo)
         after_head = harness_controller.target_git_head(record.repo)
         status_changed = before_status != after_status
@@ -1153,6 +1196,8 @@ def command_target_run(args: argparse.Namespace) -> int:
             post_blockers.append("target-head-changed")
         if post_markers:
             post_blockers.append("target-harness-files-present")
+        if plumbing_result.returncode != 0:
+            post_blockers.append("external-state-plumbing-failed")
         for blocker in harness_controller.target_run_blockers(post_verification):
             if blocker not in post_blockers:
                 post_blockers.append(blocker)
@@ -1171,9 +1216,13 @@ def command_target_run(args: argparse.Namespace) -> int:
         if post_blockers:
             print("target run --once 중단: product repo changed during read-only smoke.")
             print(f"- run blockers: {', '.join(post_blockers)}")
+            if plumbing_result.returncode != 0:
+                detail = (plumbing_result.stderr or plumbing_result.stdout).strip()
+                if detail:
+                    print(f"- autonomy state plumbing: {detail[:300]}")
             print(f"- smoke report: `{smoke_report.as_posix()}`")
             return 2
-        print("외부 target read-only smoke 완료")
+        print("외부 target 상태 배관 점검 완료")
         print(f"- 대상 ID: `{record.target_id}`")
         print(f"- dashboard: `{report.as_posix()}`")
         print(f"- smoke report: `{smoke_report.as_posix()}`")
@@ -1181,7 +1230,11 @@ def command_target_run(args: argparse.Namespace) -> int:
         print("- 검증 범위: target 등록/sidecar/dashboard/lock/product git 상태")
         print("- lane 실행: 시작 안 함 (read-only/no-op smoke only)")
         print("- 제품 변경 실행: 비활성화")
+        print("- autonomy state plumbing: sidecar 기록 완료")
+        print("- product diff/commit/push: 없음")
         print("- 다음 단계: 지금은 제품 변경 실행이 비활성화되어 있습니다. 별도 RootContext-aware execution phase 에서만 켭니다.")
+        print(f"- 다음 명령: `./harness target status {record.target_id}`")
+        print(f"- 다음 명령: `./harness target dashboard {record.target_id}`")
         print("- product repo 변경: 없음")
         return 0
     except harness_controller.ControllerError as exc:

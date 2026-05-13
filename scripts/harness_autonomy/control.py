@@ -1051,12 +1051,12 @@ def _relative_display(root: Path, path: Path) -> str:
 def _unique_markdown_path(directory: Path, stem: str) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     candidate = directory / f"{stem}.md"
-    if not candidate.exists():
+    if not candidate.exists() and not candidate.is_symlink():
         return candidate
     suffix = 1
     while True:
         candidate = directory / f"{stem}-{suffix:02d}.md"
-        if not candidate.exists():
+        if not candidate.exists() and not candidate.is_symlink():
             return candidate
         suffix += 1
 
@@ -1151,6 +1151,8 @@ def write_inbox_message(
         body,
         "",
     ]
+    if path.is_symlink():
+        raise AutonomyError("operator inbox message path must not be a symlink")
     write_text(path, "\n".join(lines))
     return path
 

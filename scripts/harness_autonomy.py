@@ -9,7 +9,9 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
-
+PACKAGE_ROOT = SCRIPT_DIR / "harness_autonomy"
+if PACKAGE_ROOT.exists():
+    __path__ = [str(PACKAGE_ROOT)]  # type: ignore[var-annotated]
 from harness_env import load_harness_env  # noqa: E402
 
 

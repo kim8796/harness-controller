@@ -26,9 +26,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pytest ruff
       - name: Lint focused harness surfaces
-        run: python -m ruff check scripts/harness_cli.py scripts/harness_controller.py scripts/harness_export.py scripts/harness_starter_install.py scripts/harness_telegram_bridge.py scripts/harness_autonomy/relay.py tests/test_harness_cli.py tests/test_harness_controller.py tests/test_harness_export.py tests/test_harness_telegram_bridge.py tests/test_redis_relay.py
+        run: python -m ruff check scripts/harness_autonomy.py scripts/harness_autonomy/core.py scripts/harness_cli.py scripts/harness_controller.py scripts/harness_env.py scripts/harness_export.py scripts/harness_starter_install.py scripts/harness_telegram_bridge.py scripts/harness_autonomy/relay.py tests/test_harness_autonomy.py tests/test_harness_cli.py tests/test_harness_controller.py tests/test_harness_export.py tests/test_harness_telegram_bridge.py tests/test_redis_relay.py
       - name: Run focused tests
-        run: python -m pytest tests/test_harness_cli.py tests/test_harness_controller.py tests/test_harness_export.py tests/test_harness_telegram_bridge.py tests/test_redis_relay.py -q
+        run: python -m pytest tests/test_harness_autonomy.py tests/test_harness_cli.py tests/test_harness_controller.py tests/test_harness_export.py tests/test_harness_telegram_bridge.py tests/test_redis_relay.py -q
       - name: Export source check
         run: python scripts/harness_export.py --check --controller-bundle "$RUNNER_TEMP/controller-source-check"
       - name: Controller sanitization and self-test
@@ -53,6 +53,7 @@ jobs:
                   sys.executable,
                   "-m",
                   "pytest",
+                  "tests/test_harness_autonomy.py",
                   "tests/test_harness_cli.py",
                   "tests/test_harness_controller.py",
                   "tests/test_harness_export.py",

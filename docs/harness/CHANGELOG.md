@@ -1,5 +1,12 @@
 # Harness Changelog
 
+## 1.8.0 - 2026-05-13
+
+- Added RootContext-aware autonomy state plumbing for external controller targets without enabling product-changing lane execution.
+- Made `./harness target run <id|@alias|@default> --once` perform target lock/preflight plus an autonomy no-op smoke that writes sidecar evidence only under `targets/<id>/`.
+- Routed external operator send/outbox/control/runtime state through `operator-inbox`, `operator-outbox`, and `state/` instead of embedded `runs/autonomy/**`.
+- Hardened external autonomy entrypoints against registry bypass, mismatched raw roots, sidecar symlink/path escape, dirty/branch/detached target state, and embedded harness marker leakage.
+
 ## 1.7.108 - 2026-05-12
 
 - Added selector-only aliases for external controller targets through `./harness target alias add|remove|list`.

@@ -134,13 +134,13 @@ def _telegram_relay_disabled() -> bool:
     return os.environ.get(TELEGRAM_RELAY_ENABLED_ENV, "false").strip().lower() in {"0", "false", "no", "off"}
 
 
-def _drain_telegram_owner_relay(repo_root: Path, logger: Any | None = None) -> None:
+def _drain_telegram_owner_relay(repo_root: Path, logger: Any | None = None, *, target_id: str | None = None) -> None:
     if _telegram_relay_disabled():
         return
     try:
         import harness_telegram_bridge
 
-        result = harness_telegram_bridge.drain_redis_relay_once(repo_root)
+        result = harness_telegram_bridge.drain_redis_relay_once(repo_root, target_id=target_id)
     except Exception as exc:
         log_workflow_step(
             "harness-autonomy",
@@ -168,8 +168,15 @@ def _drain_telegram_owner_relay(repo_root: Path, logger: Any | None = None) -> N
         )
 
 
-def _consume_relay_resume_instruction(repo_root: Path, control_path: Path, logger: Any | None = None) -> None:
-    inbox_root = _control_support().inbox_dir_path(repo_root, DEFAULT_INBOX_PATH)
+def _consume_relay_resume_instruction(
+    repo_root: Path,
+    control_path: Path,
+    logger: Any | None = None,
+    *,
+    inbox_path: Path = DEFAULT_INBOX_PATH,
+    sidecar_root: Path | None = None,
+) -> None:
+    inbox_root = _control_support().inbox_dir_path(repo_root, inbox_path)
     for path in _control_support().list_pending_inbox_messages(inbox_root):
         try:
             text = read_text(path)
@@ -182,7 +189,10 @@ def _consume_relay_resume_instruction(repo_root: Path, control_path: Path, logge
             mode=CONTROL_MODE_RUNNING,
             reason=f"telegram relay resume instruction: {path.name}",
         )
-        _control_support().write_control_payload(control_path, payload)
+        if sidecar_root is not None:
+            _write_external_sidecar_json(sidecar_root, control_path, payload, label="external control payload")
+        else:
+            _control_support().write_control_payload(control_path, payload)
         log_workflow_step(
             "harness-autonomy",
             "telegram-owner-relay-resume",
@@ -689,8 +699,77 @@ def _model_strategy_support() -> Any:
     return phase_c_model_strategy
 
 
+def _controller_support() -> Any:
+    try:
+        import harness_controller
+
+        return harness_controller
+    except ModuleNotFoundError:  # pragma: no cover - export/isolated fallback
+        controller_path = Path(__file__).resolve().parents[1] / "harness_controller.py"
+        return _load_module("repo_harness_controller", controller_path)
+
+
 class AutonomyError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class AutonomyRootContext:
+    mode: str
+    target_id: str
+    controller_root: Path
+    target_root: Path
+    state_root: Path
+    control_path: Path
+    runtime_path: Path
+    lock_path: Path
+    inbox_path: Path
+    inbox_processed_path: Path
+    outbox_path: Path
+    product_execution_enabled: bool = False
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "mode": self.mode,
+            "target_id": self.target_id,
+            "controller_root": self.controller_root.as_posix(),
+            "target_root": self.target_root.as_posix(),
+            "state_root": self.state_root.as_posix(),
+            "control_path": self.control_path.as_posix(),
+            "runtime_path": self.runtime_path.as_posix(),
+            "lock_path": self.lock_path.as_posix(),
+            "inbox_path": self.inbox_path.as_posix(),
+            "inbox_processed_path": self.inbox_processed_path.as_posix(),
+            "outbox_path": self.outbox_path.as_posix(),
+            "product_execution_enabled": self.product_execution_enabled,
+        }
+
+
+def _relative_external_path(state_root: Path, path: Path, *, label: str) -> Path:
+    if path.is_symlink():
+        raise AutonomyError(f"{label} must not be a symlink")
+    try:
+        return path.resolve(strict=False).relative_to(state_root.resolve())
+    except ValueError as exc:
+        raise AutonomyError(f"{label} must stay inside target sidecar") from exc
+
+
+def _external_context_path_map(state_paths: Any) -> dict[str, Path]:
+    state_root = state_paths.state_root
+    controller = _controller_support()
+    target_run_lock_name = getattr(controller, "TARGET_RUN_LOCK_NAME", "target-run.lock")
+    return {
+        "control_path": _relative_external_path(state_root, state_paths.state_dir / "control.json", label="control path"),
+        "runtime_path": _relative_external_path(state_root, state_paths.state_dir / "runtime.json", label="runtime path"),
+        "lock_path": _relative_external_path(state_root, state_paths.locks_dir / target_run_lock_name, label="lock path"),
+        "inbox_path": _relative_external_path(state_root, state_paths.operator_inbox, label="operator inbox path"),
+        "inbox_processed_path": _relative_external_path(
+            state_root,
+            state_paths.operator_inbox / "processed",
+            label="operator inbox processed path",
+        ),
+        "outbox_path": _relative_external_path(state_root, state_paths.operator_outbox, label="operator outbox path"),
+    }
 
 
 @dataclass(frozen=True)
@@ -8185,11 +8264,343 @@ class LockFile:
             self.path.unlink()
 
 
+def _ensure_external_sidecar_directory(state_root: Path, path: Path, *, label: str) -> Path:
+    resolved_state = state_root.resolve()
+    if state_root.is_symlink():
+        raise AutonomyError("target sidecar directory must not be a symlink")
+    try:
+        relative = path.relative_to(state_root)
+    except ValueError:
+        resolved_path = path.resolve(strict=False)
+        if not _path_is_within(resolved_path, resolved_state):
+            raise AutonomyError(f"{label} must stay inside target sidecar")
+        relative = resolved_path.relative_to(resolved_state)
+    current = state_root
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise AutonomyError(f"{label} parent must not be a symlink: {current.as_posix()}")
+        if current.exists() and not current.is_dir():
+            raise AutonomyError(f"{label} parent must be a directory: {current.as_posix()}")
+    resolved_path = path.resolve(strict=False)
+    if not _path_is_within(resolved_path, resolved_state):
+        raise AutonomyError(f"{label} must stay inside target sidecar")
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _ensure_external_sidecar_file(state_root: Path, path: Path, *, label: str) -> Path:
+    resolved_state = state_root.resolve()
+    if path.is_symlink():
+        raise AutonomyError(f"{label} must not be a symlink")
+    resolved_path = path.resolve(strict=False)
+    if not _path_is_within(resolved_path, resolved_state):
+        raise AutonomyError(f"{label} must stay inside target sidecar")
+    parent = _ensure_external_sidecar_directory(state_root, path.parent, label=f"{label} parent")
+    if path.exists() and not path.is_file():
+        raise AutonomyError(f"{label} must be a regular file")
+    if parent != path.parent:
+        raise AutonomyError(f"{label} parent mismatch")
+    return path
+
+
+def _write_external_sidecar_text(state_root: Path, path: Path, content: str, *, label: str) -> None:
+    target = _ensure_external_sidecar_file(state_root, path, label=label)
+    target.write_text(content, encoding="utf-8")
+
+
+def _write_external_sidecar_json(state_root: Path, path: Path, payload: Any, *, label: str) -> None:
+    _write_external_sidecar_text(
+        state_root,
+        path,
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        label=label,
+    )
+
+
+def resolve_autonomy_root_context(args: argparse.Namespace) -> AutonomyRootContext:
+    raw_target_id = str(getattr(args, "target_id", "") or "").strip()
+    raw_target_root = getattr(args, "target_root", None)
+    raw_state_root = getattr(args, "state_root", None)
+    raw_controller_root = getattr(args, "controller_root", None)
+    external_requested = any((raw_target_id, raw_target_root, raw_state_root, raw_controller_root))
+    if not external_requested:
+        root = args.root.resolve()
+        return AutonomyRootContext(
+            mode="embedded",
+            target_id="embedded",
+            controller_root=root,
+            target_root=root,
+            state_root=root,
+            control_path=getattr(args, "control_path", DEFAULT_CONTROL_PATH),
+            runtime_path=getattr(args, "runtime_path", DEFAULT_RUNTIME_PATH),
+            lock_path=getattr(args, "lock_path", DEFAULT_LOCK_PATH),
+            inbox_path=DEFAULT_INBOX_PATH,
+            inbox_processed_path=DEFAULT_INBOX_PROCESSED_PATH,
+            outbox_path=DEFAULT_OUTBOX_PATH,
+            product_execution_enabled=True,
+        )
+    if not raw_target_id:
+        raise AutonomyError("external autonomy mode requires --target-id")
+    controller_root = (raw_controller_root or args.root).resolve()
+    controller = _controller_support()
+    try:
+        record = controller.load_target(controller_root, raw_target_id)
+        state_paths = record.state_paths(controller_root)
+    except Exception as exc:
+        raise AutonomyError(f"external target registry invalid: {exc}") from exc
+    if raw_target_root is not None and raw_target_root.resolve() != state_paths.target_root:
+        raise AutonomyError("external --target-root does not match registered target")
+    if raw_state_root is not None and raw_state_root.resolve() != state_paths.state_root:
+        raise AutonomyError("external --state-root does not match registered target sidecar")
+    controller.validate_sidecar_integrity(state_paths.state_root)
+    external_paths = _external_context_path_map(state_paths)
+    return AutonomyRootContext(
+        mode="external",
+        target_id=state_paths.target_id,
+        controller_root=state_paths.controller_root,
+        target_root=state_paths.target_root,
+        state_root=state_paths.state_root,
+        control_path=external_paths["control_path"],
+        runtime_path=external_paths["runtime_path"],
+        lock_path=external_paths["lock_path"],
+        inbox_path=external_paths["inbox_path"],
+        inbox_processed_path=external_paths["inbox_processed_path"],
+        outbox_path=external_paths["outbox_path"],
+        product_execution_enabled=bool(getattr(args, "external_product_execution", False)),
+    )
+
+
+def _state_root_for_args(args: argparse.Namespace) -> Path:
+    return resolve_autonomy_root_context(args).state_root
+
+
+def _allocate_external_run_dir(state_root: Path, target_id: str, requested_run_id: str | None) -> Path:
+    run_id = requested_run_id or (
+        f"external-{slugify(target_id)}-rootcontext-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    )
+    runs_root = state_root / "runs" / "harness"
+    _ensure_external_sidecar_directory(state_root, runs_root, label="external run evidence directory")
+    candidate = runs_root / run_id
+    if requested_run_id:
+        if candidate.exists():
+            raise AutonomyError(f"external state plumbing run already exists: {candidate.as_posix()}")
+        _ensure_external_sidecar_directory(state_root, candidate, label="external state plumbing run")
+        return candidate
+    suffix = 1
+    while candidate.exists():
+        suffix += 1
+        candidate = runs_root / f"{run_id}-{suffix}"
+    _ensure_external_sidecar_directory(state_root, candidate, label="external state plumbing run")
+    return candidate
+
+
+def run_external_state_plumbing_cycle(args: argparse.Namespace, context: AutonomyRootContext) -> CycleOutcome:
+    if context.product_execution_enabled:
+        raise AutonomyError("external product-changing execution is not enabled in this phase")
+    lock_token = str(getattr(args, "external_lock_token", "") or "").strip()
+    if not bool(getattr(args, "external_lock_owned", False)) or not lock_token:
+        raise AutonomyError("external autonomy mode requires controller target lock ownership")
+    lock_path = context.state_root / context.lock_path
+    try:
+        lock_payload = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AutonomyError("external target lock is not readable") from exc
+    if str(lock_payload.get("target_id") or "") != context.target_id or str(lock_payload.get("token") or "") != lock_token:
+        raise AutonomyError("external target lock owner mismatch")
+    controller = _controller_support()
+    record = controller.load_target(context.controller_root, context.target_id)
+    verification = controller.verify_target(record)
+    run_blockers = controller.target_run_blockers(verification)
+    if run_blockers:
+        raise AutonomyError("external target run blockers: " + ", ".join(str(item) for item in run_blockers))
+    before_status = controller.target_git_status_lines(context.target_root)
+    before_head = controller.target_git_head(context.target_root)
+    if before_status:
+        raise AutonomyError("external target must be clean before state plumbing smoke")
+    run_dir = _allocate_external_run_dir(context.state_root, context.target_id, getattr(args, "run_id", None))
+    report_dir = context.state_root / DEFAULT_REPORTS_ROOT / run_dir.name
+    _ensure_external_sidecar_directory(context.state_root, report_dir, label="external autonomy report directory")
+    after_status = controller.target_git_status_lines(context.target_root)
+    after_head = controller.target_git_head(context.target_root)
+    if before_status != after_status or before_head != after_head:
+        raise AutonomyError("external target changed during state plumbing smoke")
+    post_verification = controller.verify_target(record)
+    post_blockers = controller.target_run_blockers(post_verification)
+    if post_blockers:
+        raise AutonomyError("external target post-smoke blockers: " + ", ".join(str(item) for item in post_blockers))
+    selection = SelectedTask(
+        mode="external",
+        task_slug=run_dir.name,
+        title=f"External target RootContext plumbing smoke for {context.target_id}",
+        backlog_path=None,
+        source=f"external-rootcontext:{context.target_id}",
+    )
+    outcome = CycleOutcome(
+        status="no-op",
+        selection=selection,
+        run_dir=run_dir,
+        worktree_path=context.target_root,
+        branch="external-read-only",
+        state_source=f"external-target:{context.target_id}",
+        report_dir=report_dir,
+        report_path=report_dir / "report.md",
+        diff_summary=DiffSummary(0, 0, 0, tuple()),
+        significant=False,
+        runner_model_summary="external RootContext state plumbing; product execution disabled",
+        commit_sha=None,
+        persistent_sync=None,
+        lane_runners=effective_lane_runners_from_args(args),
+        lane_runner_summary=lane_runner_summary(effective_lane_runners_from_args(args)),
+    )
+    payload = {
+        "schema_version": 1,
+        "status": "pass",
+        "root_context": context.to_json(),
+        "product_head_before": before_head,
+        "product_head_after": after_head,
+        "product_status_before": before_status,
+        "product_status_after": after_status,
+        "product_execution": "disabled",
+        "lane_execution": "not-started",
+        "verification": verification,
+        "post_verification": post_verification,
+    }
+    _write_external_sidecar_json(
+        context.state_root,
+        run_dir / "root-context.json",
+        payload,
+        label="external root context evidence",
+    )
+    _write_external_sidecar_json(
+        context.state_root,
+        run_dir / GENERATED_EVIDENCE_JSON_FILENAME,
+        payload,
+        label="external generated evidence json",
+    )
+    _write_external_sidecar_text(
+        context.state_root,
+        run_dir / GENERATED_EVIDENCE_MARKDOWN_FILENAME,
+        "\n".join(
+            [
+                "# Generated Evidence",
+                "",
+                f"- Target ID: `{context.target_id}`",
+                f"- Mode: `{context.mode}`",
+                f"- Controller root: `{context.controller_root}`",
+                f"- Target root: `{context.target_root}`",
+                f"- State root: `{context.state_root}`",
+                "- Product execution: `disabled`",
+                "- Lane execution: `not-started`",
+                "- Product diff: `none`",
+                "- Product commit/push: `none`",
+                "",
+            ]
+        ),
+        label="external generated evidence markdown",
+    )
+    report_body = cycle_report_markdown(
+        outcome,
+        [],
+        manager_decision=None,
+        reviewer_decision=None,
+        verifier_result=None,
+        precommit_result=None,
+        prepush_result=None,
+    )
+    report_body = (
+        report_body.rstrip()
+        + "\n\n## RootContext\n\n"
+        + f"- 대상 ID: `{context.target_id}`\n"
+        + f"- controller_root: `{context.controller_root}`\n"
+        + f"- target_root: `{context.target_root}`\n"
+        + f"- state_root: `{context.state_root}`\n"
+        + "- 상태 배관 점검: `완료`\n"
+        + "- 제품 변경 실행: `비활성화`\n"
+        + "- lane 실행: `시작 안 함`\n"
+        + "- product diff/commit/push: `없음`\n"
+    )
+    _write_external_sidecar_text(context.state_root, outcome.report_path, report_body, label="external autonomy report")
+    _ensure_external_sidecar_file(
+        context.state_root,
+        context.state_root / DEFAULT_LATEST_REPORT_PATH,
+        label="external latest autonomy report",
+    )
+    _ensure_external_sidecar_file(
+        context.state_root,
+        (context.state_root / DEFAULT_LATEST_REPORT_PATH).with_suffix(".tmp"),
+        label="external latest autonomy report temp",
+    )
+    write_latest_report(context.state_root, outcome, report_body)
+    _ensure_external_sidecar_file(
+        context.state_root,
+        report_dir / DEFAULT_STATUS_FILENAME,
+        label="external status payload",
+    )
+    write_status_payload(
+        report_dir,
+        {
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            "run_id": run_dir.name,
+            "status": outcome.status,
+            "stage": "external-rootcontext-state-plumbing",
+            "active_lane": None,
+            "mode": selection.mode,
+            "title": selection.title,
+            "source": selection.source,
+            "target_id": context.target_id,
+            "root_context": context.to_json(),
+            "product_execution": "disabled",
+            "lane_execution": "not-started",
+            "worktree_path": str(context.target_root),
+            "state_source": outcome.state_source,
+        },
+    )
+    _ensure_external_sidecar_file(
+        context.state_root,
+        context.state_root / context.outbox_path / f"{run_dir.name}.md",
+        label="external operator outbox summary",
+    )
+    _control_support().write_outbox_summary(
+        context.state_root,
+        task_id=run_dir.name,
+        lane="external-rootcontext",
+        result=outcome.status,
+        next_recommendation=(
+            f"다음 확인: ./harness target status {context.target_id} 또는 "
+            f"./harness target dashboard {context.target_id}. 제품 변경 실행은 아직 비활성화입니다."
+        ),
+        task_title=selection.title,
+        report_path=outcome.report_path,
+        source=selection.source,
+        changed_paths=[],
+        operator_summary=f"대상 {context.target_id}: 상태 배관 점검이 완료되었습니다.",
+        operator_result="제품 변경 실행은 비활성화이고 lane 실행은 시작하지 않았습니다. product diff/commit/push는 없습니다.",
+        operator_next_action=(
+            f"다음 확인 명령: ./harness target status {context.target_id} 또는 "
+            f"./harness target dashboard {context.target_id}"
+        ),
+        extra_sections={
+            "RootContext": (
+                f"- 대상 ID: `{context.target_id}`\n"
+                f"- sidecar state root: `{context.state_root}`\n"
+                "- 제품 변경 실행: `비활성화`\n"
+                "- lane 실행: `시작 안 함`"
+            )
+        },
+        outbox_path=context.outbox_path,
+    )
+    return outcome
+
+
 def run_cycle(args: argparse.Namespace) -> CycleOutcome:
-    repo_root = args.root.resolve()
-    lock_file = (repo_root / args.lock_path).resolve()
-    runtime_path = runtime_file_path(repo_root, args.runtime_path)
-    control_path = control_file_path(repo_root, getattr(args, "control_path", DEFAULT_CONTROL_PATH))
+    root_context = resolve_autonomy_root_context(args)
+    if root_context.mode == "external":
+        return run_external_state_plumbing_cycle(args, root_context)
+    repo_root = root_context.state_root
+    lock_file = (repo_root / root_context.lock_path).resolve()
+    runtime_path = runtime_file_path(repo_root, root_context.runtime_path)
+    control_path = control_file_path(repo_root, root_context.control_path)
     policy_state_path = _policy_support().policy_state_path(repo_root)
     runtime_context = loop_runtime_context_from_args(args, repo_root)
     ignored_root_paths = (
@@ -9671,6 +10082,13 @@ _bind_phase_c_modules()
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run unattended CLI harness autonomy cycles")
     parser.add_argument("--root", type=Path, default=Path.cwd())
+    parser.add_argument("--controller-root", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--target-root", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--state-root", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--target-id", help=argparse.SUPPRESS)
+    parser.add_argument("--external-product-execution", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--external-lock-owned", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--external-lock-token", help=argparse.SUPPRESS)
     parser.add_argument("--control-path", type=Path, default=DEFAULT_CONTROL_PATH)
     parser.add_argument("--log-level", default="INFO")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -9860,9 +10278,10 @@ def render_loop_failure(
 
 
 def run_loop(args: argparse.Namespace) -> int:
-    root = args.root.resolve()
-    runtime_path = runtime_file_path(root, args.runtime_path)
-    control_path = control_file_path(root, args.control_path)
+    root_context = resolve_autonomy_root_context(args)
+    root = root_context.state_root
+    runtime_path = runtime_file_path(root, root_context.runtime_path)
+    control_path = control_file_path(root, root_context.control_path)
     completed = 0
     attempts = 0
     consecutive_failures = 0
@@ -9889,8 +10308,22 @@ def run_loop(args: argparse.Namespace) -> int:
             session_started_at=session_started_at,
         )
 
+    def write_loop_runtime_payload(path: Path, payload: dict[str, Any]) -> None:
+        if root_context.mode == "external":
+            _write_external_sidecar_json(root, path, payload, label="external runtime payload")
+            return
+        write_runtime_payload(path, payload)
+
+    def clear_loop_runtime_payload(path: Path) -> None:
+        if root_context.mode == "external":
+            _ensure_external_sidecar_file(root, path, label="external runtime payload")
+            if path.exists():
+                path.unlink()
+            return
+        clear_runtime_payload(path)
+
     try:
-        write_runtime_payload(
+        write_loop_runtime_payload(
             runtime_path,
             build_loop_runtime_payload(
                 pid=pid,
@@ -9905,15 +10338,25 @@ def run_loop(args: argparse.Namespace) -> int:
         )
         while True:
             try:
-                _drain_telegram_owner_relay(root, logger=get_logger("scripts.harness_autonomy"))
-                _consume_relay_resume_instruction(root, control_path, logger=get_logger("scripts.harness_autonomy"))
+                _drain_telegram_owner_relay(
+                    root_context.controller_root,
+                    logger=get_logger("scripts.harness_autonomy"),
+                    target_id=(root_context.target_id if root_context.mode == "external" else None),
+                )
+                _consume_relay_resume_instruction(
+                    root,
+                    control_path,
+                    logger=get_logger("scripts.harness_autonomy"),
+                    inbox_path=root_context.inbox_path,
+                    sidecar_root=root if root_context.mode == "external" else None,
+                )
                 control_state = read_control_state(control_path)
                 doctor_claim = control_state.get("doctor_claim")
                 if doctor_claim_is_active(doctor_claim):
                     claim_kind = str(doctor_claim.get("claim_kind", "") or "doctor")
                     claim_id = str(doctor_claim.get("claim_id", "") or "unknown")
                     next_watchdog_at = next_retry_timestamp(args.paused_watchdog_seconds)
-                    write_runtime_payload(
+                    write_loop_runtime_payload(
                         runtime_path,
                         build_loop_runtime_payload(
                             pid=pid,
@@ -9935,7 +10378,7 @@ def run_loop(args: argparse.Namespace) -> int:
                     time.sleep(args.paused_watchdog_seconds)
                     continue
                 if control_state["mode"] in {CONTROL_MODE_STOP, CONTROL_MODE_PAUSE_AFTER_CYCLE}:
-                    write_runtime_payload(
+                    write_loop_runtime_payload(
                         runtime_path,
                         build_loop_runtime_payload(
                             pid=pid,
@@ -9968,7 +10411,7 @@ def run_loop(args: argparse.Namespace) -> int:
                             paused_since = datetime.now().isoformat(timespec="seconds")
                         paused_reason = pause_reason(preflight)
                         next_watchdog_at = next_retry_timestamp(args.paused_watchdog_seconds)
-                        write_runtime_payload(
+                        write_loop_runtime_payload(
                             runtime_path,
                             build_loop_runtime_payload(
                                 pid=pid,
@@ -10009,7 +10452,7 @@ def run_loop(args: argparse.Namespace) -> int:
                                 escalation_seconds=args.paused_escalation_seconds,
                                 escalated=True,
                             )
-                            write_runtime_payload(
+                            write_loop_runtime_payload(
                                 runtime_path,
                                 build_loop_runtime_payload(
                                     pid=pid,
@@ -10043,7 +10486,7 @@ def run_loop(args: argparse.Namespace) -> int:
                     paused_since = None
 
                 if empty_backlog_idle is not None:
-                    write_runtime_payload(
+                    write_loop_runtime_payload(
                         runtime_path,
                         build_loop_runtime_payload(
                             pid=pid,
@@ -10089,7 +10532,7 @@ def run_loop(args: argparse.Namespace) -> int:
                         empty_backlog_idle = None
                         empty_backlog_idle_notified = False
                         next_retry_at = next_retry_timestamp(args.sleep_seconds)
-                        write_runtime_payload(
+                        write_loop_runtime_payload(
                             runtime_path,
                             build_loop_runtime_payload(
                                 pid=pid,
@@ -10115,7 +10558,7 @@ def run_loop(args: argparse.Namespace) -> int:
                         continue
 
                 attempts += 1
-                write_runtime_payload(
+                write_loop_runtime_payload(
                     runtime_path,
                     build_loop_runtime_payload(
                         pid=pid,
@@ -10142,7 +10585,7 @@ def run_loop(args: argparse.Namespace) -> int:
                     raise
                 consecutive_failures += 1
                 next_retry_at = next_retry_timestamp(retry_sleep_seconds)
-                write_runtime_payload(
+                write_loop_runtime_payload(
                     runtime_path,
                     build_loop_runtime_payload(
                         pid=pid,
@@ -10185,7 +10628,7 @@ def run_loop(args: argparse.Namespace) -> int:
             if args.stop_on_idle and outcome.status == "no-op":
                 return 0
             if selection_is_no_executable_backlog(outcome.selection):
-                write_runtime_payload(
+                write_loop_runtime_payload(
                     runtime_path,
                     build_loop_runtime_payload(
                         pid=pid,
@@ -10224,7 +10667,7 @@ def run_loop(args: argparse.Namespace) -> int:
                 continue
             control_state = read_control_state(control_path)
             if control_state["mode"] in {CONTROL_MODE_STOP, CONTROL_MODE_PAUSE_AFTER_CYCLE}:
-                write_runtime_payload(
+                write_loop_runtime_payload(
                     runtime_path,
                     build_loop_runtime_payload(
                         pid=pid,
@@ -10251,7 +10694,7 @@ def run_loop(args: argparse.Namespace) -> int:
                 return 0
 
             next_retry_at = next_retry_timestamp(args.sleep_seconds)
-            write_runtime_payload(
+            write_loop_runtime_payload(
                 runtime_path,
                 build_loop_runtime_payload(
                     pid=pid,
@@ -10270,7 +10713,7 @@ def run_loop(args: argparse.Namespace) -> int:
                 )
             time.sleep(args.sleep_seconds)
     finally:
-        clear_runtime_payload(runtime_path)
+        clear_loop_runtime_payload(runtime_path)
 
 
 runtime_file_path = _control_support().runtime_file_path
@@ -10386,9 +10829,10 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError:
         pass
     try:
+        root_context = resolve_autonomy_root_context(args)
         if args.command in {"pause", "resume", "stop"}:
-            root = args.root.resolve()
-            control_path = control_file_path(root, args.control_path)
+            root = root_context.state_root
+            control_path = control_file_path(root, root_context.control_path)
             reason = getattr(args, "reason", None)
             if args.command == "resume":
                 payload = build_control_payload(mode=CONTROL_MODE_RUNNING, reason=reason)
@@ -10397,7 +10841,10 @@ def main(argv: list[str] | None = None) -> int:
                 payload = build_control_payload(mode=mode, reason=reason)
             else:
                 payload = build_control_payload(mode=CONTROL_MODE_STOP, reason=reason)
-            write_control_payload(control_path, payload)
+            if root_context.mode == "external":
+                _write_external_sidecar_json(root, control_path, payload, label="external control payload")
+            else:
+                write_control_payload(control_path, payload)
             print(
                 render_control_update(
                     control_path=control_path,
@@ -10408,12 +10855,13 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         if args.command == "send":
-            root = args.root.resolve()
+            root = root_context.state_root
             message = " ".join(getattr(args, "message", ())).strip()
             message_path = _control_support().write_inbox_message(
                 root,
                 message=message,
                 title=getattr(args, "title", None),
+                inbox_path=root_context.inbox_path,
             )
             print(
                 _control_support().render_inbox_write(
@@ -10425,10 +10873,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "status":
-            root = args.root.resolve()
-            lock_path = (root / args.lock_path).resolve()
-            runtime_path = runtime_file_path(root, args.runtime_path)
+            root = root_context.state_root
+            lock_path = (root / root_context.lock_path).resolve()
+            runtime_path = runtime_file_path(root, root_context.runtime_path)
             if args.touch:
+                if root_context.mode == "external":
+                    raise AutonomyError("external status --touch is disabled; use read-only status for external targets")
                 status_workspace_key = status_touch_workspace_key(root, run_id=args.run_id, runtime_path=runtime_path)
                 _policy_support().record_status_touch(root, workspace_key=status_workspace_key)
             while True:

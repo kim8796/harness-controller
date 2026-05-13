@@ -1,8 +1,15 @@
 # Harness Framework Version
 
-- Current Version: 1.7.108
-- Release Date: 2026-05-12
+- Current Version: 1.8.0
+- Release Date: 2026-05-13
 - Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + on-demand export output.
+
+## What Changed In 1.8.0
+
+- Added RootContext-aware autonomy state plumbing for external controller targets while keeping product-changing lane execution disabled.
+- Made `./harness target run <id|@alias|@default> --once` call the autonomy no-op smoke after target lock/preflight and write sidecar run evidence, reports, status, and operator outbox only under `targets/<id>/`.
+- Routed external send/outbox/control/runtime paths through the canonical sidecar mapping: `operator-inbox`, `operator-outbox`, `state`, `reports/harness-autonomy`, and `runs/harness`.
+- Hardened external hidden autonomy entrypoints so they load `target.json`, reject mismatched raw roots, block dirty/branch/detached/harness-marker targets, and reject sidecar symlink/path escape.
 
 ## What Changed In 1.7.108
 

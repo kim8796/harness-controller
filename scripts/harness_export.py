@@ -99,6 +99,7 @@ STATIC_EXPORT_SOURCE_PATHS = (
     Path("docs/harness/CHANGELOG.md"),
     Path("coverage-summary.txt"),
     Path("tests/conftest.py"),
+    Path("tests/test_harness_autonomy.py"),
     Path("tests/test_harness_cli.py"),
     Path("tests/test_harness_controller.py"),
     Path("tests/test_harness_export.py"),
@@ -135,6 +136,7 @@ STARTER_CONTROLLER_ONLY_SOURCE_PATHS = frozenset(
     {
         Path(".github/workflows/harness-controller-ci.yml"),
         Path("tests/conftest.py"),
+        Path("tests/test_harness_autonomy.py"),
         Path("tests/test_harness_cli.py"),
         Path("tests/test_harness_controller.py"),
         Path("tests/test_harness_export.py"),
@@ -579,7 +581,7 @@ def controller_claude_template() -> str:
 
         - 비밀값은 환경변수와 ignored `.env` 파일에서만 읽는다.
         - `targets/**`는 controller-local sidecar이며 product repo에 커밋하지 않는다.
-        - external lane execution은 RootContext 안전 계약이 통과된 뒤에만 켠다.
+        - product-changing external lane execution은 별도 명시 opt-in gate 전까지 켜지 않는다.
         """
     )
 
@@ -925,7 +927,7 @@ def export_controller_bundle(root: Path, output_dir: Path, version: str | None =
                 "- Set `HARNESS_RELAY_TARGET_IDS=my-app` in the product bot/runtime that enqueues relay commands.",
                 "- Optional: set `HARNESS_RELAY_TARGET_ALIASES=app=my-app` and `HARNESS_RELAY_TARGET_ID=my-app` for `@app` / `@default` selectors.",
                 "- Use `/harness note my-app ...`, `/harness note @app ...`, or `/harness answer @default ...`; the signed canonical target id reaches this controller.",
-                "- The controller drains to `targets/my-app/operator-inbox`; `target run --once` runs a read-only/no-op smoke and still keeps product-changing execution disabled.",
+                "- The controller drains to `targets/my-app/operator-inbox`; `target run --once` runs a RootContext-aware read-only/no-op smoke with state plumbing and still keeps product-changing execution disabled.",
                 "",
                 "## Excluded Live State",
                 "",

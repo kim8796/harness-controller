@@ -289,6 +289,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "scripts" / "harness_controller.py").exists()
     assert (bundle / "scripts" / "harness_autonomy" / "relay.py").exists()
     assert (bundle / "tests" / "conftest.py").exists()
+    assert (bundle / "tests" / "test_harness_autonomy.py").exists()
     assert (bundle / "tests" / "test_harness_cli.py").exists()
     assert (bundle / "tests" / "test_harness_controller.py").exists()
     assert (bundle / "tests" / "test_harness_export.py").exists()
@@ -307,7 +308,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "./harness target alias add my-app app" in readme
     assert "targets/my-app/operator-inbox" in readme
     assert "read-only/no-op smoke" in readme
-    assert "target run --once` runs a read-only/no-op smoke" in readme
+    assert "target run --once` runs a RootContext-aware read-only/no-op smoke with state plumbing" in readme
     assert "product-changing execution disabled" in readme
     assert "Harness Controller Adapter" in (bundle / "AGENTS.md").read_text(encoding="utf-8")
     product_marker = "MINI" + "APP"

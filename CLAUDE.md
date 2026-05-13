@@ -4,4 +4,4 @@
 
 - 비밀값은 환경변수와 ignored `.env` 파일에서만 읽는다.
 - `targets/**`는 controller-local sidecar이며 product repo에 커밋하지 않는다.
-- external lane execution은 RootContext 안전 계약이 통과된 뒤에만 켠다.
+- product-changing external lane execution은 별도 명시 opt-in gate 전까지 켜지 않는다.

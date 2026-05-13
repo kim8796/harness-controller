@@ -479,12 +479,17 @@ def test_external_target_run_once_read_only_smoke_without_product_mutation(
         env=_git_env(),
     ).stdout
 
-    assert "외부 target read-only smoke 완료" in output
+    assert "외부 target 상태 배관 점검 완료" in output
     assert "대상 ID: `demo`" in output
     assert "lane 실행: 시작 안 함 (read-only/no-op smoke only)" in output
     assert "제품 변경 실행: 비활성화" in output
+    assert "product diff/commit/push: 없음" in output
     assert before == after == ""
     assert (controller / "targets" / "demo" / "reports" / "operator-dashboard-latest.md").exists()
+    sidecar_run_root = controller / "targets" / "demo" / "runs" / "harness"
+    assert any(path.name == "root-context.json" for path in sidecar_run_root.glob("*/root-context.json"))
+    assert any((controller / "targets" / "demo" / "operator-outbox").glob("*.md"))
+    assert not (controller / "targets" / "demo" / "runs" / "autonomy").exists()
     smoke_report = controller / "targets" / "demo" / "reports" / "target-run-latest.md"
     assert smoke_report.exists()
     smoke_body = smoke_report.read_text(encoding="utf-8")
@@ -526,7 +531,7 @@ def test_external_target_run_once_blocks_same_target_lock_without_blocking_other
     assert dashboard.read_text(encoding="utf-8") == "original dashboard\n"
     assert module.main(["target", "run", "admin", "--once"]) == 0
     output = capsys.readouterr().out
-    assert "외부 target read-only smoke 완료" in output
+    assert "외부 target 상태 배관 점검 완료" in output
     assert "already locked" not in output
     assert lock_path.exists()
     assert not (controller / "targets" / "admin" / "locks" / "target-run.lock").exists()
@@ -643,6 +648,11 @@ def test_external_target_run_once_blocks_post_head_change(monkeypatch, tmp_path:
     capsys.readouterr()
     heads = iter(("before-head", "after-head"))
     monkeypatch.setattr(module.harness_controller, "target_git_head", lambda target_root: next(heads))
+    monkeypatch.setattr(
+        module,
+        "_run_target_autonomy_state_plumbing",
+        lambda record, **kwargs: subprocess.CompletedProcess(("state-plumbing",), 0, "", ""),
+    )
 
     assert module.main(["target", "run", "demo", "--once"]) == 2
     output = capsys.readouterr().out
@@ -669,6 +679,11 @@ def test_external_target_run_once_blocks_post_status_change(monkeypatch, tmp_pat
     assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
     capsys.readouterr()
     monkeypatch.setattr(module.harness_controller, "target_git_status_lines", lambda target_root: ["?? generated.txt"])
+    monkeypatch.setattr(
+        module,
+        "_run_target_autonomy_state_plumbing",
+        lambda record, **kwargs: subprocess.CompletedProcess(("state-plumbing",), 0, "", ""),
+    )
 
     assert module.main(["target", "run", "demo", "--once"]) == 2
     output = capsys.readouterr().out
@@ -701,6 +716,11 @@ def test_external_target_run_once_rechecks_post_run_blockers(monkeypatch, tmp_pa
     post["branch"] = {"expected": "main", "actual": "feature", "detached": False}
     verifications = iter((initial, post))
     monkeypatch.setattr(module.harness_controller, "verify_target", lambda current: next(verifications))
+    monkeypatch.setattr(
+        module,
+        "_run_target_autonomy_state_plumbing",
+        lambda record, **kwargs: subprocess.CompletedProcess(("state-plumbing",), 0, "", ""),
+    )
 
     assert module.main(["target", "run", "demo", "--once"]) == 2
     output = capsys.readouterr().out
@@ -736,6 +756,11 @@ def test_external_target_run_once_blocks_post_harness_marker(monkeypatch, tmp_pa
         return payload
 
     monkeypatch.setattr(module.harness_controller, "verify_target", fake_verify)
+    monkeypatch.setattr(
+        module,
+        "_run_target_autonomy_state_plumbing",
+        lambda record, **kwargs: subprocess.CompletedProcess(("state-plumbing",), 0, "", ""),
+    )
 
     assert module.main(["target", "run", "demo", "--once"]) == 2
     output = capsys.readouterr().out
@@ -761,6 +786,9 @@ def test_external_target_add_missing_repo_fails_closed(monkeypatch, tmp_path: Pa
 
 def test_env_check_missing_values_exit_nonzero_and_invalid_provider_fails(tmp_path: Path, capsys, monkeypatch) -> None:
     module = _load_module()
+    for key in module.harness_env.TELEGRAM_RELAY_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv(module.harness_env.TELEGRAM_BOT_TOKEN_ENV, raising=False)
     monkeypatch.chdir(tmp_path)
     subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, text=True, capture_output=True, env=_git_env())
 
