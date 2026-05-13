@@ -1,5 +1,12 @@
 # Harness Changelog
 
+## 1.8.12 - 2026-05-14
+
+- Added `./harness target backlog push <target> --run <implementation-run>` as the explicit dry-run-first product push gate for completed sidecar backlog work.
+- Required a matching applied backlog product commit receipt, clean product repo, unchanged current product HEAD, and remote head still at the recorded pre-commit base.
+- Recorded backlog product push receipt/evidence/report in the controller sidecar when `--apply` succeeds.
+- Kept product commit creation, backlog mutation, Telegram-triggered product push, force push, tags, broad refspecs, and automatic remote rollback disabled.
+
 ## 1.8.11 - 2026-05-13
 
 - Removed generated `coverage-summary.txt` from canonical export source paths.

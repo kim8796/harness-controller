@@ -93,6 +93,12 @@ def _init_product_repo(path: Path, *, configure_identity: bool = False) -> str:
     ).stdout.strip()
 
 
+def _configure_product_upstream(product: Path, remote: Path) -> None:
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, text=True, capture_output=True, env=_git_env())
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=product, check=True, env=_git_env())
+
+
 def _product_git_status(path: Path) -> list[str]:
     return subprocess.run(
         ["git", "status", "--porcelain=v1"],
@@ -1322,6 +1328,186 @@ def test_external_target_backlog_commit_apply_creates_product_commit_only(monkey
     assert receipt["product_diff_paths"] == ["feature.txt"]
     assert receipt["product_head_before"] == head_before
     assert receipt["product_head_after"] == head_after
+
+
+def test_external_target_backlog_push_dry_run_does_not_push(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    remote = tmp_path / "remote.git"
+    controller.mkdir()
+    head_before = _init_product_repo(product, configure_identity=True)
+    _configure_product_upstream(product, remote)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.12")
+    run_id = _create_completed_sidecar_backlog_with_product_diff(module, controller, product, capsys)
+    assert (
+        module.main(
+            [
+                "target",
+                "backlog",
+                "commit",
+                "demo",
+                "--run",
+                run_id,
+                "--message",
+                "feat: implement demo backlog",
+                "--apply",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    product_commit = _product_head(product)
+
+    assert module.main(["target", "backlog", "push", "demo", "--run", run_id]) == 0
+    output = capsys.readouterr().out
+    remote_after = subprocess.run(
+        ["git", "ls-remote", "origin", "refs/heads/main"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.split()[0]
+
+    assert "dry-run 완료" in output
+    assert "remote 변경: 없음" in output
+    assert _product_head(product) == product_commit
+    assert remote_after == head_before
+    assert not list((controller / "targets" / "demo" / "runs" / "harness").glob("*/product-push-receipt.json"))
+
+
+def test_external_target_backlog_push_apply_updates_registered_remote(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    remote = tmp_path / "remote.git"
+    controller.mkdir()
+    head_before = _init_product_repo(product, configure_identity=True)
+    _configure_product_upstream(product, remote)
+    hook = product / ".git" / "hooks" / "pre-push"
+    hook.write_text("#!/bin/sh\necho ran > pre-push-ran\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.12")
+    run_id = _create_completed_sidecar_backlog_with_product_diff(module, controller, product, capsys)
+    assert (
+        module.main(
+            [
+                "target",
+                "backlog",
+                "commit",
+                "demo",
+                "--run",
+                run_id,
+                "--message",
+                "feat: implement demo backlog",
+                "--apply",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    product_commit = _product_head(product)
+
+    assert module.main(["target", "backlog", "push", "demo", "--run", run_id, "--apply"]) == 0
+    output = capsys.readouterr().out
+    remote_after = subprocess.run(
+        ["git", "ls-remote", "origin", "refs/heads/main"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.split()[0]
+
+    assert "적용 완료" in output
+    assert "product push: origin/main" in output
+    assert "automatic remote rollback 없음" in output
+    assert _product_head(product) == product_commit
+    assert _product_git_status(product) == []
+    assert remote_after == product_commit
+    assert not (product / "pre-push-ran").exists()
+    _assert_no_product_harness_pollution(product)
+    receipts = list((controller / "targets" / "demo" / "runs" / "harness").glob("*/product-push-receipt.json"))
+    assert receipts
+    receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+    assert receipt["operation"] == "backlog-product-push"
+    assert receipt["status"] == "pass"
+    assert receipt["implementation_run_id"] == run_id
+    assert receipt["backlog_id"] == "BL-demo"
+    assert receipt["product_commit_sha"] == product_commit
+    assert receipt["product_push"] == "enabled"
+    assert receipt["product_push_remote"] == "origin"
+    assert receipt["product_push_ref"] == "refs/heads/main"
+    assert receipt["product_push_remote_before"] == head_before
+    assert receipt["product_push_remote_after"] == product_commit
+    assert receipt["product_push_command"] == ["push", "--no-verify", "origin", "HEAD:refs/heads/main"]
+
+
+def test_external_target_backlog_push_blocks_remote_drift(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    remote = tmp_path / "remote.git"
+    other = tmp_path / "other"
+    controller.mkdir()
+    _init_product_repo(product, configure_identity=True)
+    _configure_product_upstream(product, remote)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.12")
+    run_id = _create_completed_sidecar_backlog_with_product_diff(module, controller, product, capsys)
+    assert (
+        module.main(
+            [
+                "target",
+                "backlog",
+                "commit",
+                "demo",
+                "--run",
+                run_id,
+                "--message",
+                "feat: implement demo backlog",
+                "--apply",
+            ]
+        )
+        == 0
+    )
+    product_commit = _product_head(product)
+    capsys.readouterr()
+    subprocess.run(
+        ["git", "clone", "--branch", "main", str(remote), str(other)],
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    )
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=other, check=True, env=_git_env())
+    subprocess.run(["git", "config", "user.email", "harness-test@example.invalid"], cwd=other, check=True, env=_git_env())
+    (other / "REMOTE.md").write_text("remote moved\n", encoding="utf-8")
+    subprocess.run(["git", "add", "REMOTE.md"], cwd=other, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: move remote"], cwd=other, check=True, env=_git_env())
+    subprocess.run(["git", "push", "origin", "main"], cwd=other, check=True, env=_git_env())
+
+    assert module.main(["target", "backlog", "push", "demo", "--run", run_id, "--apply"]) == 2
+    output = capsys.readouterr().out
+    remote_after = subprocess.run(
+        ["git", "ls-remote", "origin", "refs/heads/main"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.split()[0]
+
+    assert "remote head does not match backlog product commit base" in output
+    assert remote_after != product_commit
+    assert _product_head(product) == product_commit
+    assert _product_git_status(product) == []
+    assert not list((controller / "targets" / "demo" / "runs" / "harness").glob("*/product-push-receipt.json"))
 
 
 def test_external_target_backlog_commit_requires_completed_backlog(monkeypatch, tmp_path: Path, capsys) -> None:

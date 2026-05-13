@@ -1,8 +1,15 @@
 # Harness Framework Version
 
-- Current Version: 1.8.11
-- Release Date: 2026-05-13
-- Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + controller release-history-preserving export + generated coverage artifact exclusion + on-demand export output.
+- Current Version: 1.8.12
+- Release Date: 2026-05-14
+- Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + backlog-bound product push gate + controller release-history-preserving export + generated coverage artifact exclusion + on-demand export output.
+
+## What Changed In 1.8.12
+
+- Added `./harness target backlog push <target> --run <implementation-run>` as the explicit backlog-bound product push gate.
+- The command is dry-run by default; `--apply` pushes only when the current product HEAD matches a recorded backlog product commit for the implementation run.
+- Push mode requires the registered branch upstream, remote head equal to the recorded pre-commit product HEAD, a clean product repo, completed sidecar backlog metadata, and matching implementation/commit evidence.
+- Product commit creation, backlog state mutation, Telegram-triggered product push, force push, tags, broad refspecs, and automatic remote rollback remain disabled.
 
 ## What Changed In 1.8.11
 

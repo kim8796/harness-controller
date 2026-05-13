@@ -45,6 +45,11 @@ PRODUCT_BACKLOG_COMMIT_ROLLBACK_CAUTION = (
     "This backlog commit gate creates a local product commit only. Only reset it if HEAD is still "
     "the recorded commit and no later product work was added on top."
 )
+PRODUCT_BACKLOG_PUSH_CAUTION = (
+    "This backlog push gate updates the product remote branch and may trigger product repo CI/CD/deploy "
+    "automation. No automatic remote rollback is performed; coordinate with the branch owner and use "
+    "an operator-reviewed revert or repo-policy recovery."
+)
 BACKLOG_TRANSITION_STATUSES = ("completed", "blocked", "manual-review")
 PRODUCT_HARNESS_MARKERS = (
     Path("harness"),
@@ -1212,6 +1217,57 @@ def _completed_backlog_item_for_commit(record: TargetRecord, state_paths: StateP
     return item, evidence, evidence_path
 
 
+def _completed_backlog_item_for_push(record: TargetRecord, state_paths: StatePaths, run_id: str):
+    safe_run_id = _safe_evidence_run_id(run_id)
+    evidence, evidence_path = _load_transition_run_evidence(state_paths, safe_run_id)
+    root_context = evidence.get("root_context")
+    if not isinstance(root_context, Mapping):
+        raise ControllerError("push evidence is missing root_context")
+    evidence_target = str(root_context.get("target_id") or "")
+    if evidence_target != record.target_id:
+        raise ControllerError("push evidence target_id does not match target")
+    evidence_state_root = str(root_context.get("state_root") or "")
+    if evidence_state_root and Path(evidence_state_root).resolve() != state_paths.state_root.resolve():
+        raise ControllerError("push evidence state_root does not match target")
+    checks = {
+        "status": "pass",
+        "product_execution": "enabled",
+        "product_implementation": "enabled",
+        "product_commit": "disabled",
+        "product_push": "disabled",
+        "lane_execution": "backlog-implementation",
+    }
+    for field, expected in checks.items():
+        if str(evidence.get(field) or "") != expected:
+            raise ControllerError(f"push evidence `{field}` must be `{expected}`")
+    before_head = str(evidence.get("product_head_before") or "")
+    after_head = str(evidence.get("product_head_after") or "")
+    if not before_head or before_head != after_head:
+        raise ControllerError("push evidence must be based on an uncommitted implementation diff")
+    expected_paths = _safe_product_diff_paths([str(path) for path in evidence.get("product_diff_paths") or [] if str(path)])
+    expected_fingerprint = str(evidence.get("product_diff_fingerprint") or "").strip()
+    if not expected_fingerprint:
+        raise ControllerError("push evidence lacks product diff fingerprint; rerun implementation with current controller")
+    backlog_payload = evidence.get("external_backlog")
+    if not isinstance(backlog_payload, Mapping):
+        raise ControllerError("push evidence is missing external_backlog")
+    backlog_id = str(backlog_payload.get("id") or "").strip()
+    backlog_path = str(backlog_payload.get("path") or "").strip()
+    if not backlog_id or not backlog_path:
+        raise ControllerError("push evidence external_backlog is incomplete")
+    if not backlog_path.startswith("backlog/queued/"):
+        raise ControllerError("push evidence must point to queued sidecar backlog")
+    item = _discover_sidecar_backlog_item(state_paths, backlog_id)
+    if str(item.status) != "completed":
+        raise ControllerError("backlog push requires completed sidecar backlog")
+    from harness_autonomy import read_backlog_metadata
+
+    metadata = read_backlog_metadata(state_paths.state_root / item.path)
+    if str(metadata.get("completed_run") or "") != safe_run_id:
+        raise ControllerError("completed backlog does not reference the implementation run")
+    return item, evidence, evidence_path, expected_paths, expected_fingerprint, after_head
+
+
 def _allocate_transition_run_dir(state_paths: StatePaths) -> Path:
     runs_root = _prepare_sidecar_directory_for_write(
         state_root=state_paths.state_root,
@@ -1247,6 +1303,25 @@ def _allocate_backlog_commit_run_dir(state_paths: StatePaths) -> Path:
         state_root=state_paths.state_root,
         path=candidate,
         label="backlog commit evidence directory",
+    )
+
+
+def _allocate_backlog_push_run_dir(state_paths: StatePaths) -> Path:
+    runs_root = _prepare_sidecar_directory_for_write(
+        state_root=state_paths.state_root,
+        path=state_paths.state_root / "runs" / "harness",
+        label="backlog push evidence root",
+    )
+    base = f"external-{state_paths.target_id}-backlog-push-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    candidate = runs_root / base
+    suffix = 1
+    while candidate.exists():
+        suffix += 1
+        candidate = runs_root / f"{base}-{suffix}"
+    return _prepare_sidecar_directory_for_write(
+        state_root=state_paths.state_root,
+        path=candidate,
+        label="backlog push evidence directory",
     )
 
 
@@ -1701,6 +1776,237 @@ def commit_sidecar_backlog_product_diff(
             ]
         ),
         label="backlog product commit report",
+    )
+    return applied_payload
+
+
+def _matching_backlog_commit_evidence(
+    *,
+    record: TargetRecord,
+    state_paths: StatePaths,
+    implementation_run_id: str,
+    backlog_id: str,
+    expected_paths: Sequence[str],
+    expected_fingerprint: str,
+    implementation_head: str,
+    current_head: str,
+) -> tuple[dict[str, Any], Path]:
+    runs_root = state_paths.state_root / "runs" / "harness"
+    if not runs_root.exists():
+        raise ControllerError("matching backlog product commit receipt not found")
+    matches: list[tuple[dict[str, Any], Path]] = []
+    for evidence_path in sorted(runs_root.glob("external-*-backlog-commit-*/generated-evidence.json")):
+        payload = _read_json_file(evidence_path, label="backlog product commit generated evidence")
+        if str(payload.get("operation") or "") != "backlog-product-commit":
+            continue
+        if str(payload.get("target_id") or "") != record.target_id:
+            continue
+        if str(payload.get("implementation_run_id") or "") != implementation_run_id:
+            continue
+        if str(payload.get("product_commit_sha") or "") != current_head:
+            continue
+        matches.append((payload, evidence_path))
+    if not matches:
+        raise ControllerError("matching backlog product commit receipt not found for current product HEAD")
+    if len(matches) != 1:
+        raise ControllerError("matching backlog product commit receipt is ambiguous")
+    payload, evidence_path = matches[0]
+    checks = {
+        "status": "pass",
+        "applied": True,
+        "product_commit": "enabled",
+        "product_push": "disabled",
+        "backlog_id": backlog_id,
+        "product_head_before": implementation_head,
+        "product_head_after": current_head,
+    }
+    for field, expected in checks.items():
+        if payload.get(field) != expected:
+            raise ControllerError(f"backlog product commit evidence `{field}` does not match push requirements")
+    commit_paths = _safe_product_diff_paths([str(path) for path in payload.get("product_diff_paths") or [] if str(path)])
+    if commit_paths != list(expected_paths):
+        raise ControllerError("backlog product commit paths do not match implementation evidence")
+    if str(payload.get("product_diff_fingerprint") or "") != expected_fingerprint:
+        raise ControllerError("backlog product commit fingerprint does not match implementation evidence")
+    commit_diff_paths = target_status_paths([str(line) for line in payload.get("product_commit_diff") or [] if str(line)])
+    if commit_diff_paths != list(expected_paths):
+        raise ControllerError("backlog product commit diff does not match implementation evidence")
+    if payload.get("product_status_after") not in ([], None):
+        raise ControllerError("backlog product commit evidence did not finish with a clean product repo")
+    return payload, evidence_path
+
+
+def push_product_backlog_commit(target_root: Path, push_target: ProductPushTarget, expected_head: str) -> str:
+    result = git(push_target.command, cwd=target_root)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise ControllerError(f"target backlog product push failed: {detail}")
+    remote_after = target_remote_ref_head(target_root, push_target.remote, push_target.ref)
+    if remote_after != expected_head:
+        raise ControllerError("target backlog product push remote head is unexpected")
+    return remote_after
+
+
+def push_sidecar_backlog_product_commit(
+    *,
+    controller_root: Path,
+    record: TargetRecord,
+    run_id: str,
+    apply: bool = False,
+) -> dict[str, Any]:
+    safe_run_id = _safe_evidence_run_id(run_id)
+    state_paths = record.state_paths(controller_root)
+    validate_sidecar_backlog_integrity(state_paths)
+    item, evidence, evidence_path, expected_paths, expected_fingerprint, implementation_head = (
+        _completed_backlog_item_for_push(record, state_paths, safe_run_id)
+    )
+    before_head = target_git_head(record.repo)
+    before_status = target_git_status_lines(record.repo)
+    if before_status:
+        raise ControllerError("target product repo must be clean before backlog product push")
+    commit_evidence, commit_evidence_path = _matching_backlog_commit_evidence(
+        record=record,
+        state_paths=state_paths,
+        implementation_run_id=safe_run_id,
+        backlog_id=str(item.item_id),
+        expected_paths=expected_paths,
+        expected_fingerprint=expected_fingerprint,
+        implementation_head=implementation_head,
+        current_head=before_head,
+    )
+    verification = verify_target(record)
+    blockers = target_run_blockers(verification)
+    if blockers:
+        raise ControllerError("target verification blocks backlog product push: " + ", ".join(blockers))
+    push_target = resolve_product_diff_smoke_push_target(record.repo, record.branch)
+    expected_remote_before = str(commit_evidence.get("product_head_before") or "")
+    if push_target.remote_head != expected_remote_before:
+        raise ControllerError("target push remote head does not match backlog product commit base")
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "target_id": record.target_id,
+        "status": "planned",
+        "applied": bool(apply),
+        "operation": "backlog-product-push",
+        "implementation_run_id": safe_run_id,
+        "implementation_evidence_path": evidence_path.as_posix(),
+        "commit_evidence_path": commit_evidence_path.as_posix(),
+        "commit_run_id": commit_evidence_path.parent.name,
+        "backlog_id": str(item.item_id),
+        "backlog_title": str(item.title),
+        "backlog_path": item.path.as_posix(),
+        "product_head_before": before_head,
+        "product_head_after": before_head,
+        "product_status_before": before_status,
+        "product_status_after": before_status,
+        "product_diff_paths": expected_paths,
+        "product_diff_fingerprint": expected_fingerprint,
+        "product_commit_sha": before_head,
+        "product_commit_message": str(commit_evidence.get("product_commit_message") or ""),
+        "product_commit_diff": commit_evidence.get("product_commit_diff") or [],
+        "product_push": "enabled" if apply else "dry-run",
+        "product_push_remote": push_target.remote,
+        "product_push_ref": push_target.ref,
+        "product_push_sha": "",
+        "product_push_remote_before": push_target.remote_head,
+        "product_push_remote_after": push_target.remote_head,
+        "product_push_command": list(push_target.command),
+        "push_caution": PRODUCT_BACKLOG_PUSH_CAUTION,
+        "receipt_path": "",
+        "generated_evidence_path": "",
+    }
+    if not apply:
+        return payload
+
+    remote_after = push_product_backlog_commit(record.repo, push_target, before_head)
+    after_head = target_git_head(record.repo)
+    after_status = target_git_status_lines(record.repo)
+    post_blockers: list[str] = []
+    if after_head != before_head:
+        post_blockers.append("target-head-changed-during-push")
+    if after_status:
+        post_blockers.append("target-git-status-changed")
+    if remote_after != before_head:
+        post_blockers.append("target-remote-head-unexpected")
+    post_verification = verify_target(record)
+    for blocker in target_run_blockers(post_verification):
+        if blocker not in post_blockers:
+            post_blockers.append(blocker)
+    if post_blockers:
+        raise ControllerError("target backlog product push post-check failed: " + ", ".join(post_blockers))
+
+    run_dir = _allocate_backlog_push_run_dir(state_paths)
+    applied_payload = dict(payload)
+    applied_payload.update(
+        {
+            "status": "pass",
+            "applied": True,
+            "product_head_after": after_head,
+            "product_status_after": after_status,
+            "product_push_sha": remote_after,
+            "product_push_remote_after": remote_after,
+            "receipt_path": (run_dir / "product-push-receipt.json").as_posix(),
+            "generated_evidence_path": (run_dir / "generated-evidence.json").as_posix(),
+            "applied_at": datetime.now().isoformat(timespec="seconds"),
+        }
+    )
+    _write_sidecar_json(
+        state_paths.state_root,
+        run_dir / "product-push-receipt.json",
+        applied_payload,
+        label="backlog product push receipt",
+    )
+    _write_sidecar_json(
+        state_paths.state_root,
+        run_dir / "generated-evidence.json",
+        applied_payload,
+        label="backlog product push generated evidence",
+    )
+    _write_sidecar_text(
+        state_paths.state_root,
+        run_dir / "generated-evidence.md",
+        "\n".join(
+            [
+                "# Generated Evidence",
+                "",
+                f"- Target ID: `{record.target_id}`",
+                "- Operation: `backlog-product-push`",
+                "- Applied: `true`",
+                f"- Backlog: `{item.item_id}`",
+                f"- Implementation run: `{safe_run_id}`",
+                f"- Product commit: `{before_head}`",
+                f"- Product push: `{push_target.remote}/{record.branch} -> {remote_after}`",
+                f"- Product diff paths: `{', '.join(expected_paths)}`",
+                "",
+            ]
+        ),
+        label="backlog product push generated evidence markdown",
+    )
+    _write_sidecar_text(
+        state_paths.state_root,
+        run_dir / "report.md",
+        "\n".join(
+            [
+                "# External Backlog Product Push",
+                "",
+                f"- Target: `{record.target_id}`",
+                f"- Backlog: `{item.item_id}`",
+                f"- Implementation run: `{safe_run_id}`",
+                f"- Commit evidence: `{commit_evidence_path.as_posix()}`",
+                f"- Product commit: `{before_head}`",
+                f"- Product push: `{push_target.remote}/{record.branch} -> {remote_after}`",
+                f"- Product push command: `{' '.join(push_target.command)}`",
+                f"- Product diff paths: `{', '.join(expected_paths)}`",
+                "",
+                "## Remote Safety",
+                "",
+                f"- Remote before: `{push_target.remote_head}`",
+                f"- Remote after: `{remote_after}`",
+                f"- {PRODUCT_BACKLOG_PUSH_CAUTION}",
+                "",
+            ]
+        ),
+        label="backlog product push report",
     )
     return applied_payload
 

@@ -1192,6 +1192,40 @@ def command_target_backlog_commit(args: argparse.Namespace) -> int:
         return 2
 
 
+def command_target_backlog_push(args: argparse.Namespace) -> int:
+    try:
+        record = _resolve_controller_target(args.target)
+        payload = harness_controller.push_sidecar_backlog_product_commit(
+            controller_root=repo_root(),
+            record=record,
+            run_id=args.run,
+            apply=bool(args.apply),
+        )
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+        action = "적용 완료" if payload["applied"] else "dry-run 완료"
+        print(f"external target backlog product push {action}")
+        print(f"- 대상 ID: `{payload['target_id']}`")
+        print(f"- backlog: `{payload['backlog_id']}`")
+        print(f"- implementation run: `{payload['implementation_run_id']}`")
+        print(f"- product commit: `{payload['product_commit_sha']}`")
+        print(f"- product push: {payload['product_push_remote']}/{payload['product_push_ref'].removeprefix('refs/heads/')}")
+        print(f"- remote before: `{payload['product_push_remote_before']}`")
+        if payload["applied"]:
+            print(f"- remote after: `{payload['product_push_remote_after']}`")
+            print(f"- receipt: `{payload['receipt_path']}`")
+            print(f"- generated evidence: `{payload['generated_evidence_path']}`")
+            print("- caution: push-triggered automation 가능, automatic remote rollback 없음")
+        else:
+            print("- remote 변경: 없음")
+            print("- apply하려면 같은 명령에 `--apply`를 붙이세요.")
+        return 0
+    except harness_controller.ControllerError as exc:
+        print(f"error: {exc}")
+        return 2
+
+
 def _run_target_autonomy_state_plumbing(
     record: harness_controller.TargetRecord,
     *,
@@ -2138,6 +2172,15 @@ def build_parser() -> argparse.ArgumentParser:
     target_backlog_commit.add_argument("--apply", action="store_true", help="Create the local product commit; default is dry-run.")
     target_backlog_commit.add_argument("--json", action="store_true")
     target_backlog_commit.set_defaults(func=command_target_backlog_commit)
+    target_backlog_push = target_backlog_subparsers.add_parser(
+        "push",
+        help="Dry-run or push a completed sidecar backlog product commit to its registered upstream.",
+    )
+    target_backlog_push.add_argument("target", help=target_selector_help)
+    target_backlog_push.add_argument("--run", required=True, help="Implementation run id with generated-evidence.json.")
+    target_backlog_push.add_argument("--apply", action="store_true", help="Push the product commit; default is dry-run.")
+    target_backlog_push.add_argument("--json", action="store_true")
+    target_backlog_push.set_defaults(func=command_target_backlog_push)
     target_set_default = target_subparsers.add_parser("set-default", help="Set explicit @default selector for read-only convenience.")
     target_set_default.add_argument("target_id", help=target_id_help)
     target_set_default.set_defaults(func=command_target_set_default)
