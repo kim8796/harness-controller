@@ -315,6 +315,10 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "does not push" in readme
     assert "skips hooks/GPG signing" in readme
     assert "git reset --hard <before-head>" in readme
+    assert "Advanced only: `target run --execute-once --commit --push`" in readme
+    assert "may trigger product repo push automation" in readme
+    assert "it is not deployment" in readme
+    assert "does not perform automatic remote rollback" in readme
     assert "Harness Controller Adapter" in (bundle / "AGENTS.md").read_text(encoding="utf-8")
     product_marker = "MINI" + "APP"
     assert product_marker not in (bundle / "docs" / "harness" / "GOALS.md").read_text(encoding="utf-8")

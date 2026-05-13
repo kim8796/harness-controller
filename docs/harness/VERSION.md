@@ -1,8 +1,15 @@
 # Harness Framework Version
 
-- Current Version: 1.8.2
+- Current Version: 1.8.3
 - Release Date: 2026-05-13
 - Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + on-demand export output.
+
+## What Changed In 1.8.3
+
+- Added explicit external smoke push gate: `./harness target run <id|@alias|@default> --execute-once --commit --push`.
+- Kept `--once`, `--execute-once`, and `--execute-once --commit` semantics unchanged.
+- Push mode requires the registered branch upstream to match the local pre-smoke HEAD, uses `git push --no-verify <remote> HEAD:refs/heads/<registered-branch>`, and records remote before/after, pushed SHA, command shape, and caution text in controller sidecar evidence.
+- Smoke push is externally visible and may trigger product repo push automation. It is not deployment and does not perform automatic remote rollback.
 
 ## What Changed In 1.8.2
 

@@ -1,4 +1,4 @@
-# Harness Controller Bundle v1.8.2
+# Harness Controller Bundle v1.8.3
 
 이 디렉토리는 product repo 밖에서 실행하는 external harness controller 배포 번들이다.
 product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는다.
@@ -25,6 +25,8 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `target run --execute-once --commit` commits exactly that smoke file locally and still does not push.
 - That local smoke commit skips hooks/GPG signing and is not a shared product commit.
 - Roll back a smoke commit only while HEAD is still that commit: use the `git reset --hard <before-head>` command recorded in `targets/<id>/reports/target-run-latest.md`.
+- Advanced only: `target run --execute-once --commit --push` pushes that smoke commit to the registered branch.
+- Smoke push is externally visible and may trigger product repo push automation; it is not deployment and does not perform automatic remote rollback.
 
 ## Excluded Live State
 
@@ -126,7 +128,7 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `tests/test_harness_export.py`
 - `tests/test_harness_telegram_bridge.py`
 - `tests/test_redis_relay.py`
-- `docs/harness/releases/v1.8.2.md`
+- `docs/harness/releases/v1.8.3.md`
 
 ## Generated Controller Files
 

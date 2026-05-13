@@ -665,6 +665,39 @@ def test_product_diff_smoke_commit_helper_uses_exact_file_and_no_push(tmp_path: 
     assert before_head in module.product_diff_smoke_commit_rollback_command(product, before_head)
 
 
+def test_product_diff_smoke_push_helper_uses_exact_refspec_and_no_verify(tmp_path: Path) -> None:
+    module = _load_module()
+    product = tmp_path / "product"
+    remote = tmp_path / "remote.git"
+    _init_git_repo(product)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "config", "user.email", "harness-test@example.invalid"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, text=True, capture_output=True, env=_git_env())
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=product, check=True, env=_git_env())
+    hook = product / ".git" / "hooks" / "pre-push"
+    hook.write_text("#!/bin/sh\necho ran > pre-push-ran\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    before_head = module.target_git_head(product)
+    push_target = module.resolve_product_diff_smoke_push_target(product, "main")
+    (product / module.PRODUCT_DIFF_SMOKE_FILE).write_text(module.PRODUCT_DIFF_SMOKE_CONTENT, encoding="utf-8")
+    commit_sha = module.commit_product_diff_smoke(product)
+
+    pushed_sha = module.push_product_diff_smoke(product, push_target, commit_sha)
+
+    assert push_target.remote == "origin"
+    assert push_target.ref == "refs/heads/main"
+    assert push_target.refspec == "HEAD:refs/heads/main"
+    assert push_target.command == ("push", "--no-verify", "origin", "HEAD:refs/heads/main")
+    assert not any(part.startswith("+") for part in push_target.command)
+    assert not {"--force", "--force-with-lease", "--tags", "--all", "--set-upstream", "-u"} & set(push_target.command)
+    assert push_target.remote_head == before_head
+    assert pushed_sha == commit_sha
+    assert not (product / "pre-push-ran").exists()
+
+
 def test_target_run_blockers_include_detached_head(tmp_path: Path) -> None:
     module = _load_module()
     controller = tmp_path / "controller"

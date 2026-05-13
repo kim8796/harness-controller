@@ -6,3 +6,4 @@
 - `targets/**`는 controller-local sidecar이며 product repo에 커밋하지 않는다.
 - product-changing external smoke 는 `./harness target run <id> --execute-once` 명시 opt-in 으로만 켠다.
 - `./harness target run <id> --execute-once --commit` 은 deterministic smoke file 을 local commit 으로 닫지만 push 는 하지 않는다.
+- `./harness target run <id> --execute-once --commit --push` 는 advanced smoke 로 registered branch 를 갱신할 수 있으므로 product repo push automation 이 실행될 수 있다.

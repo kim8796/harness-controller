@@ -1,5 +1,13 @@
 # Harness Changelog
 
+## 1.8.3 - 2026-05-13
+
+- Added `./harness target run <target> --execute-once --commit --push` as the explicit external product smoke push gate.
+- Preserved existing `--once`, `--execute-once`, and `--execute-once --commit` semantics.
+- Required upstream/remote preflight before product write and exact `git push --no-verify <remote> HEAD:refs/heads/<registered-branch>` command shape.
+- Recorded product push remote/ref/SHA/remote before-after/command/caution in controller sidecar evidence and reports.
+- Kept smoke push advanced-only, externally visible, not deployment, and without automatic remote rollback.
+
 ## 1.8.2 - 2026-05-13
 
 - Added `./harness target run <target> --execute-once --commit` as the explicit local product smoke commit gate.

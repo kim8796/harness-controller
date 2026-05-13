@@ -583,6 +583,7 @@ def controller_claude_template() -> str:
         - `targets/**`는 controller-local sidecar이며 product repo에 커밋하지 않는다.
         - product-changing external smoke 는 `./harness target run <id> --execute-once` 명시 opt-in 으로만 켠다.
         - `./harness target run <id> --execute-once --commit` 은 deterministic smoke file 을 local commit 으로 닫지만 push 는 하지 않는다.
+        - `./harness target run <id> --execute-once --commit --push` 는 advanced smoke 로 registered branch 를 갱신할 수 있으므로 product repo push automation 이 실행될 수 있다.
         """
     )
 
@@ -933,6 +934,8 @@ def export_controller_bundle(root: Path, output_dir: Path, version: str | None =
                 "- `target run --execute-once --commit` commits exactly that smoke file locally and still does not push.",
                 "- That local smoke commit skips hooks/GPG signing and is not a shared product commit.",
                 "- Roll back a smoke commit only while HEAD is still that commit: use the `git reset --hard <before-head>` command recorded in `targets/<id>/reports/target-run-latest.md`.",
+                "- Advanced only: `target run --execute-once --commit --push` pushes that smoke commit to the registered branch.",
+                "- Smoke push is externally visible and may trigger product repo push automation; it is not deployment and does not perform automatic remote rollback.",
                 "",
                 "## Excluded Live State",
                 "",

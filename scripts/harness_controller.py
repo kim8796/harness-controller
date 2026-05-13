@@ -31,6 +31,11 @@ PRODUCT_DIFF_SMOKE_COMMIT_ROLLBACK_CAUTION = (
     "Only run the reset rollback if HEAD is still the recorded local smoke commit "
     "and no later product work was added on top."
 )
+PRODUCT_DIFF_SMOKE_PUSH_CAUTION = (
+    "This smoke push updates the product remote branch and may trigger product repo CI/CD/deploy "
+    "automation. No automatic remote rollback is performed; coordinate with the branch owner and use "
+    "an operator-reviewed revert or repo-policy recovery."
+)
 PRODUCT_HARNESS_MARKERS = (
     Path("harness"),
     Path("HARNESS.md"),
@@ -75,6 +80,16 @@ class TargetRunLock:
     owner: str
     token: str
     acquired_at: str
+
+
+@dataclass(frozen=True)
+class ProductPushTarget:
+    remote: str
+    branch: str
+    ref: str
+    remote_head: str
+    refspec: str
+    command: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -884,6 +899,72 @@ def target_git_identity_ready(target_root: Path) -> bool:
     return True
 
 
+def target_remote_ref_head(target_root: Path, remote: str, ref: str) -> str:
+    result = git(["ls-remote", remote, ref], cwd=target_root)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise ControllerError(f"target push remote head read failed: {detail}")
+    lines = [line.split() for line in result.stdout.splitlines() if line.strip()]
+    if not lines:
+        raise ControllerError("target push remote branch is missing")
+    if len(lines[0]) < 2 or lines[0][1] != ref:
+        raise ControllerError("target push remote branch response is invalid")
+    return lines[0][0]
+
+
+def product_diff_smoke_push_command(remote: str, branch: str) -> tuple[str, ...]:
+    refspec = f"HEAD:refs/heads/{branch}"
+    return ("push", "--no-verify", remote, refspec)
+
+
+def _target_remote_names(target_root: Path) -> set[str]:
+    result = git(["remote"], cwd=target_root)
+    if result.returncode != 0:
+        raise ControllerError("target push remote list failed")
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
+def _target_remote_push_urls(target_root: Path, remote: str) -> list[str]:
+    result = git(["config", "--get-all", f"remote.{remote}.pushurl"], cwd=target_root)
+    if result.returncode == 1:
+        return []
+    if result.returncode != 0:
+        raise ControllerError("target push remote pushurl read failed")
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def resolve_product_diff_smoke_push_target(target_root: Path, registered_branch: str) -> ProductPushTarget:
+    branch_check = git(["check-ref-format", "--branch", registered_branch], cwd=target_root)
+    if branch_check.returncode != 0:
+        raise ControllerError("target push branch name is invalid")
+    remote_result = git(["config", f"branch.{registered_branch}.remote"], cwd=target_root)
+    merge_result = git(["config", f"branch.{registered_branch}.merge"], cwd=target_root)
+    remote = remote_result.stdout.strip() if remote_result.returncode == 0 else ""
+    merge_ref = merge_result.stdout.strip() if merge_result.returncode == 0 else ""
+    expected_ref = f"refs/heads/{registered_branch}"
+    if not remote or not merge_ref:
+        raise ControllerError("target push upstream is not configured")
+    if remote.startswith("-") or remote not in _target_remote_names(target_root):
+        raise ControllerError("target push remote is unsafe or not configured")
+    if _target_remote_push_urls(target_root, remote):
+        raise ControllerError("target push remote pushurl is not supported")
+    if merge_ref != expected_ref:
+        raise ControllerError("target push upstream branch does not match registered branch")
+    remote_head = target_remote_ref_head(target_root, remote, expected_ref)
+    command = product_diff_smoke_push_command(remote, registered_branch)
+    forbidden = {"--force", "--force-with-lease", "--tags", "--all", "--set-upstream", "-u"}
+    if any(part.startswith("+") or part in forbidden for part in command):
+        raise ControllerError("target product smoke push command is unsafe")
+    return ProductPushTarget(
+        remote=remote,
+        branch=registered_branch,
+        ref=expected_ref,
+        remote_head=remote_head,
+        refspec=command[-1],
+        command=command,
+    )
+
+
 def product_diff_smoke_status_lines() -> list[str]:
     return [f"?? {PRODUCT_DIFF_SMOKE_FILE.as_posix()}"]
 
@@ -961,6 +1042,17 @@ def commit_product_diff_smoke(target_root: Path) -> str:
     return target_git_head(target_root)
 
 
+def push_product_diff_smoke(target_root: Path, push_target: ProductPushTarget, expected_head: str) -> str:
+    result = git(push_target.command, cwd=target_root)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise ControllerError(f"target product smoke push failed: {detail}")
+    remote_after = target_remote_ref_head(target_root, push_target.remote, push_target.ref)
+    if remote_after != expected_head:
+        raise ControllerError("target product smoke push remote head is unexpected")
+    return remote_after
+
+
 def write_dashboard(*, controller_root: Path, record: TargetRecord, verification: Mapping[str, object]) -> Path:
     state_paths = record.state_paths(controller_root)
     validate_sidecar_integrity(state_paths.state_root)
@@ -998,7 +1090,9 @@ def write_dashboard(*, controller_root: Path, record: TargetRecord, verification
             "- `target run --once` 는 read-only/no-op smoke 로 target boundary 만 검증할 수 있다.",
             "- `target run --execute-once` 는 deterministic product diff smoke 를 만들 수 있다.",
             "- `target run --execute-once --commit` 은 그 smoke 파일만 local commit 으로 닫고 push 하지 않는다.",
-            "- 일반 product-changing autonomy lane 과 push 는 아직 별도 gate 전까지 비활성화돼 있다.",
+            "- `target run --execute-once --commit --push` 는 advanced smoke 로 remote branch 를 갱신할 수 있다.",
+            "- push smoke 는 deploy 명령이 아니지만 product repo 의 push-triggered automation 은 실행될 수 있다.",
+            "- 일반 product-changing autonomy lane 과 deployment 는 아직 별도 gate 전까지 비활성화돼 있다.",
             "- Telegram 지시는 target-aware relay 가 `targets/<id>/operator-inbox` 로 materialize 한다.",
             "- operator selector 는 canonical id 또는 `@alias`, `@default` 를 쓸 수 있지만 sidecar/Redis/signature 에는 canonical target id 만 남긴다.",
             "",
@@ -1023,6 +1117,14 @@ def write_target_run_smoke_report(
     product_diff_execution: str = "disabled",
     product_commit_execution: str = "disabled",
     product_commit_sha: str = "",
+    product_push_execution: str = "disabled",
+    product_push_remote: str = "",
+    product_push_ref: str = "",
+    product_push_sha: str = "",
+    product_push_remote_before: str = "",
+    product_push_remote_after: str = "",
+    product_push_command: Sequence[str] = (),
+    product_push_error: str = "",
     lane_execution: str = "not-started",
     expected_product_paths: Sequence[str] = (),
     product_commit_diff: Sequence[str] = (),
@@ -1051,11 +1153,13 @@ def write_target_run_smoke_report(
     expected_lines = [f"- `{path}`" for path in expected_product_paths] if expected_product_paths else ["- none"]
     commit_diff_lines = [f"- `{line}`" for line in product_commit_diff] if product_commit_diff else ["- none"]
     rollback_lines = [f"- `{line}`" for line in rollback_guidance] if rollback_guidance else ["- none"]
-    rollback_condition_lines = (
-        [f"- {PRODUCT_DIFF_SMOKE_COMMIT_ROLLBACK_CAUTION}"]
-        if product_commit_execution == "enabled"
-        else ["- none"]
-    )
+    if product_push_execution == "enabled":
+        rollback_condition_lines = [f"- {PRODUCT_DIFF_SMOKE_PUSH_CAUTION}"]
+    elif product_commit_execution == "enabled":
+        rollback_condition_lines = [f"- {PRODUCT_DIFF_SMOKE_COMMIT_ROLLBACK_CAUTION}"]
+    else:
+        rollback_condition_lines = ["- none"]
+    push_command = " ".join(product_push_command) if product_push_command else "none"
     text = "\n".join(
         [
             title,
@@ -1075,7 +1179,14 @@ def write_target_run_smoke_report(
             f"- Product commit: `{product_commit_execution}`",
             f"- Product commit sha: `{product_commit_sha or 'none'}`",
             f"- Product commit message: `{PRODUCT_DIFF_SMOKE_COMMIT_MESSAGE if product_commit_execution == 'enabled' else 'none'}`",
-            "- Product push: `disabled`",
+            f"- Product push: `{product_push_execution}`",
+            f"- Product push remote: `{product_push_remote or 'none'}`",
+            f"- Product push ref: `{product_push_ref or 'none'}`",
+            f"- Product push sha: `{product_push_sha or 'none'}`",
+            f"- Product push remote before: `{product_push_remote_before or 'none'}`",
+            f"- Product push remote after: `{product_push_remote_after or 'none'}`",
+            f"- Product push command: `{push_command}`",
+            f"- Product push error: `{product_push_error or 'none'}`",
             "",
             "## Product Git Status Before",
             "",
@@ -1106,8 +1217,11 @@ def write_target_run_smoke_report(
             "- `--once` smoke 는 target boundary 검증만 수행한다.",
             "- `--execute-once` smoke 는 명시 opt-in 일 때만 product diff 를 만든다.",
             "- `--execute-once --commit` smoke 는 deterministic product diff 를 local commit 으로 닫지만 push 하지 않는다.",
+            "- `--execute-once --commit --push` smoke 는 remote branch 를 갱신하는 externally visible 검증이다.",
+            "- push smoke 는 deploy 명령이 아니지만 product repo 의 push-triggered automation 은 실행될 수 있다.",
             "- product repo 에 harness runtime/state 파일을 쓰지 않는다.",
             "- local smoke commit 은 hooks/GPG signing 을 건너뛰는 검증용 커밋이며 공유용 product commit 이 아니다.",
+            "- remote rollback 은 자동 수행하지 않는다. branch owner 와 조율해 operator-reviewed revert 또는 repo 정책에 따른 복구를 수행한다.",
             "",
         ]
     )
