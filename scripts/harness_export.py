@@ -582,6 +582,7 @@ def controller_claude_template() -> str:
         - 비밀값은 환경변수와 ignored `.env` 파일에서만 읽는다.
         - `targets/**`는 controller-local sidecar이며 product repo에 커밋하지 않는다.
         - `./harness target run <id> --plan-once` 는 sidecar backlog 후보만 고르고 product repo 를 변경하지 않는다.
+        - `./harness target run <id> --execute-backlog-once` 는 선택 sidecar backlog 에 묶인 local product diff smoke 만 만들고 AI 구현 lane / backlog 완료 / commit / push 는 시작하지 않는다.
         - product-changing external smoke 는 `./harness target run <id> --execute-once` 명시 opt-in 으로만 켠다.
         - `./harness target run <id> --execute-once --commit` 은 deterministic smoke file 을 local commit 으로 닫지만 push 는 하지 않는다.
         - `./harness target run <id> --execute-once --commit --push` 는 advanced smoke 로 registered branch 를 갱신할 수 있으므로 product repo push automation 이 실행될 수 있다.
@@ -932,6 +933,8 @@ def export_controller_bundle(root: Path, output_dir: Path, version: str | None =
                 "- Use `/harness note my-app ...`, `/harness note @app ...`, or `/harness answer @default ...`; the signed canonical target id reaches this controller.",
                 "- The controller drains to `targets/my-app/operator-inbox`; `target run --once` runs a RootContext-aware read-only/no-op smoke with state plumbing.",
                 "- `target run --plan-once` selects the next queued auto sidecar backlog item without changing the product repo.",
+                "- `target run --execute-backlog-once` selects that sidecar backlog item and creates only an uncommitted backlog-bound `product-smoke-change.txt`; it is not full AI implementation, does not complete the backlog, and does not commit or push.",
+                "- Backlog-bound smoke report: `targets/<target_id>/reports/target-run-latest.md`; rollback: `git -C <target_repo> clean -f -- product-smoke-change.txt`.",
                 "- `target run --execute-once` is the explicit product diff smoke and creates only uncommitted `product-smoke-change.txt`.",
                 "- `target run --execute-once --commit` commits exactly that smoke file locally and still does not push.",
                 "- That local smoke commit skips hooks/GPG signing and is not a shared product commit.",

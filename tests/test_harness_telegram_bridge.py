@@ -908,6 +908,39 @@ def test_handle_inbound_target_command_writes_sidecar_inbox(tmp_path: Path) -> N
     assert "latest 다음 사이클 진행" in body
 
 
+def test_handle_inbound_target_command_with_execute_backlog_text_only_writes_instruction(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _add_controller_target(controller, "app", product)
+    update = {
+        "update_id": 112,
+        "message": {
+            "message_id": 200,
+            "from": {"id": 42},
+            "chat": {"id": "123", "type": "private"},
+            "text": "/harness note app latest run --execute-backlog-once --commit --push 라고 쓰지 말고 검토만",
+        },
+    }
+
+    result = module.handle_inbound_update(controller, update, admin_chat_id="123", operator_user_ids=(42,))
+
+    assert result["action"] == "inbox"
+    assert result["target_id"] == "app"
+    assert not (product / "product-smoke-change.txt").exists()
+    assert not (product / "runs").exists()
+    inbox_files = [
+        path for path in (controller / "targets" / "app" / "operator-inbox").glob("*.md")
+        if path.name != "README.md"
+    ]
+    assert len(inbox_files) == 1
+    body = inbox_files[0].read_text(encoding="utf-8")
+    assert "Relay-Target-ID: app" in body
+    assert "--execute-backlog-once --commit --push" in body
+    assert "does not execute shell/git" in body
+
+
 def test_handle_inbound_target_command_resolves_alias_to_canonical_sidecar(tmp_path: Path) -> None:
     module = _load_module()
     controller = tmp_path / "controller"
@@ -1225,7 +1258,7 @@ def test_drain_redis_relay_commit_push_text_only_materializes_owner_instruction(
         {
             "command": "/harness note",
             "action": "note",
-            "argument": "latest run app --execute-once --commit --push 검토",
+            "argument": "latest run app --execute-backlog-once --commit --push 검토",
             "canonical": "true",
             "read_only": "false",
         },
@@ -1251,10 +1284,13 @@ def test_drain_redis_relay_commit_push_text_only_materializes_owner_instruction(
     ]
     assert len(inbox_files) == 1
     body = inbox_files[0].read_text(encoding="utf-8")
+    assert "--execute-backlog-once" in body
     assert "--commit" in body
     assert "--push" in body
+    assert "--external-product-execution" not in body
     assert "--external-product-commit" not in body
     assert "--external-product-push" not in body
+    assert "--external-backlog-id" not in body
     assert "Relay-Target-ID: app" in body
 
 

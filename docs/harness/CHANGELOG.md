@@ -1,5 +1,12 @@
 # Harness Changelog
 
+## 1.8.5 - 2026-05-13
+
+- Added `./harness target run <target> --execute-backlog-once` as a backlog-bound local product diff smoke.
+- Reused the canonical sidecar backlog selector and revalidated selected backlog id/path/title in the hidden external RootContext path before product write.
+- Kept the product diff limited to the existing uncommitted `product-smoke-change.txt`; no AI implementation lane, backlog completion, commit, or push is performed.
+- Recorded selected backlog metadata in sidecar evidence, status, outbox, and target run report.
+
 ## 1.8.4 - 2026-05-13
 
 - Added `./harness target run <target> --plan-once` as a sidecar backlog plan gate before opening general product-changing autonomy.

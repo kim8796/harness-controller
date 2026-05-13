@@ -310,6 +310,10 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "read-only/no-op smoke" in readme
     assert "target run --once` runs a RootContext-aware read-only/no-op smoke with state plumbing" in readme
     assert "target run --plan-once` selects the next queued auto sidecar backlog item" in readme
+    assert "target run --execute-backlog-once` selects that sidecar backlog item" in readme
+    assert "not full AI implementation" in readme
+    assert "Backlog-bound smoke report: `targets/<target_id>/reports/target-run-latest.md`" in readme
+    assert "git -C <target_repo> clean -f -- product-smoke-change.txt" in readme
     assert "target run --execute-once` is the explicit product diff smoke" in readme
     assert "product-smoke-change.txt" in readme
     assert "target run --execute-once --commit` commits exactly that smoke file locally" in readme

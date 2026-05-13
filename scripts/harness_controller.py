@@ -1191,6 +1191,8 @@ def write_target_run_smoke_report(
 
     if lane_execution == "plan-only":
         title = "# External Target Run Backlog Plan Smoke"
+    elif lane_execution == "backlog-product-diff-smoke":
+        title = "# External Target Run Backlog-Bound Product Diff Smoke"
     elif product_diff_execution == "enabled":
         title = "# External Target Run Product Diff Smoke"
     else:
@@ -1276,6 +1278,7 @@ def write_target_run_smoke_report(
             "",
             "- `--once` smoke 는 target boundary 검증만 수행한다.",
             "- `--plan-once` smoke 는 sidecar backlog 후보만 고르고 product repo 를 변경하지 않는다.",
+            "- `--execute-backlog-once` smoke 는 선택 sidecar backlog 에 묶인 deterministic product diff 만 만들며 backlog 를 완료 처리하지 않는다.",
             "- `--execute-once` smoke 는 명시 opt-in 일 때만 product diff 를 만든다.",
             "- `--execute-once --commit` smoke 는 deterministic product diff 를 local commit 으로 닫지만 push 하지 않는다.",
             "- `--execute-once --commit --push` smoke 는 remote branch 를 갱신하는 externally visible 검증이다.",

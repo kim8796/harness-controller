@@ -1,8 +1,15 @@
 # Harness Framework Version
 
-- Current Version: 1.8.4
+- Current Version: 1.8.5
 - Release Date: 2026-05-13
 - Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + on-demand export output.
+
+## What Changed In 1.8.5
+
+- Added `./harness target run <id|@alias|@default> --execute-backlog-once` as the first backlog-bound product-changing gate for external controller targets.
+- The command selects a queued auto item from `targets/<id>/backlog`, revalidates that selected backlog in the hidden RootContext path, and creates only the existing uncommitted `product-smoke-change.txt` smoke diff.
+- It does not start a general AI implementation lane, does not mark or move the backlog item, and does not commit or push.
+- Selected backlog metadata is recorded only in controller sidecar evidence, reports, status, and outbox.
 
 ## What Changed In 1.8.4
 

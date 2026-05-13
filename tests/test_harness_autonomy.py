@@ -142,6 +142,319 @@ def test_external_rootcontext_run_once_writes_sidecar_only(tmp_path: Path, capsy
     ).stdout == ""
 
 
+def test_external_rootcontext_backlog_binding_requires_queued_auto_metadata(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    _init_git_repo(product)
+    controller_support = module._controller_support()
+    record = controller_support.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.5",
+    )
+    backlog = record.state_root / "backlog" / "queued" / "BL-demo.md"
+    backlog.parent.mkdir(parents=True, exist_ok=True)
+    backlog.write_text(
+        "\n".join(
+            [
+                "ID: BL-demo",
+                "Title: Demo external task",
+                "Status: queued",
+                "Priority: P1",
+                "Goal: external-demo",
+                "Autonomy-Execute: manual-review",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    lock = controller_support.acquire_target_run_lock(controller_root=controller, record=record, owner="test")
+
+    try:
+        with pytest.raises(module.AutonomyError, match="queued and Autonomy-Execute auto"):
+            module.main(
+                [
+                    "--root",
+                    str(controller),
+                    "--target-id",
+                    "demo",
+                    "--target-root",
+                    str(product),
+                    "--state-root",
+                    str(record.state_root),
+                    "--external-lock-owned",
+                    "--external-lock-token",
+                    lock.token,
+                    "--external-product-execution",
+                    "--external-backlog-id",
+                    "BL-demo",
+                    "--external-backlog-path",
+                    "backlog/queued/BL-demo.md",
+                    "--external-backlog-title",
+                    "Demo external task",
+                    "run-once",
+                    "--git-backup",
+                    "off",
+                ]
+            )
+    finally:
+        controller_support.release_target_run_lock(lock)
+    assert not (product / "product-smoke-change.txt").exists()
+    assert _git_run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout == ""
+
+
+def test_external_rootcontext_backlog_binding_records_metadata_without_changing_content(
+    tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    _init_git_repo(product)
+    controller_support = module._controller_support()
+    record = controller_support.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.5",
+    )
+    backlog = record.state_root / "backlog" / "queued" / "BL-demo.md"
+    backlog.parent.mkdir(parents=True, exist_ok=True)
+    backlog.write_text(
+        "\n".join(
+            [
+                "ID: BL-demo",
+                "Title: Demo external task",
+                "Status: queued",
+                "Priority: P1",
+                "Goal: external-demo",
+                "Autonomy-Execute: auto",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    lock = controller_support.acquire_target_run_lock(controller_root=controller, record=record, owner="test")
+
+    try:
+        result = module.main(
+            [
+                "--root",
+                str(controller),
+                "--target-id",
+                "demo",
+                "--target-root",
+                str(product),
+                "--state-root",
+                str(record.state_root),
+                "--external-lock-owned",
+                "--external-lock-token",
+                lock.token,
+                "--external-product-execution",
+                "--external-backlog-id",
+                "BL-demo",
+                "--external-backlog-path",
+                "backlog/queued/BL-demo.md",
+                "--external-backlog-title",
+                "Demo external task",
+                "run-once",
+                "--run-id",
+                "external-demo-backlog",
+                "--git-backup",
+                "off",
+            ]
+        )
+    finally:
+        controller_support.release_target_run_lock(lock)
+    output = capsys.readouterr().out
+
+    assert result == 0
+    assert "status: completed" in output
+    assert (product / "product-smoke-change.txt").read_text(encoding="utf-8") == controller_support.PRODUCT_DIFF_SMOKE_CONTENT
+    payload = json.loads(
+        (record.state_root / "runs" / "harness" / "external-demo-backlog" / "generated-evidence.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert payload["lane_execution"] == "backlog-product-diff-smoke"
+    assert payload["external_backlog"]["id"] == "BL-demo"
+    assert payload["external_backlog"]["path"] == "backlog/queued/BL-demo.md"
+
+
+@pytest.mark.parametrize(
+    "extra_flags",
+    [
+        ["--external-product-commit"],
+        ["--external-product-commit", "--external-product-push"],
+    ],
+)
+def test_external_rootcontext_backlog_binding_rejects_hidden_commit_or_push(
+    tmp_path: Path, extra_flags: list[str]
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    _init_git_repo(product)
+    _git_run(["git", "config", "user.name", "Harness Test"], cwd=product, check=True)
+    _git_run(["git", "config", "user.email", "harness-test@example.invalid"], cwd=product, check=True)
+    controller_support = module._controller_support()
+    record = controller_support.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.5",
+    )
+    backlog = record.state_root / "backlog" / "queued" / "BL-demo.md"
+    backlog.parent.mkdir(parents=True, exist_ok=True)
+    backlog.write_text(
+        "\n".join(
+            [
+                "ID: BL-demo",
+                "Title: Demo external task",
+                "Status: queued",
+                "Priority: P1",
+                "Goal: external-demo",
+                "Autonomy-Execute: auto",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    lock = controller_support.acquire_target_run_lock(controller_root=controller, record=record, owner="test")
+
+    try:
+        with pytest.raises(module.AutonomyError, match="does not allow commit or push"):
+            module.main(
+                [
+                    "--root",
+                    str(controller),
+                    "--target-id",
+                    "demo",
+                    "--target-root",
+                    str(product),
+                    "--state-root",
+                    str(record.state_root),
+                    "--external-lock-owned",
+                    "--external-lock-token",
+                    lock.token,
+                    "--external-product-execution",
+                    *extra_flags,
+                    "--external-backlog-id",
+                    "BL-demo",
+                    "--external-backlog-path",
+                    "backlog/queued/BL-demo.md",
+                    "--external-backlog-title",
+                    "Demo external task",
+                    "run-once",
+                    "--git-backup",
+                    "off",
+                ]
+            )
+    finally:
+        controller_support.release_target_run_lock(lock)
+    assert not (product / "product-smoke-change.txt").exists()
+    assert _git_run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout == ""
+
+
+def test_external_rootcontext_backlog_binding_requires_canonical_selected_backlog(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    _init_git_repo(product)
+    controller_support = module._controller_support()
+    record = controller_support.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.5",
+    )
+    queued = record.state_root / "backlog" / "queued"
+    queued.mkdir(parents=True, exist_ok=True)
+    (queued / "BL-high.md").write_text(
+        "\n".join(
+            [
+                "ID: BL-high",
+                "Title: High priority task",
+                "Status: queued",
+                "Priority: P0",
+                "Autonomy-Execute: auto",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (queued / "BL-low.md").write_text(
+        "\n".join(
+            [
+                "ID: BL-low",
+                "Title: Low priority task",
+                "Status: queued",
+                "Priority: P3",
+                "Autonomy-Execute: auto",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    lock = controller_support.acquire_target_run_lock(controller_root=controller, record=record, owner="test")
+
+    try:
+        with pytest.raises(module.AutonomyError, match="canonical selected sidecar backlog"):
+            module.main(
+                [
+                    "--root",
+                    str(controller),
+                    "--target-id",
+                    "demo",
+                    "--target-root",
+                    str(product),
+                    "--state-root",
+                    str(record.state_root),
+                    "--external-lock-owned",
+                    "--external-lock-token",
+                    lock.token,
+                    "--external-product-execution",
+                    "--external-backlog-id",
+                    "BL-low",
+                    "--external-backlog-path",
+                    "backlog/queued/BL-low.md",
+                    "--external-backlog-title",
+                    "Low priority task",
+                    "run-once",
+                    "--git-backup",
+                    "off",
+                ]
+            )
+    finally:
+        controller_support.release_target_run_lock(lock)
+    assert not (product / "product-smoke-change.txt").exists()
+
+
 def test_external_rootcontext_rejects_unregistered_raw_paths(tmp_path: Path) -> None:
     module = _load_module()
     controller = tmp_path / "controller"

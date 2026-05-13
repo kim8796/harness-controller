@@ -567,6 +567,14 @@ def test_external_target_run_requires_exactly_one_mode(monkeypatch, tmp_path: Pa
     assert "하나만 명시" in capsys.readouterr().out
     assert module.main(["target", "run", "demo", "--plan-once", "--execute-once"]) == 2
     assert "하나만 명시" in capsys.readouterr().out
+    assert module.main(["target", "run", "demo", "--plan-once", "--execute-backlog-once"]) == 2
+    assert "하나만 명시" in capsys.readouterr().out
+    assert module.main(["target", "run", "demo", "--execute-once", "--execute-backlog-once"]) == 2
+    assert "하나만 명시" in capsys.readouterr().out
+    assert module.main(["target", "run", "demo", "--execute-backlog-once", "--commit"]) == 2
+    assert "`--commit`은 `--execute-once`" in capsys.readouterr().out
+    assert module.main(["target", "run", "demo", "--execute-backlog-once", "--push"]) == 2
+    assert "`--push`는 `--execute-once --commit`" in capsys.readouterr().out
     assert subprocess.run(
         ["git", "status", "--porcelain=v1"],
         cwd=product,
@@ -575,7 +583,6 @@ def test_external_target_run_requires_exactly_one_mode(monkeypatch, tmp_path: Pa
         capture_output=True,
         env=_git_env(),
     ).stdout == ""
-
 
 def test_external_target_run_help_describes_commit_gate(capsys) -> None:
     module = _load_module()
@@ -586,12 +593,20 @@ def test_external_target_run_help_describes_commit_gate(capsys) -> None:
     output = capsys.readouterr().out
     assert excinfo.value.code == 0
     assert "--plan-once" in output
+    assert "--execute-backlog-once" in output
+    assert "no AI" in output
+    assert "implementation lane" in output
+    assert "no backlog completion" in output
+    assert "no commit" in output
+    assert "no push" in output
     assert "--commit" in output
     assert "--execute-once only" in output
-    assert "local unpushed smoke" in output
+    assert "local unpushed" in output
+    assert "smoke commit" in output
     assert "commit; skips hooks/GPG signing" in output
     assert "skips hooks/GPG signing" in output
-    assert "not a shared product" in output
+    assert "not a" in output
+    assert "shared product" in output
 
 
 def test_external_target_run_plan_once_reports_sidecar_backlog_without_product_diff(
@@ -725,6 +740,246 @@ def test_external_target_run_plan_once_ignores_product_root_backlog_decoy(
         env=_git_env(),
     ).stdout == ""
 
+    assert module.main(["target", "run", "demo", "--execute-backlog-once"]) == 0
+    output = capsys.readouterr().out
+
+    assert "선택 backlog: `BL-demo`" in output
+    assert "BL-product" not in output
+    assert (product / "product-smoke-change.txt").exists()
+
+
+def test_external_target_run_execute_backlog_once_creates_backlog_bound_product_diff(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    head_before = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.strip()
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.5")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product), "--display-name", "Demo App"]) == 0
+    assert module.main(["target", "alias", "add", "demo", "app"]) == 0
+    backlog = _write_sidecar_backlog(controller)
+    before_backlog_body = backlog.read_text(encoding="utf-8")
+    capsys.readouterr()
+
+    assert module.main(["target", "run", "@app", "--execute-backlog-once"]) == 0
+    output = capsys.readouterr().out
+    status_after = subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.splitlines()
+    head_after = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.strip()
+
+    assert "backlog-bound product diff smoke 완료" in output
+    assert "대상 ID: `demo`" in output
+    assert "선택 backlog: `BL-demo` (`backlog/queued/BL-demo.md`)" in output
+    assert "AI 제품 구현 lane: 시작 안 함" in output
+    assert "product commit/push: 없음" in output
+    assert "backlog 상태 변경: 없음" in output
+    assert f"rollback: `git -C {product.as_posix()} clean -f -- product-smoke-change.txt`" in output
+    assert status_after == ["?? product-smoke-change.txt"]
+    assert head_before == head_after
+    assert (product / "product-smoke-change.txt").read_text(encoding="utf-8") == module.harness_controller.PRODUCT_DIFF_SMOKE_CONTENT
+    assert backlog.read_text(encoding="utf-8") == before_backlog_body
+    _assert_no_product_harness_pollution(product)
+    evidence_paths = list((controller / "targets" / "demo" / "runs" / "harness").glob("*/generated-evidence.json"))
+    assert evidence_paths
+    evidence = json.loads(evidence_paths[0].read_text(encoding="utf-8"))
+    assert evidence["root_context"]["target_id"] == "demo"
+    assert evidence["product_execution"] == "enabled"
+    assert evidence["product_commit"] == "disabled"
+    assert evidence["product_push"] == "disabled"
+    assert evidence["lane_execution"] == "backlog-product-diff-smoke"
+    assert evidence["external_backlog"] == {
+        "id": "BL-demo",
+        "path": "backlog/queued/BL-demo.md",
+        "title": "Demo sidecar task",
+        "priority": "P1",
+        "goal": "external-demo",
+        "autonomy_execute": "auto",
+    }
+    smoke_report = controller / "targets" / "demo" / "reports" / "target-run-latest.md"
+    smoke_body = smoke_report.read_text(encoding="utf-8")
+    assert "# External Target Run Backlog-Bound Product Diff Smoke" in smoke_body
+    assert "Lane execution: `backlog-product-diff-smoke`" in smoke_body
+    assert "Planned backlog id: `BL-demo`" in smoke_body
+    outbox_files = [
+        path for path in (controller / "targets" / "demo" / "operator-outbox").glob("*.md")
+        if path.name != "README.md"
+    ]
+    assert outbox_files
+    assert "선택 backlog BL-demo" in outbox_files[0].read_text(encoding="utf-8")
+    assert not (controller / "targets" / "demo" / "locks" / "target-run.lock").exists()
+
+
+def test_external_target_run_execute_backlog_once_blocks_without_executable_sidecar_backlog(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.5")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    queued = controller / "targets" / "demo" / "backlog" / "queued" / "BL-manual.md"
+    queued.parent.mkdir(parents=True, exist_ok=True)
+    queued.write_text(
+        "\n".join(
+            [
+                "ID: BL-manual",
+                "Title: Manual item",
+                "Status: queued",
+                "Priority: P2",
+                "Autonomy-Execute: manual-review",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    capsys.readouterr()
+
+    assert module.main(["target", "run", "demo", "--execute-backlog-once"]) == 2
+    output = capsys.readouterr().out
+
+    assert "product diff smoke를 시작하지 않았습니다" in output
+    assert "no-executable-sidecar-backlog" in output
+    assert "product diff/commit/push: 없음" in output
+    assert not (product / "product-smoke-change.txt").exists()
+    assert subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout == ""
+
+
+def test_external_target_run_execute_backlog_once_failed_before_write_reports_no_diff(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.5")
+
+    def fail_before_write(*args, **kwargs) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(("harness_autonomy.py",), 1, "", "external backlog title does not match selected path")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    _write_sidecar_backlog(controller)
+    monkeypatch.setattr(module, "_run_target_autonomy_state_plumbing", fail_before_write)
+    capsys.readouterr()
+
+    assert module.main(["target", "run", "demo", "--execute-backlog-once"]) == 2
+    output = capsys.readouterr().out
+    smoke_body = (controller / "targets" / "demo" / "reports" / "target-run-latest.md").read_text(encoding="utf-8")
+
+    assert "external-state-plumbing-failed" in output
+    assert "external backlog title does not match selected path" in output
+    assert "rollback:" not in output
+    assert "Product diff execution: `disabled`" in smoke_body
+    assert "Expected Product Diff\n\n- none" in smoke_body
+    assert "Rollback Guidance\n\n- none" in smoke_body
+    assert not (product / "product-smoke-change.txt").exists()
+    assert subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout == ""
+
+
+def test_external_target_run_execute_backlog_once_preexisting_tracked_smoke_file_reports_no_diff(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    (product / module.harness_controller.PRODUCT_DIFF_SMOKE_FILE).write_text("already tracked\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md", "product-smoke-change.txt"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.5")
+
+    def fail_before_write(*args, **kwargs) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            ("harness_autonomy.py",),
+            1,
+            "",
+            "external product smoke file already exists: product-smoke-change.txt",
+        )
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    _write_sidecar_backlog(controller)
+    monkeypatch.setattr(module, "_run_target_autonomy_state_plumbing", fail_before_write)
+    capsys.readouterr()
+
+    assert module.main(["target", "run", "demo", "--execute-backlog-once"]) == 2
+    output = capsys.readouterr().out
+    smoke_body = (controller / "targets" / "demo" / "reports" / "target-run-latest.md").read_text(encoding="utf-8")
+
+    assert "external-state-plumbing-failed" in output
+    assert "external product smoke file already exists" in output
+    assert "rollback:" not in output
+    assert "Product diff execution: `disabled`" in smoke_body
+    assert "Expected Product Diff\n\n- none" in smoke_body
+    assert "Rollback Guidance\n\n- none" in smoke_body
+    assert subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout == ""
+
 
 def test_external_target_run_plan_once_blocks_without_executable_sidecar_backlog(
     monkeypatch, tmp_path: Path, capsys
@@ -758,7 +1013,7 @@ def test_external_target_run_plan_once_blocks_without_executable_sidecar_backlog
     assert "target run 계획 중단" in output
     assert "no-executable-sidecar-backlog" in output
     assert "Status: queued" in output
-    assert "lane 실행: 시작 안 함 (plan-only)" in output
+    assert "AI 제품 구현 lane: 시작 안 함" in output
     assert "제품 변경 실행: 비활성화" in output
     assert "product diff/commit/push: 없음" in output
     assert status_after == ""
@@ -889,6 +1144,18 @@ def test_external_target_run_plan_once_uses_plan_wording_on_target_blocker(
     assert "Lane execution: `plan-only`" in smoke_body
     assert "Product diff execution: `disabled`" in smoke_body
     assert "target-git-dirty" in smoke_body
+
+    assert module.main(["target", "run", "demo", "--execute-backlog-once"]) == 2
+    output = capsys.readouterr().out
+    smoke_body = (controller / "targets" / "demo" / "reports" / "target-run-latest.md").read_text(encoding="utf-8")
+
+    assert "backlog-bound product diff smoke를 시작하지 않았습니다" in output
+    assert "AI 제품 구현 lane: 시작 안 함" in output
+    assert "product diff/commit/push: 없음" in output
+    assert "backlog 완료 처리: 없음" in output
+    assert not (product / "product-smoke-change.txt").exists()
+    assert "Product diff execution: `disabled`" in smoke_body
+    assert "Expected Product Diff\n\n- none" in smoke_body
 
 
 def test_external_target_run_execute_once_creates_product_only_diff(

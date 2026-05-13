@@ -1123,6 +1123,7 @@ def _run_target_autonomy_state_plumbing(
     product_execution: bool = False,
     product_commit: bool = False,
     product_push: bool = False,
+    planned_backlog: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     root = repo_root()
     from harness_autonomy import AutonomyError, main as autonomy_main
@@ -1148,6 +1149,17 @@ def _run_target_autonomy_state_plumbing(
         forwarded.append("--external-product-commit")
     if product_push:
         forwarded.append("--external-product-push")
+    if planned_backlog:
+        forwarded.extend(
+            [
+                "--external-backlog-id",
+                planned_backlog["id"],
+                "--external-backlog-path",
+                planned_backlog["path"],
+                "--external-backlog-title",
+                planned_backlog["title"],
+            ]
+        )
     forwarded.extend(
         [
             "run-once",
@@ -1175,8 +1187,12 @@ def _run_target_autonomy_state_plumbing(
 
 def command_target_run(args: argparse.Namespace) -> int:
     plan_execution = bool(getattr(args, "plan_once", False))
-    if sum(1 for enabled in (bool(args.once), bool(args.execute_once), plan_execution) if enabled) != 1:
-        print("error: target run은 `--once`, `--plan-once`, 또는 `--execute-once` 중 하나만 명시하세요.")
+    backlog_execution = bool(getattr(args, "execute_backlog_once", False))
+    if sum(1 for enabled in (bool(args.once), bool(args.execute_once), plan_execution, backlog_execution) if enabled) != 1:
+        print(
+            "error: target run은 `--once`, `--plan-once`, `--execute-once`, "
+            "또는 `--execute-backlog-once` 중 하나만 명시하세요."
+        )
         return 2
     product_commit = bool(getattr(args, "commit", False))
     if product_commit and not bool(args.execute_once):
@@ -1186,7 +1202,7 @@ def command_target_run(args: argparse.Namespace) -> int:
     if product_push and not (bool(args.execute_once) and product_commit):
         print("error: `--push`는 `--execute-once --commit`과 함께만 사용할 수 있습니다.")
         return 2
-    product_execution = bool(args.execute_once)
+    product_execution = bool(args.execute_once or backlog_execution)
     lock: harness_controller.TargetRunLock | None = None
     try:
         record = _resolve_controller_target(args.target)
@@ -1222,16 +1238,10 @@ def command_target_run(args: argparse.Namespace) -> int:
                 before_head="",
                 after_head="",
                 lock=lock,
-                product_diff_execution="enabled" if product_execution else "disabled",
+                product_diff_execution="disabled",
                 product_commit_execution="enabled" if product_commit else "disabled",
-                expected_product_paths=(
-                    [harness_controller.PRODUCT_DIFF_SMOKE_FILE.as_posix()] if product_execution else []
-                ),
-                rollback_guidance=(
-                    [harness_controller.product_diff_smoke_rollback_command(record.repo)]
-                    if product_execution and not product_commit
-                    else []
-                ),
+                expected_product_paths=[],
+                rollback_guidance=[],
                 product_push_execution="enabled" if product_push else "disabled",
                 lane_execution="plan-only" if plan_execution else "not-started",
             )
@@ -1241,6 +1251,12 @@ def command_target_run(args: argparse.Namespace) -> int:
                 print("- lane 실행: 시작 안 함 (plan-only)")
                 print("- 제품 변경 실행: 비활성화")
                 print("- product diff/commit/push: 없음")
+            elif backlog_execution:
+                print("target run 중단: backlog-bound product diff smoke를 시작하지 않았습니다.")
+                print("- AI 제품 구현 lane: 시작 안 함")
+                print("- 제품 변경 실행: 비활성화")
+                print("- product diff/commit/push: 없음")
+                print("- backlog 완료 처리: 없음")
             else:
                 print("target run 중단: run blocker를 먼저 해결해야 합니다.")
             print(f"- run blockers: {', '.join(run_blockers)}")
@@ -1249,7 +1265,8 @@ def command_target_run(args: argparse.Namespace) -> int:
             print(f"- smoke report: `{smoke_report.as_posix()}`")
             return 2
         before_head = harness_controller.target_git_head(record.repo)
-        if plan_execution:
+        planned_backlog: dict[str, str] | None = None
+        if plan_execution or backlog_execution:
             planned_backlog: dict[str, str] | None = None
             plan_blockers: list[str] = []
             state_paths = record.state_paths(repo_root())
@@ -1284,36 +1301,42 @@ def command_target_run(args: argparse.Namespace) -> int:
                 before_head=before_head,
                 after_head=after_head,
                 lock=lock,
-                lane_execution="plan-only",
+                lane_execution="plan-only" if plan_execution else "backlog-product-diff-smoke",
                 product_diff_execution="disabled",
                 product_commit_execution="disabled",
                 product_push_execution="disabled",
                 planned_backlog=planned_backlog,
             )
             if plan_blockers:
-                print("target run 계획 중단: 실행 가능한 sidecar backlog를 찾지 못했습니다.")
+                if backlog_execution:
+                    print("target run 중단: 실행 가능한 sidecar backlog가 없어 product diff smoke를 시작하지 않았습니다.")
+                else:
+                    print("target run 계획 중단: 실행 가능한 sidecar backlog를 찾지 못했습니다.")
                 print(f"- run blockers: {', '.join(plan_blockers)}")
                 print(f"- 필요한 위치: `{state_paths.backlog_queued_dir}`")
                 print("- 조건: `Status: queued` + `Autonomy-Execute: auto`")
-                print("- lane 실행: 시작 안 함 (plan-only)")
+                print("- AI 제품 구현 lane: 시작 안 함")
                 print("- 제품 변경 실행: 비활성화")
                 print("- product diff/commit/push: 없음")
                 print(f"- 확인 명령: `./harness target status {record.target_id}`")
                 print(f"- 확인 명령: `./harness target dashboard {record.target_id}`")
-                print(f"- plan report: `{smoke_report.as_posix()}`")
+                print(f"- report: `{smoke_report.as_posix()}`")
                 return 2
-            print("외부 target backlog 계획 점검 완료")
-            print(f"- 대상 ID: `{record.target_id}`")
-            print(f"- 계획된 backlog: `{planned_backlog['id']}`")
-            print(f"- backlog 경로: `{planned_backlog['path']}`")
-            print(f"- plan report: `{smoke_report.as_posix()}`")
-            print("- lane 실행: 시작 안 함 (plan-only)")
-            print("- 제품 변경 실행: 비활성화")
-            print("- product diff/commit/push: 없음")
-            print("- 다음 단계: 실제 backlog 제품 변경 실행은 별도 명시 gate 전까지 비활성화입니다.")
-            print(f"- 다음 명령: `./harness target status {record.target_id}`")
-            print(f"- 다음 명령: `./harness target dashboard {record.target_id}`")
-            return 0
+            if backlog_execution:
+                pass
+            else:
+                print("외부 target backlog 계획 점검 완료")
+                print(f"- 대상 ID: `{record.target_id}`")
+                print(f"- 계획된 backlog: `{planned_backlog['id']}`")
+                print(f"- backlog 경로: `{planned_backlog['path']}`")
+                print(f"- plan report: `{smoke_report.as_posix()}`")
+                print("- lane 실행: 시작 안 함 (plan-only)")
+                print("- 제품 변경 실행: 비활성화")
+                print("- product diff/commit/push: 없음")
+                print("- 다음 단계: 실제 backlog 제품 변경 실행은 별도 명시 gate 전까지 비활성화입니다.")
+                print(f"- 다음 명령: `./harness target status {record.target_id}`")
+                print(f"- 다음 명령: `./harness target dashboard {record.target_id}`")
+                return 0
         push_target: harness_controller.ProductPushTarget | None = None
         if product_push:
             push_target = harness_controller.resolve_product_diff_smoke_push_target(record.repo, record.branch)
@@ -1327,6 +1350,7 @@ def command_target_run(args: argparse.Namespace) -> int:
             product_execution=product_execution,
             product_commit=product_commit,
             product_push=product_push,
+            planned_backlog=planned_backlog if backlog_execution else None,
         )
         after_status = harness_controller.target_git_status_lines(record.repo)
         after_head = harness_controller.target_git_head(record.repo)
@@ -1403,6 +1427,14 @@ def command_target_run(args: argparse.Namespace) -> int:
             rollback_guidance.extend(harness_controller.product_diff_smoke_partial_rollback_commands(record.repo))
         elif product_execution:
             rollback_guidance.append(harness_controller.product_diff_smoke_rollback_command(record.repo))
+        product_diff_started = bool(
+            product_execution
+            and (
+                after_status == harness_controller.product_diff_smoke_status_lines()
+                or bool(product_commit_sha)
+                or bool(product_push_sha)
+            )
+        )
         try:
             smoke_report = harness_controller.write_target_run_smoke_report(
                 controller_root=repo_root(),
@@ -1415,7 +1447,7 @@ def command_target_run(args: argparse.Namespace) -> int:
                 before_head=before_head,
                 after_head=after_head,
                 lock=lock,
-                product_diff_execution="enabled" if product_execution else "disabled",
+                product_diff_execution="enabled" if product_diff_started else "disabled",
                 product_commit_execution="enabled" if product_commit else "disabled",
                 product_commit_sha=product_commit_sha,
                 product_push_execution="enabled" if product_push else "disabled",
@@ -1426,11 +1458,13 @@ def command_target_run(args: argparse.Namespace) -> int:
                 product_push_remote_after=product_push_remote_after,
                 product_push_command=push_target.command if push_target else (),
                 product_push_error=product_push_error[:500],
+                lane_execution="backlog-product-diff-smoke" if backlog_execution else "not-started",
                 expected_product_paths=(
-                    [harness_controller.PRODUCT_DIFF_SMOKE_FILE.as_posix()] if product_execution else []
+                    [harness_controller.PRODUCT_DIFF_SMOKE_FILE.as_posix()] if product_diff_started else []
                 ),
                 product_commit_diff=product_commit_diff,
-                rollback_guidance=rollback_guidance,
+                rollback_guidance=rollback_guidance if product_diff_started else [],
+                planned_backlog=planned_backlog,
             )
         except harness_controller.ControllerError:
             if product_push and product_push_sha and push_target is not None:
@@ -1450,17 +1484,31 @@ def command_target_run(args: argparse.Namespace) -> int:
                 detail = (plumbing_result.stderr or plumbing_result.stdout).strip()
                 if detail:
                     print(f"- autonomy state plumbing: {detail[:300]}")
+            if product_diff_started and rollback_guidance:
+                print(f"- rollback: `{rollback_guidance[0]}`")
+            if backlog_execution:
+                print("- product commit/push: 없음")
+                print("- backlog 완료 처리: 없음")
             print(f"- smoke report: `{smoke_report.as_posix()}`")
             return 2
-        print("외부 target 상태 배관 점검 완료")
+        if backlog_execution:
+            print("외부 target backlog-bound product diff smoke 완료")
+        else:
+            print("외부 target 상태 배관 점검 완료")
         print(f"- 대상 ID: `{record.target_id}`")
+        if backlog_execution and planned_backlog:
+            print(f"- 선택 backlog: `{planned_backlog['id']}` (`{planned_backlog['path']}`)")
         print(f"- dashboard: `{report.as_posix()}`")
         print(f"- smoke report: `{smoke_report.as_posix()}`")
         print(f"- lock: acquired/released `{lock.path.as_posix()}`")
         print("- 검증 범위: target 등록/sidecar/dashboard/lock/product git 상태")
         if product_execution:
-            print("- lane 실행: 시작 안 함")
-            print("- 제품 변경 실행: 명시 opt-in smoke")
+            print("- AI 제품 구현 lane: 시작 안 함")
+            print(
+                "- 제품 변경 실행: 선택 backlog에 묶인 로컬 제품 diff smoke"
+                if backlog_execution
+                else "- 제품 변경 실행: 명시 opt-in smoke"
+            )
             print(f"- product diff: {harness_controller.PRODUCT_DIFF_SMOKE_FILE.as_posix()}")
             if product_commit:
                 print(f"- product commit: {product_commit_sha}")
@@ -1474,6 +1522,8 @@ def command_target_run(args: argparse.Namespace) -> int:
                     print("- 주의: 이 smoke commit은 hooks/GPG signing을 건너뛰며 공유용 product commit이 아닙니다.")
             else:
                 print("- product commit/push: 없음")
+                if backlog_execution:
+                    print("- backlog 상태 변경: 없음")
             if rollback_guidance:
                 print(f"- rollback: `{rollback_guidance[0]}`")
                 if product_commit and not product_push:
@@ -1861,6 +1911,14 @@ def build_parser() -> argparse.ArgumentParser:
     target_run.add_argument("--once", action="store_true")
     target_run.add_argument("--plan-once", action="store_true", help="Plan the next sidecar backlog item without product changes.")
     target_run.add_argument("--execute-once", action="store_true", help="Explicitly create one local product diff smoke.")
+    target_run.add_argument(
+        "--execute-backlog-once",
+        action="store_true",
+        help=(
+            "Select the next sidecar backlog item and create one local backlog-bound product diff smoke; "
+            "no AI implementation lane, no backlog completion, no commit, no push."
+        ),
+    )
     target_run.add_argument(
         "--commit",
         action="store_true",
