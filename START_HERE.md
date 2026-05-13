@@ -4,6 +4,8 @@
 
 현재 starter baseline 은 `docs/harness/VERSION.md` 의 Current Version 을 따른다. 이 문서는 기능 목록이 아니라 “새 프로젝트에 하네스를 어떻게 설치하고 시작하는지”만 설명한다. 긴 기능 목록은 `VERSION.md`, `CHANGELOG.md`, `FRAMEWORK_EXPORT.md` 를 본다.
 
+`v1.8.7` 기준 controller bundle 은 GitHub Actions 실행에 필요한 `requirements.txt` 를 포함하지만, starter bundle 은 새 product repo 의 의존성 footprint 를 늘리지 않도록 이 파일을 제외한다.
+
 ## 초간단 사용법
 
 대부분은 아래 세 경우 중 하나다.

@@ -1,5 +1,7 @@
 # Harness Manifest
 
+`v1.8.7` 기준 controller-safe export surface 에 `requirements.txt` 가 포함된다. Starter-safe export 는 이 파일을 제외해 product repo dependency footprint 를 늘리지 않는다.
+
 ## Canonical Files
 
 - live autonomy prompt surface ownership: `scripts/harness_autonomy/prompts/__init__.py`

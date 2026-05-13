@@ -9,7 +9,7 @@
 
 ## 자동 스냅샷
 <!-- BEGIN AUTO -->
-- 하네스 버전: 1.8.6
+- 하네스 버전: 1.8.7
 - 스냅샷 종류: 저장소 로컬 복구 뷰
 - 갱신 명령: `python3 scripts/harness_loop.py sync-state`
 - 현재 active workspace key: repo-root

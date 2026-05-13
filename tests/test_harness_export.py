@@ -174,6 +174,7 @@ def test_starter_bundle_excludes_live_state_and_can_create_project(tmp_path: Pat
     assert (bundle / "scripts" / "harness_cli.py").exists()
     assert (bundle / "scripts" / "harness_controller.py").exists()
     assert (bundle / "scripts" / "harness_profiles.py").exists()
+    assert not (bundle / "requirements.txt").exists()
     assert not (bundle / ".github" / "workflows" / "harness-controller-ci.yml").exists()
     assert not (bundle / "tests").exists()
     assert (bundle / "scripts" / "harness_autonomy" / "relay.py").exists()
@@ -282,6 +283,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
 
     assert (bundle / "harness").exists()
     assert os.access(bundle / "harness", os.X_OK)
+    assert (bundle / "requirements.txt").exists()
     assert (bundle / ".github" / "workflows" / "harness-controller-ci.yml").exists()
     workflow_text = (bundle / ".github" / "workflows" / "harness-controller-ci.yml").read_text(encoding="utf-8")
     assert "--check --controller-bundle" in workflow_text

@@ -1,8 +1,14 @@
 # Harness Framework Version
 
-- Current Version: 1.8.6
+- Current Version: 1.8.7
 - Release Date: 2026-05-13
 - Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + on-demand export output.
+
+## What Changed In 1.8.7
+
+- Added `requirements.txt` to the controller-safe export surface so private `harness-controller` GitHub Actions can install focused test dependencies from a clean clone.
+- Kept starter bundles unchanged; `requirements.txt` remains controller-only and is not copied into product starter projects.
+- Supersedes the private controller `v1.8.6` release attempt whose CI failed before dependency installation.
 
 ## What Changed In 1.8.6
 

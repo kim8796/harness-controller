@@ -4,6 +4,8 @@
 
 이 문서는 외부 스케줄러가 CLI 기반 AI 세션을 반복 실행할 때, 하네스 루프를 어떻게 안전하게 자동화할지 정의한다.
 
+`v1.8.7` controller hotfix 는 autonomy 실행 계약을 바꾸지 않는다. 변경 범위는 controller export 가 clean clone CI 에 필요한 `requirements.txt` 를 포함하고 starter export 에서는 제외하는 배포 surface 정합성이다.
+
 현재 운영 baseline 은 `docs/harness/VERSION.md` 의 Current Version 을 따른다. 이 문서는 운영 계약과 CLI 사용법을 설명하고, 긴 릴리스별 기능 목록은 `VERSION.md`, `CHANGELOG.md`, 최신 release note 로 위임한다.
 
 현재 핵심 baseline 은 외부 launcher, file-based inbox/outbox, goal-linked execution/discovery, canonical `goal_state`, deterministic `state-apply`, manager `scope_contract`, generated evidence, native guard, and External Doctor supervisor 로 구성된다. Doctor 는 loop 내부 lane 이 아니라 launcher/watch 계층에서 `doctor_claim` ownership 을 잡고 실패, retrying stall, stale runtime heartbeat 기반 lane stall 을 분류하며, patchable failure 만 별도 branch/worktree 에서 수리한다. 여기서 `stalled-lane` 은 loop heartbeat 정지를 뜻하고, child runner hang 은 기존 lane timeout contract 가 먼저 닫는다.

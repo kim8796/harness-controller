@@ -1,5 +1,11 @@
 # Harness Changelog
 
+## 1.8.7 - 2026-05-13
+
+- Added `requirements.txt` to controller export so the private controller repo CI can run `python -m pip install -r requirements.txt` from a clean clone.
+- Kept starter bundles free of `requirements.txt`; the dependency file is controller-only.
+- Supersedes the private controller `v1.8.6` release attempt that failed during CI dependency installation.
+
 ## 1.8.6 - 2026-05-13
 
 - Added `./harness target run <target> --implement-backlog-once` as the first external controller real implementation gate.

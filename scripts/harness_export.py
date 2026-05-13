@@ -16,6 +16,7 @@ STATIC_EXPORT_SOURCE_PATHS = (
     Path("CLAUDE.md"),
     Path("harness"),
     Path(".gitignore"),
+    Path("requirements.txt"),
     Path(".github/workflows/harness-controller-ci.yml"),
     Path(".claude/commands/harness.md"),
     Path(".claude/commands/loop-pause.md"),
@@ -134,6 +135,7 @@ CONTROLLER_EXCLUDED_SOURCE_PATHS = frozenset(
 )
 STARTER_CONTROLLER_ONLY_SOURCE_PATHS = frozenset(
     {
+        Path("requirements.txt"),
         Path(".github/workflows/harness-controller-ci.yml"),
         Path("tests/conftest.py"),
         Path("tests/test_harness_autonomy.py"),
