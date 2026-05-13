@@ -956,7 +956,13 @@ def test_external_target_run_push_blocks_remote_mismatch_before_product_write(
     subprocess.run(["git", "init", "--bare", str(remote)], check=True, text=True, capture_output=True, env=_git_env())
     subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=product, check=True, env=_git_env())
     subprocess.run(["git", "push", "-u", "origin", "main"], cwd=product, check=True, env=_git_env())
-    subprocess.run(["git", "clone", str(remote), str(other)], check=True, text=True, capture_output=True, env=_git_env())
+    subprocess.run(
+        ["git", "clone", "--branch", "main", str(remote), str(other)],
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    )
     subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=other, check=True, env=_git_env())
     subprocess.run(["git", "config", "user.email", "harness-test@example.invalid"], cwd=other, check=True, env=_git_env())
     (other / "REMOTE.md").write_text("remote moved\n", encoding="utf-8")
