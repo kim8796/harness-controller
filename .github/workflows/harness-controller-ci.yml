@@ -28,10 +28,16 @@ jobs:
       - name: Lint focused harness surfaces
         run: python -m ruff check scripts/harness_autonomy.py scripts/harness_autonomy/core.py scripts/harness_cli.py scripts/harness_controller.py scripts/harness_env.py scripts/harness_export.py scripts/harness_starter_install.py scripts/harness_telegram_bridge.py scripts/harness_autonomy/relay.py tests/test_harness_autonomy.py tests/test_harness_cli.py tests/test_harness_controller.py tests/test_harness_export.py tests/test_harness_telegram_bridge.py tests/test_redis_relay.py
       - name: Run focused tests
+        env:
+          HARNESS_GIT_AUTHOR_NAME: Harness CI
+          HARNESS_GIT_AUTHOR_EMAIL: harness-ci@users.noreply.github.com
         run: python -m pytest tests/test_harness_autonomy.py tests/test_harness_cli.py tests/test_harness_controller.py tests/test_harness_export.py tests/test_harness_telegram_bridge.py tests/test_redis_relay.py -q
       - name: Export source check
         run: python scripts/harness_export.py --check --controller-bundle "$RUNNER_TEMP/controller-source-check"
       - name: Controller sanitization and self-test
+        env:
+          HARNESS_GIT_AUTHOR_NAME: Harness CI
+          HARNESS_GIT_AUTHOR_EMAIL: harness-ci@users.noreply.github.com
         run: |
           python harness controller export "$RUNNER_TEMP/harness-controller-controller-bundle" --sanitize-report "$RUNNER_TEMP/controller-sanitization-report.json"
           python - <<'PY'
