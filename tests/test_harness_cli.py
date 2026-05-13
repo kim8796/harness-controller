@@ -501,6 +501,302 @@ def test_external_target_run_once_read_only_smoke_without_product_mutation(
     assert not (controller / "targets" / "demo" / "locks" / "target-run.lock").exists()
 
 
+def test_external_target_run_requires_exactly_one_mode(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.0")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    capsys.readouterr()
+
+    assert module.main(["target", "run", "demo"]) == 2
+    assert "하나만 명시" in capsys.readouterr().out
+    assert module.main(["target", "run", "demo", "--once", "--execute-once"]) == 2
+    assert "하나만 명시" in capsys.readouterr().out
+    assert subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout == ""
+
+
+def test_external_target_run_execute_once_creates_product_only_diff(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    head_before = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.strip()
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.0")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    capsys.readouterr()
+
+    assert module.main(["target", "run", "demo", "--execute-once"]) == 0
+    output = capsys.readouterr().out
+    status_after = subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.splitlines()
+    head_after = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.strip()
+
+    smoke_file = product / "product-smoke-change.txt"
+    assert "제품 변경 실행: 명시 opt-in smoke" in output
+    assert "product diff: product-smoke-change.txt" in output
+    assert "product commit/push: 없음" in output
+    assert f"rollback: `git -C {product.as_posix()} clean -f -- product-smoke-change.txt`" in output
+    assert status_after == ["?? product-smoke-change.txt"]
+    assert head_before == head_after
+    assert smoke_file.read_text(encoding="utf-8") == module.harness_controller.PRODUCT_DIFF_SMOKE_CONTENT
+    assert not (product / "runs").exists()
+    assert not (product / "reports").exists()
+    assert not (product / "backlog").exists()
+    assert not (product / "targets").exists()
+    sidecar_run_root = controller / "targets" / "demo" / "runs" / "harness"
+    evidence_paths = list(sidecar_run_root.glob("*/generated-evidence.json"))
+    assert evidence_paths
+    evidence = json.loads(evidence_paths[0].read_text(encoding="utf-8"))
+    assert evidence["product_execution"] == "enabled"
+    assert evidence["product_diff_paths"] == ["product-smoke-change.txt"]
+    assert evidence["product_commit"] == "disabled"
+    assert evidence["product_push"] == "disabled"
+    smoke_report = controller / "targets" / "demo" / "reports" / "target-run-latest.md"
+    smoke_body = smoke_report.read_text(encoding="utf-8")
+    assert "Product diff execution: `enabled`" in smoke_body
+    assert "product-smoke-change.txt" in smoke_body
+    assert f"git -C {product.as_posix()} clean -f -- product-smoke-change.txt" in smoke_body
+    assert not (controller / "targets" / "demo" / "locks" / "target-run.lock").exists()
+
+
+def test_external_target_run_execute_once_uses_canonical_id_for_alias_selector(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.0")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product), "--display-name", "Demo App"]) == 0
+    assert module.main(["target", "alias", "add", "demo", "app"]) == 0
+    capsys.readouterr()
+
+    assert module.main(["target", "run", "@app", "--execute-once"]) == 0
+    output = capsys.readouterr().out
+
+    assert "대상 ID: `demo`" in output
+    assert (controller / "targets" / "demo" / "reports" / "target-run-latest.md").exists()
+    assert not (controller / "targets" / "app").exists()
+    evidence_paths = list((controller / "targets" / "demo" / "runs" / "harness").glob("*/generated-evidence.json"))
+    assert evidence_paths
+    evidence = json.loads(evidence_paths[0].read_text(encoding="utf-8"))
+    assert evidence["root_context"]["target_id"] == "demo"
+
+
+def test_external_target_run_execute_once_blocks_existing_smoke_file(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    (product / "product-smoke-change.txt").write_text("real product file\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md", "product-smoke-change.txt"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.0")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    capsys.readouterr()
+
+    assert module.main(["target", "run", "demo", "--execute-once"]) == 2
+    output = capsys.readouterr().out
+
+    assert "external-state-plumbing-failed" in output
+    assert "product smoke file already exists" in output
+    assert (product / "product-smoke-change.txt").read_text(encoding="utf-8") == "real product file\n"
+    assert subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout == ""
+    assert not (controller / "targets" / "demo" / "locks" / "target-run.lock").exists()
+
+
+def test_external_target_run_execute_once_blocks_ignored_smoke_file(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    (product / ".gitignore").write_text("product-smoke-change.txt\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md", ".gitignore"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.0")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    capsys.readouterr()
+
+    assert module.main(["target", "run", "demo", "--execute-once"]) == 2
+    output = capsys.readouterr().out
+
+    assert "external-state-plumbing-failed" in output
+    assert "product smoke file is ignored" in output
+    assert not (product / "product-smoke-change.txt").exists()
+    assert subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout == ""
+    assert not (controller / "targets" / "demo" / "locks" / "target-run.lock").exists()
+
+
+def test_external_target_run_execute_once_blocks_tracked_absent_smoke_file(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    smoke_file = product / "product-smoke-change.txt"
+    smoke_file.write_text("tracked product file\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md", "product-smoke-change.txt"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    subprocess.run(
+        ["git", "update-index", "--skip-worktree", "product-smoke-change.txt"],
+        cwd=product,
+        check=True,
+        env=_git_env(),
+    )
+    smoke_file.unlink()
+    assert subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout == ""
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.0")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    capsys.readouterr()
+
+    assert module.main(["target", "run", "demo", "--execute-once"]) == 2
+    output = capsys.readouterr().out
+
+    assert "external-state-plumbing-failed" in output
+    assert "product smoke file is already tracked" in output
+    assert not smoke_file.exists()
+    assert subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout == ""
+    assert not (controller / "targets" / "demo" / "locks" / "target-run.lock").exists()
+
+
+def test_external_target_run_execute_once_preflights_sidecar_before_product_write(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.0")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    latest_tmp = controller / "targets" / "demo" / "reports" / "harness-autonomy" / "LATEST.tmp"
+    latest_tmp.parent.mkdir(parents=True, exist_ok=True)
+    latest_tmp.symlink_to(tmp_path / "outside-latest.tmp")
+    capsys.readouterr()
+
+    assert module.main(["target", "run", "demo", "--execute-once"]) == 2
+    output = capsys.readouterr().out
+
+    assert "external-state-plumbing-failed" in output
+    assert "latest autonomy report temp must not be a symlink" in output
+    assert not (product / "product-smoke-change.txt").exists()
+    assert subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout == ""
+    assert not (controller / "targets" / "demo" / "locks" / "target-run.lock").exists()
+
+
 def test_external_target_run_once_blocks_same_target_lock_without_blocking_other_target(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:

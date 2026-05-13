@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
@@ -18,6 +19,13 @@ TARGET_ALIAS_PATTERN = TARGET_ID_PATTERN
 TARGETS_DIR = Path("targets")
 TARGET_CONFIG_NAME = "target.json"
 TARGET_RUN_LOCK_NAME = "target-run.lock"
+PRODUCT_DIFF_SMOKE_FILE = Path("product-smoke-change.txt")
+PRODUCT_DIFF_SMOKE_CONTENT = (
+    "Product diff smoke\n"
+    "created_by=external-harness-controller\n"
+    "commit=disabled\n"
+    "push=disabled\n"
+)
 PRODUCT_HARNESS_MARKERS = (
     Path("harness"),
     Path("HARNESS.md"),
@@ -856,6 +864,34 @@ def target_git_head(target_root: Path) -> str:
     return result.stdout.strip()
 
 
+def product_diff_smoke_status_lines() -> list[str]:
+    return [f"?? {PRODUCT_DIFF_SMOKE_FILE.as_posix()}"]
+
+
+def product_diff_smoke_rollback_command(target_root: Path | None = None) -> str:
+    if target_root is None:
+        return f"git clean -f -- {PRODUCT_DIFF_SMOKE_FILE.as_posix()}"
+    return f"git -C {shlex.quote(target_root.as_posix())} clean -f -- {PRODUCT_DIFF_SMOKE_FILE.as_posix()}"
+
+
+def product_diff_smoke_is_ignored(target_root: Path) -> bool:
+    result = git(["check-ignore", "-q", "--", PRODUCT_DIFF_SMOKE_FILE.as_posix()], cwd=target_root)
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise ControllerError("target git check-ignore failed")
+
+
+def product_diff_smoke_is_tracked(target_root: Path) -> bool:
+    result = git(["ls-files", "--error-unmatch", "--", PRODUCT_DIFF_SMOKE_FILE.as_posix()], cwd=target_root)
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise ControllerError("target git ls-files failed")
+
+
 def write_dashboard(*, controller_root: Path, record: TargetRecord, verification: Mapping[str, object]) -> Path:
     state_paths = record.state_paths(controller_root)
     validate_sidecar_integrity(state_paths.state_root)
@@ -913,6 +949,10 @@ def write_target_run_smoke_report(
     before_head: str,
     after_head: str,
     lock: TargetRunLock,
+    product_diff_execution: str = "disabled",
+    lane_execution: str = "not-started",
+    expected_product_paths: Sequence[str] = (),
+    rollback_guidance: Sequence[str] = (),
 ) -> Path:
     state_paths = record.state_paths(controller_root)
     validate_sidecar_integrity(state_paths.state_root)
@@ -929,9 +969,16 @@ def write_target_run_smoke_report(
             return ["- none"]
         return [f"- `{line}`" for line in lines]
 
+    title = (
+        "# External Target Run Product Diff Smoke"
+        if product_diff_execution == "enabled"
+        else "# External Target Run Read-Only Smoke"
+    )
+    expected_lines = [f"- `{path}`" for path in expected_product_paths] if expected_product_paths else ["- none"]
+    rollback_lines = [f"- `{line}`" for line in rollback_guidance] if rollback_guidance else ["- none"]
     text = "\n".join(
         [
-            "# External Target Run Read-Only Smoke",
+            title,
             "",
             f"- Target: `{record.target_id}`",
             f"- Result: `{result}`",
@@ -941,10 +988,12 @@ def write_target_run_smoke_report(
             f"- Lock path: `{lock.path.as_posix()}`",
             f"- Lock acquired at: `{lock.acquired_at}`",
             f"- Run blockers: `{', '.join(str(item) for item in run_blockers) if run_blockers else 'none'}`",
-            "- Lane execution: `not-started`",
-            "- Product diff execution: `disabled`",
+            f"- Lane execution: `{lane_execution}`",
+            f"- Product diff execution: `{product_diff_execution}`",
             f"- Product HEAD before: `{before_head or 'unknown'}`",
             f"- Product HEAD after: `{after_head or 'unknown'}`",
+            "- Product commit: `disabled`",
+            "- Product push: `disabled`",
             "",
             "## Product Git Status Before",
             "",
@@ -954,11 +1003,20 @@ def write_target_run_smoke_report(
             "",
             *_render_status(after_status),
             "",
+            "## Expected Product Diff",
+            "",
+            *expected_lines,
+            "",
+            "## Rollback Guidance",
+            "",
+            *rollback_lines,
+            "",
             "## Operator Guidance",
             "",
-            "- 이 smoke 는 target boundary 검증만 수행한다.",
+            "- `--once` smoke 는 target boundary 검증만 수행한다.",
+            "- `--execute-once` smoke 는 명시 opt-in 일 때만 product diff 를 만든다.",
             "- product repo 에 harness runtime/state 파일을 쓰지 않는다.",
-            "- 실제 product-changing autonomy lane 은 다음 RootContext-aware execution phase 에서 별도로 연다.",
+            "- commit/push 는 별도 gate 전까지 비활성화돼 있다.",
             "",
         ]
     )

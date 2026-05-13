@@ -1100,9 +1100,10 @@ def _run_target_autonomy_state_plumbing(
     record: harness_controller.TargetRecord,
     *,
     lock: harness_controller.TargetRunLock,
+    product_execution: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     root = repo_root()
-    from harness_autonomy import main as autonomy_main
+    from harness_autonomy import AutonomyError, main as autonomy_main
 
     forwarded = [
         "--root",
@@ -1118,28 +1119,39 @@ def _run_target_autonomy_state_plumbing(
         "--external-lock-owned",
         "--external-lock-token",
         lock.token,
-        "run-once",
-        "--mode",
-        "auto",
-        "--runner",
-        "codex",
-        "--runner-model",
-        "auto",
-        "--git-backup",
-        "off",
     ]
+    if product_execution:
+        forwarded.append("--external-product-execution")
+    forwarded.extend(
+        [
+            "run-once",
+            "--mode",
+            "auto",
+            "--runner",
+            "codex",
+            "--runner-model",
+            "auto",
+            "--git-backup",
+            "off",
+        ]
+    )
     stdout = io.StringIO()
     stderr = io.StringIO()
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-        returncode = autonomy_main(forwarded)
+        try:
+            returncode = autonomy_main(forwarded)
+        except AutonomyError as exc:
+            print(str(exc), file=stderr)
+            returncode = 1
     command = ("harness_autonomy.py", *forwarded)
     return subprocess.CompletedProcess(command, returncode, stdout.getvalue(), stderr.getvalue())
 
 
 def command_target_run(args: argparse.Namespace) -> int:
-    if not args.once:
-        print("error: external target run은 read-only/no-op smoke만 허용합니다. --once 를 붙이세요.")
+    if bool(args.once) == bool(args.execute_once):
+        print("error: target run은 `--once` 또는 `--execute-once` 중 하나만 명시하세요.")
         return 2
+    product_execution = bool(args.execute_once)
     lock: harness_controller.TargetRunLock | None = None
     try:
         record = _resolve_controller_target(args.target)
@@ -1175,22 +1187,31 @@ def command_target_run(args: argparse.Namespace) -> int:
                 before_head="",
                 after_head="",
                 lock=lock,
+                product_diff_execution="enabled" if product_execution else "disabled",
+                expected_product_paths=(
+                    [harness_controller.PRODUCT_DIFF_SMOKE_FILE.as_posix()] if product_execution else []
+                ),
+                rollback_guidance=(
+                    [harness_controller.product_diff_smoke_rollback_command(record.repo)] if product_execution else []
+                ),
             )
             _render_target_verify_text(verification)
-            print("target run --once 중단: run blocker를 먼저 해결해야 합니다.")
+            print("target run 중단: run blocker를 먼저 해결해야 합니다.")
             print(f"- run blockers: {', '.join(run_blockers)}")
             print(f"- smoke report: `{smoke_report.as_posix()}`")
             return 2
         before_head = harness_controller.target_git_head(record.repo)
-        plumbing_result = _run_target_autonomy_state_plumbing(record, lock=lock)
+        plumbing_result = _run_target_autonomy_state_plumbing(record, lock=lock, product_execution=product_execution)
         after_status = harness_controller.target_git_status_lines(record.repo)
         after_head = harness_controller.target_git_head(record.repo)
-        status_changed = before_status != after_status
+        expected_after_status = (
+            harness_controller.product_diff_smoke_status_lines() if product_execution else before_status
+        )
         head_changed = before_head != after_head
         post_verification = harness_controller.verify_target(record)
         post_markers = post_verification.get("harness_markers", [])
         post_blockers: list[str] = []
-        if status_changed:
+        if after_status != expected_after_status:
             post_blockers.append("target-git-status-changed")
         if head_changed:
             post_blockers.append("target-head-changed")
@@ -1199,6 +1220,8 @@ def command_target_run(args: argparse.Namespace) -> int:
         if plumbing_result.returncode != 0:
             post_blockers.append("external-state-plumbing-failed")
         for blocker in harness_controller.target_run_blockers(post_verification):
+            if product_execution and blocker == "target-git-dirty" and after_status == expected_after_status:
+                continue
             if blocker not in post_blockers:
                 post_blockers.append(blocker)
         smoke_report = harness_controller.write_target_run_smoke_report(
@@ -1212,9 +1235,16 @@ def command_target_run(args: argparse.Namespace) -> int:
             before_head=before_head,
             after_head=after_head,
             lock=lock,
+            product_diff_execution="enabled" if product_execution else "disabled",
+            expected_product_paths=(
+                [harness_controller.PRODUCT_DIFF_SMOKE_FILE.as_posix()] if product_execution else []
+            ),
+            rollback_guidance=(
+                [harness_controller.product_diff_smoke_rollback_command(record.repo)] if product_execution else []
+            ),
         )
         if post_blockers:
-            print("target run --once 중단: product repo changed during read-only smoke.")
+            print("target run 중단: product repo 상태가 예상과 다릅니다.")
             print(f"- run blockers: {', '.join(post_blockers)}")
             if plumbing_result.returncode != 0:
                 detail = (plumbing_result.stderr or plumbing_result.stdout).strip()
@@ -1228,14 +1258,21 @@ def command_target_run(args: argparse.Namespace) -> int:
         print(f"- smoke report: `{smoke_report.as_posix()}`")
         print(f"- lock: acquired/released `{lock.path.as_posix()}`")
         print("- 검증 범위: target 등록/sidecar/dashboard/lock/product git 상태")
-        print("- lane 실행: 시작 안 함 (read-only/no-op smoke only)")
-        print("- 제품 변경 실행: 비활성화")
-        print("- autonomy state plumbing: sidecar 기록 완료")
-        print("- product diff/commit/push: 없음")
-        print("- 다음 단계: 지금은 제품 변경 실행이 비활성화되어 있습니다. 별도 RootContext-aware execution phase 에서만 켭니다.")
+        if product_execution:
+            print("- lane 실행: 시작 안 함")
+            print("- 제품 변경 실행: 명시 opt-in smoke")
+            print(f"- product diff: {harness_controller.PRODUCT_DIFF_SMOKE_FILE.as_posix()}")
+            print("- product commit/push: 없음")
+            print(f"- rollback: `{harness_controller.product_diff_smoke_rollback_command(record.repo)}`")
+        else:
+            print("- lane 실행: 시작 안 함 (read-only/no-op smoke only)")
+            print("- 제품 변경 실행: 비활성화")
+            print("- autonomy state plumbing: sidecar 기록 완료")
+            print("- product diff/commit/push: 없음")
+            print("- 다음 단계: 제품 변경 smoke 는 `--execute-once` 명시 시에만 실행합니다.")
         print(f"- 다음 명령: `./harness target status {record.target_id}`")
         print(f"- 다음 명령: `./harness target dashboard {record.target_id}`")
-        print("- product repo 변경: 없음")
+        print(f"- product repo 변경: {'있음' if product_execution else '없음'}")
         return 0
     except harness_controller.ControllerError as exc:
         print(f"error: {exc}")
@@ -1605,9 +1642,10 @@ def build_parser() -> argparse.ArgumentParser:
     target_dashboard.add_argument("target", help=target_selector_help)
     target_dashboard.add_argument("--json", action="store_true")
     target_dashboard.set_defaults(func=command_target_dashboard)
-    target_run = target_subparsers.add_parser("run", help="Run an external target read-only/no-op smoke.")
+    target_run = target_subparsers.add_parser("run", help="Run an external target smoke.")
     target_run.add_argument("target", help=target_selector_help)
     target_run.add_argument("--once", action="store_true")
+    target_run.add_argument("--execute-once", action="store_true", help="Explicitly create one local product diff smoke.")
     target_run.set_defaults(func=command_target_run)
     target_alias = target_subparsers.add_parser("alias", help="Manage target aliases used as explicit @selectors.")
     target_alias_subparsers = target_alias.add_subparsers(dest="target_alias_command", required=True)

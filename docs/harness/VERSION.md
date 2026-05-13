@@ -1,8 +1,15 @@
 # Harness Framework Version
 
-- Current Version: 1.8.0
+- Current Version: 1.8.1
 - Release Date: 2026-05-13
 - Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + on-demand export output.
+
+## What Changed In 1.8.1
+
+- Added explicit external target product diff smoke: `./harness target run <id|@alias|@default> --execute-once`.
+- Kept `./harness target run ... --once` read-only/no-op while `--execute-once` creates exactly one uncommitted product file, `product-smoke-change.txt`.
+- Recorded product diff path, before/after HEAD/status, commit/push disabled state, and exact rollback guidance in controller sidecar evidence and target run report.
+- Continued to block dirty, detached, branch-mismatched, harness-marker, and unexpected-diff targets before treating product-changing smoke as successful.
 
 ## What Changed In 1.8.0
 

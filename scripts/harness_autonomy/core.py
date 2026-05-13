@@ -8396,8 +8396,6 @@ def _allocate_external_run_dir(state_root: Path, target_id: str, requested_run_i
 
 
 def run_external_state_plumbing_cycle(args: argparse.Namespace, context: AutonomyRootContext) -> CycleOutcome:
-    if context.product_execution_enabled:
-        raise AutonomyError("external product-changing execution is not enabled in this phase")
     lock_token = str(getattr(args, "external_lock_token", "") or "").strip()
     if not bool(getattr(args, "external_lock_owned", False)) or not lock_token:
         raise AutonomyError("external autonomy mode requires controller target lock ownership")
@@ -8417,37 +8415,94 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
     before_status = controller.target_git_status_lines(context.target_root)
     before_head = controller.target_git_head(context.target_root)
     if before_status:
-        raise AutonomyError("external target must be clean before state plumbing smoke")
+        raise AutonomyError("external target must be clean before target run smoke")
     run_dir = _allocate_external_run_dir(context.state_root, context.target_id, getattr(args, "run_id", None))
     report_dir = context.state_root / DEFAULT_REPORTS_ROOT / run_dir.name
     _ensure_external_sidecar_directory(context.state_root, report_dir, label="external autonomy report directory")
+    root_context_path = run_dir / "root-context.json"
+    generated_evidence_json_path = run_dir / GENERATED_EVIDENCE_JSON_FILENAME
+    generated_evidence_md_path = run_dir / GENERATED_EVIDENCE_MARKDOWN_FILENAME
+    report_path = report_dir / "report.md"
+    latest_report_path = context.state_root / DEFAULT_LATEST_REPORT_PATH
+    status_payload_path = report_dir / DEFAULT_STATUS_FILENAME
+    outbox_summary_path = context.state_root / context.outbox_path / f"{run_dir.name}.md"
+    for sidecar_path, label in (
+        (root_context_path, "external root context evidence"),
+        (generated_evidence_json_path, "external generated evidence json"),
+        (generated_evidence_md_path, "external generated evidence markdown"),
+        (report_path, "external autonomy report"),
+        (latest_report_path, "external latest autonomy report"),
+        (latest_report_path.with_suffix(".tmp"), "external latest autonomy report temp"),
+        (status_payload_path, "external status payload"),
+        (outbox_summary_path, "external operator outbox summary"),
+    ):
+        _ensure_external_sidecar_file(context.state_root, sidecar_path, label=label)
+    product_diff_paths: list[Path] = []
+    expected_status_after: list[str] = []
+    if context.product_execution_enabled:
+        relative = controller.PRODUCT_DIFF_SMOKE_FILE
+        if relative.is_absolute() or ".." in relative.parts:
+            raise AutonomyError("external product smoke path is invalid")
+        if controller.product_diff_smoke_is_ignored(context.target_root):
+            raise AutonomyError(f"external product smoke file is ignored: {relative.as_posix()}")
+        product_path = context.target_root / relative
+        if product_path.exists() or product_path.is_symlink():
+            raise AutonomyError(f"external product smoke file already exists: {relative.as_posix()}")
+        if controller.product_diff_smoke_is_tracked(context.target_root):
+            raise AutonomyError(f"external product smoke file is already tracked: {relative.as_posix()}")
+        try:
+            with product_path.open("x", encoding="utf-8") as handle:
+                handle.write(controller.PRODUCT_DIFF_SMOKE_CONTENT)
+        except FileExistsError as exc:
+            raise AutonomyError(f"external product smoke file already exists: {relative.as_posix()}") from exc
+        product_diff_paths.append(relative)
+        expected_status_after = controller.product_diff_smoke_status_lines()
     after_status = controller.target_git_status_lines(context.target_root)
     after_head = controller.target_git_head(context.target_root)
-    if before_status != after_status or before_head != after_head:
-        raise AutonomyError("external target changed during state plumbing smoke")
+    if after_status != expected_status_after or before_head != after_head:
+        raise AutonomyError("external target changed unexpectedly during target run smoke")
     post_verification = controller.verify_target(record)
     post_blockers = controller.target_run_blockers(post_verification)
+    if context.product_execution_enabled:
+        post_blockers = [blocker for blocker in post_blockers if blocker != "target-git-dirty"]
     if post_blockers:
         raise AutonomyError("external target post-smoke blockers: " + ", ".join(str(item) for item in post_blockers))
     selection = SelectedTask(
         mode="external",
         task_slug=run_dir.name,
-        title=f"External target RootContext plumbing smoke for {context.target_id}",
+        title=(
+            f"External target product diff smoke for {context.target_id}"
+            if context.product_execution_enabled
+            else f"External target RootContext plumbing smoke for {context.target_id}"
+        ),
         backlog_path=None,
-        source=f"external-rootcontext:{context.target_id}",
+        source=(
+            f"external-product-diff:{context.target_id}"
+            if context.product_execution_enabled
+            else f"external-rootcontext:{context.target_id}"
+        ),
+    )
+    diff_summary = (
+        DiffSummary(1, len(controller.PRODUCT_DIFF_SMOKE_CONTENT.splitlines()), 0, tuple(product_diff_paths))
+        if context.product_execution_enabled
+        else DiffSummary(0, 0, 0, tuple())
     )
     outcome = CycleOutcome(
-        status="no-op",
+        status="completed" if context.product_execution_enabled else "no-op",
         selection=selection,
         run_dir=run_dir,
         worktree_path=context.target_root,
-        branch="external-read-only",
+        branch="external-product-diff" if context.product_execution_enabled else "external-read-only",
         state_source=f"external-target:{context.target_id}",
         report_dir=report_dir,
-        report_path=report_dir / "report.md",
-        diff_summary=DiffSummary(0, 0, 0, tuple()),
-        significant=False,
-        runner_model_summary="external RootContext state plumbing; product execution disabled",
+        report_path=report_path,
+        diff_summary=diff_summary,
+        significant=context.product_execution_enabled,
+        runner_model_summary=(
+            "external product diff smoke; product commit/push disabled"
+            if context.product_execution_enabled
+            else "external RootContext state plumbing; product execution disabled"
+        ),
         commit_sha=None,
         persistent_sync=None,
         lane_runners=effective_lane_runners_from_args(args),
@@ -8461,26 +8516,34 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
         "product_head_after": after_head,
         "product_status_before": before_status,
         "product_status_after": after_status,
-        "product_execution": "disabled",
+        "product_execution": "enabled" if context.product_execution_enabled else "disabled",
+        "product_diff_paths": [path.as_posix() for path in product_diff_paths],
+        "rollback_guidance": (
+            [controller.product_diff_smoke_rollback_command(context.target_root)]
+            if context.product_execution_enabled
+            else []
+        ),
+        "product_commit": "disabled",
+        "product_push": "disabled",
         "lane_execution": "not-started",
         "verification": verification,
         "post_verification": post_verification,
     }
     _write_external_sidecar_json(
         context.state_root,
-        run_dir / "root-context.json",
+        root_context_path,
         payload,
         label="external root context evidence",
     )
     _write_external_sidecar_json(
         context.state_root,
-        run_dir / GENERATED_EVIDENCE_JSON_FILENAME,
+        generated_evidence_json_path,
         payload,
         label="external generated evidence json",
     )
     _write_external_sidecar_text(
         context.state_root,
-        run_dir / GENERATED_EVIDENCE_MARKDOWN_FILENAME,
+        generated_evidence_md_path,
         "\n".join(
             [
                 "# Generated Evidence",
@@ -8490,10 +8553,11 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
                 f"- Controller root: `{context.controller_root}`",
                 f"- Target root: `{context.target_root}`",
                 f"- State root: `{context.state_root}`",
-                "- Product execution: `disabled`",
+                f"- Product execution: `{'enabled' if context.product_execution_enabled else 'disabled'}`",
                 "- Lane execution: `not-started`",
-                "- Product diff: `none`",
+                f"- Product diff: `{', '.join(path.as_posix() for path in product_diff_paths) if product_diff_paths else 'none'}`",
                 "- Product commit/push: `none`",
+                f"- Rollback: `{controller.product_diff_smoke_rollback_command(context.target_root) if context.product_execution_enabled else 'none'}`",
                 "",
             ]
         ),
@@ -8516,27 +8580,22 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
         + f"- target_root: `{context.target_root}`\n"
         + f"- state_root: `{context.state_root}`\n"
         + "- 상태 배관 점검: `완료`\n"
-        + "- 제품 변경 실행: `비활성화`\n"
+        + f"- 제품 변경 실행: `{'활성화' if context.product_execution_enabled else '비활성화'}`\n"
         + "- lane 실행: `시작 안 함`\n"
-        + "- product diff/commit/push: `없음`\n"
+        + (
+            f"- product diff: `{', '.join(path.as_posix() for path in product_diff_paths)}`\n"
+            if product_diff_paths
+            else "- product diff/commit/push: `없음`\n"
+        )
+        + "- product commit/push: `없음`\n"
+        + (
+            f"- rollback: `{controller.product_diff_smoke_rollback_command(context.target_root)}`\n"
+            if context.product_execution_enabled
+            else ""
+        )
     )
     _write_external_sidecar_text(context.state_root, outcome.report_path, report_body, label="external autonomy report")
-    _ensure_external_sidecar_file(
-        context.state_root,
-        context.state_root / DEFAULT_LATEST_REPORT_PATH,
-        label="external latest autonomy report",
-    )
-    _ensure_external_sidecar_file(
-        context.state_root,
-        (context.state_root / DEFAULT_LATEST_REPORT_PATH).with_suffix(".tmp"),
-        label="external latest autonomy report temp",
-    )
     write_latest_report(context.state_root, outcome, report_body)
-    _ensure_external_sidecar_file(
-        context.state_root,
-        report_dir / DEFAULT_STATUS_FILENAME,
-        label="external status payload",
-    )
     write_status_payload(
         report_dir,
         {
@@ -8550,16 +8609,14 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
             "source": selection.source,
             "target_id": context.target_id,
             "root_context": context.to_json(),
-            "product_execution": "disabled",
+            "product_execution": "enabled" if context.product_execution_enabled else "disabled",
+            "product_diff_paths": [path.as_posix() for path in product_diff_paths],
+            "product_commit": "disabled",
+            "product_push": "disabled",
             "lane_execution": "not-started",
             "worktree_path": str(context.target_root),
             "state_source": outcome.state_source,
         },
-    )
-    _ensure_external_sidecar_file(
-        context.state_root,
-        context.state_root / context.outbox_path / f"{run_dir.name}.md",
-        label="external operator outbox summary",
     )
     _control_support().write_outbox_summary(
         context.state_root,
@@ -8568,23 +8625,43 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
         result=outcome.status,
         next_recommendation=(
             f"다음 확인: ./harness target status {context.target_id} 또는 "
-            f"./harness target dashboard {context.target_id}. 제품 변경 실행은 아직 비활성화입니다."
+            f"./harness target dashboard {context.target_id}."
+            + (
+                f" product diff rollback: {controller.product_diff_smoke_rollback_command(context.target_root)}"
+                if context.product_execution_enabled
+                else " 제품 변경 실행은 비활성화입니다."
+            )
         ),
         task_title=selection.title,
         report_path=outcome.report_path,
         source=selection.source,
-        changed_paths=[],
-        operator_summary=f"대상 {context.target_id}: 상태 배관 점검이 완료되었습니다.",
-        operator_result="제품 변경 실행은 비활성화이고 lane 실행은 시작하지 않았습니다. product diff/commit/push는 없습니다.",
+        changed_paths=[path.as_posix() for path in product_diff_paths],
+        operator_summary=(
+            f"대상 {context.target_id}: product diff smoke가 완료되었습니다."
+            if context.product_execution_enabled
+            else f"대상 {context.target_id}: 상태 배관 점검이 완료되었습니다."
+        ),
+        operator_result=(
+            "명시 opt-in product diff smoke가 완료됐습니다. commit/push는 없습니다."
+            if context.product_execution_enabled
+            else "제품 변경 실행은 비활성화이고 lane 실행은 시작하지 않았습니다. product diff/commit/push는 없습니다."
+        ),
         operator_next_action=(
             f"다음 확인 명령: ./harness target status {context.target_id} 또는 "
             f"./harness target dashboard {context.target_id}"
+            + (
+                f". 되돌리려면 `{controller.product_diff_smoke_rollback_command(context.target_root)}`"
+                if context.product_execution_enabled
+                else ""
+            )
         ),
         extra_sections={
             "RootContext": (
                 f"- 대상 ID: `{context.target_id}`\n"
                 f"- sidecar state root: `{context.state_root}`\n"
-                "- 제품 변경 실행: `비활성화`\n"
+                f"- 제품 변경 실행: `{'활성화' if context.product_execution_enabled else '비활성화'}`\n"
+                f"- product diff: `{', '.join(path.as_posix() for path in product_diff_paths) if product_diff_paths else '없음'}`\n"
+                "- commit/push: `없음`\n"
                 "- lane 실행: `시작 안 함`"
             )
         },

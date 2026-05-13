@@ -4,4 +4,4 @@
 
 - 비밀값은 환경변수와 ignored `.env` 파일에서만 읽는다.
 - `targets/**`는 controller-local sidecar이며 product repo에 커밋하지 않는다.
-- product-changing external lane execution은 별도 명시 opt-in gate 전까지 켜지 않는다.
+- product-changing external smoke 는 `./harness target run <id> --execute-once` 명시 opt-in 으로만 켜고 commit/push 는 하지 않는다.

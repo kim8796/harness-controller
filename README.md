@@ -1,4 +1,4 @@
-# Harness Controller Bundle v1.8.0
+# Harness Controller Bundle v1.8.1
 
 이 디렉토리는 product repo 밖에서 실행하는 external harness controller 배포 번들이다.
 product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는다.
@@ -20,7 +20,8 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - Set `HARNESS_RELAY_TARGET_IDS=my-app` in the product bot/runtime that enqueues relay commands.
 - Optional: set `HARNESS_RELAY_TARGET_ALIASES=app=my-app` and `HARNESS_RELAY_TARGET_ID=my-app` for `@app` / `@default` selectors.
 - Use `/harness note my-app ...`, `/harness note @app ...`, or `/harness answer @default ...`; the signed canonical target id reaches this controller.
-- The controller drains to `targets/my-app/operator-inbox`; `target run --once` runs a RootContext-aware read-only/no-op smoke with state plumbing and still keeps product-changing execution disabled.
+- The controller drains to `targets/my-app/operator-inbox`; `target run --once` runs a RootContext-aware read-only/no-op smoke with state plumbing.
+- `target run --execute-once` is the explicit product diff smoke and creates only `product-smoke-change.txt` without commit/push.
 
 ## Excluded Live State
 
@@ -122,7 +123,7 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `tests/test_harness_export.py`
 - `tests/test_harness_telegram_bridge.py`
 - `tests/test_redis_relay.py`
-- `docs/harness/releases/v1.8.0.md`
+- `docs/harness/releases/v1.8.1.md`
 
 ## Generated Controller Files
 

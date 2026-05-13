@@ -1,5 +1,13 @@
 # Harness Changelog
 
+## 1.8.1 - 2026-05-13
+
+- Added explicit `./harness target run <target> --execute-once` product diff smoke for external controller targets.
+- Kept `--once` as read-only/no-op and required exactly one run mode.
+- Limited the smoke to one deterministic uncommitted product file, `product-smoke-change.txt`, with no commit or push.
+- Added sidecar evidence/report fields for product diff path, before/after HEAD/status, and rollback guidance.
+- Preserved fail-closed blockers for dirty pre-state, detached HEAD, branch mismatch, harness markers, unexpected product diffs, and product HEAD changes.
+
 ## 1.8.0 - 2026-05-13
 
 - Added RootContext-aware autonomy state plumbing for external controller targets without enabling product-changing lane execution.

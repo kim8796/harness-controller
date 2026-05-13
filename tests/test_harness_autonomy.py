@@ -333,11 +333,13 @@ def test_external_rootcontext_requires_controller_lock_token(tmp_path: Path) -> 
                 str(controller),
                 "--target-id",
                 "demo",
+                "--external-product-execution",
                 "run-once",
                 "--git-backup",
                 "off",
             ]
         )
+    assert not (product / "product-smoke-change.txt").exists()
 
 
 def test_external_rootcontext_rejects_wrong_lock_token(tmp_path: Path) -> None:
