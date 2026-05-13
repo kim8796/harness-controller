@@ -586,6 +586,7 @@ def controller_claude_template() -> str:
         - `./harness target run <id> --plan-once` 는 sidecar backlog 후보만 고르고 product repo 를 변경하지 않는다.
         - `./harness target run <id> --execute-backlog-once` 는 선택 sidecar backlog 에 묶인 local product diff smoke 만 만들고 AI 구현 lane / backlog 완료 / commit / push 는 시작하지 않는다.
         - `./harness target run <id> --implement-backlog-once` 는 선택 sidecar backlog 를 AI implementer 에 넘겨 local product diff 만 만들고 backlog 완료 / commit / push 는 시작하지 않는다.
+        - `./harness target backlog transition <id> --status completed|blocked|manual-review` 는 dry-run first sidecar backlog 상태 변경 gate 다.
         - product-changing external smoke 는 `./harness target run <id> --execute-once` 명시 opt-in 으로만 켠다.
         - `./harness target run <id> --execute-once --commit` 은 deterministic smoke file 을 local commit 으로 닫지만 push 는 하지 않는다.
         - `./harness target run <id> --execute-once --commit --push` 는 advanced smoke 로 registered branch 를 갱신할 수 있으므로 product repo push automation 이 실행될 수 있다.
@@ -938,6 +939,7 @@ def export_controller_bundle(root: Path, output_dir: Path, version: str | None =
                 "- `target run --plan-once` selects the next queued auto sidecar backlog item without changing the product repo.",
                 "- `target run --execute-backlog-once` selects that sidecar backlog item and creates only an uncommitted backlog-bound `product-smoke-change.txt`; it is not full AI implementation, does not complete the backlog, and does not commit or push.",
                 "- `target run --implement-backlog-once` runs one AI implementer lane for that selected sidecar backlog and leaves local product diffs only; it does not complete the backlog, commit, or push.",
+                "- `target backlog transition my-app --status completed --run <run-id>` dry-runs backlog completion; add `--apply` only after reviewing the product diff.",
                 "- Backlog-bound smoke report: `targets/<target_id>/reports/target-run-latest.md`; rollback: `git -C <target_repo> clean -f -- product-smoke-change.txt`.",
                 "- `target run --execute-once` is the explicit product diff smoke and creates only uncommitted `product-smoke-change.txt`.",
                 "- `target run --execute-once --commit` commits exactly that smoke file locally and still does not push.",

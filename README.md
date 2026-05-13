@@ -1,4 +1,4 @@
-# Harness Controller Bundle v1.8.7
+# Harness Controller Bundle v1.8.8
 
 이 디렉토리는 product repo 밖에서 실행하는 external harness controller 배포 번들이다.
 product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는다.
@@ -24,6 +24,7 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `target run --plan-once` selects the next queued auto sidecar backlog item without changing the product repo.
 - `target run --execute-backlog-once` selects that sidecar backlog item and creates only an uncommitted backlog-bound `product-smoke-change.txt`; it is not full AI implementation, does not complete the backlog, and does not commit or push.
 - `target run --implement-backlog-once` runs one AI implementer lane for that selected sidecar backlog and leaves local product diffs only; it does not complete the backlog, commit, or push.
+- `target backlog transition my-app --status completed --run <run-id>` dry-runs backlog completion; add `--apply` only after reviewing the product diff.
 - Backlog-bound smoke report: `targets/<target_id>/reports/target-run-latest.md`; rollback: `git -C <target_repo> clean -f -- product-smoke-change.txt`.
 - `target run --execute-once` is the explicit product diff smoke and creates only uncommitted `product-smoke-change.txt`.
 - `target run --execute-once --commit` commits exactly that smoke file locally and still does not push.
@@ -133,7 +134,7 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `tests/test_harness_export.py`
 - `tests/test_harness_telegram_bridge.py`
 - `tests/test_redis_relay.py`
-- `docs/harness/releases/v1.8.7.md`
+- `docs/harness/releases/v1.8.8.md`
 
 ## Generated Controller Files
 

@@ -1,8 +1,15 @@
 # Harness Framework Version
 
-- Current Version: 1.8.7
+- Current Version: 1.8.8
 - Release Date: 2026-05-13
 - Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + on-demand export output.
+
+## What Changed In 1.8.8
+
+- Added `./harness target backlog transition <target> --status completed|blocked|manual-review` as the explicit sidecar backlog state transition gate for external controller targets.
+- `completed` requires a successful `--implement-backlog-once` evidence run, unchanged product HEAD, matching local product diff paths, and the same queued auto sidecar backlog.
+- Dry-run is the default; `--apply` mutates only `targets/<id>/backlog/**` and writes transition receipt/evidence under the target sidecar.
+- Product commit, product push, Telegram-triggered execution, and automatic backlog completion from implementation runs remain disabled.
 
 ## What Changed In 1.8.7
 

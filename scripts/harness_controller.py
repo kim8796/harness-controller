@@ -10,7 +10,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 
 TARGET_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -40,6 +40,7 @@ PRODUCT_IMPLEMENTATION_ROLLBACK_CAUTION = (
     "This implementation gate leaves local product changes uncommitted. Review `git status --short` "
     "and revert only the intended product diff; no automatic rollback is performed."
 )
+BACKLOG_TRANSITION_STATUSES = ("completed", "blocked", "manual-review")
 PRODUCT_HARNESS_MARKERS = (
     Path("harness"),
     Path("HARNESS.md"),
@@ -502,6 +503,19 @@ def _prepare_sidecar_file_for_write(*, state_root: Path, path: Path, label: str)
     resolved_path = path.resolve(strict=False)
     if not _path_is_relative_to(resolved_path, resolved_state):
         raise ControllerError(f"{label} must stay inside target sidecar")
+    return path
+
+
+def _prepare_sidecar_directory_for_write(*, state_root: Path, path: Path, label: str) -> Path:
+    resolved_state = state_root.resolve()
+    if path.is_symlink():
+        raise ControllerError(f"{label} must not be a symlink")
+    if path.exists() and not path.is_dir():
+        raise ControllerError(f"{label} must be a directory")
+    resolved_path = path.resolve(strict=False)
+    if not _path_is_relative_to(resolved_path, resolved_state):
+        raise ControllerError(f"{label} must stay inside target sidecar")
+    path.mkdir(parents=True, exist_ok=True)
     return path
 
 
@@ -1030,6 +1044,340 @@ def target_status_paths(status_lines: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
+def _safe_evidence_run_id(run_id: str) -> str:
+    text = str(run_id or "").strip()
+    if not text:
+        raise ControllerError("transition run id is required")
+    candidate = Path(text)
+    if candidate.name != text or candidate.is_absolute() or ".." in candidate.parts:
+        raise ControllerError("transition run id must be a run directory name")
+    return text
+
+
+def _single_line_metadata(value: str) -> str:
+    return " ".join(str(value or "").strip().split())
+
+
+def _read_json_file(path: Path, *, label: str) -> dict[str, Any]:
+    if path.is_symlink():
+        raise ControllerError(f"{label} must not be a symlink")
+    if not path.exists() or not path.is_file():
+        raise ControllerError(f"{label} is missing")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ControllerError(f"{label} is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ControllerError(f"{label} must be a JSON object")
+    return payload
+
+
+def _write_sidecar_json(state_root: Path, path: Path, payload: Mapping[str, Any], *, label: str) -> None:
+    target = _prepare_sidecar_file_for_write(state_root=state_root, path=path, label=label)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _write_sidecar_text(state_root: Path, path: Path, text: str, *, label: str) -> None:
+    target = _prepare_sidecar_file_for_write(state_root=state_root, path=path, label=label)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+
+
+def _sidecar_relative(state_paths: StatePaths, path: Path) -> Path:
+    try:
+        return path.resolve(strict=False).relative_to(state_paths.state_root.resolve())
+    except ValueError as exc:
+        raise ControllerError("sidecar backlog path must stay inside target sidecar") from exc
+
+
+def _discover_sidecar_backlog_item(state_paths: StatePaths, backlog_ref: str):
+    import harness_loop
+
+    ref = str(backlog_ref or "").strip()
+    if not ref:
+        raise ControllerError("backlog reference is required")
+    validate_sidecar_backlog_integrity(state_paths)
+    try:
+        items = harness_loop.discover_backlog_items(state_paths.state_root)
+    except Exception as exc:
+        raise ControllerError(f"sidecar backlog metadata is not readable: {exc}") from exc
+    matches = [
+        item
+        for item in items
+        if str(item.item_id) == ref
+        or item.path.as_posix() == ref
+        or (state_paths.state_root / item.path).as_posix() == ref
+    ]
+    if not matches:
+        raise ControllerError(f"sidecar backlog item not found: {ref}")
+    unique_paths = {item.path.as_posix() for item in matches}
+    if len(unique_paths) != 1:
+        raise ControllerError(f"sidecar backlog reference is ambiguous: {ref}")
+    return matches[0]
+
+
+def _load_transition_run_evidence(state_paths: StatePaths, run_id: str) -> tuple[dict[str, Any], Path]:
+    safe_run_id = _safe_evidence_run_id(run_id)
+    evidence_path = state_paths.state_root / "runs" / "harness" / safe_run_id / "generated-evidence.json"
+    if not _path_is_relative_to(evidence_path.resolve(strict=False), state_paths.state_root.resolve()):
+        raise ControllerError("transition evidence path must stay inside target sidecar")
+    return _read_json_file(evidence_path, label="transition generated evidence"), evidence_path
+
+
+def _completed_transition_backlog_ref_from_evidence(
+    record: TargetRecord,
+    state_paths: StatePaths,
+    run_id: str,
+) -> tuple[str, dict[str, Any], Path]:
+    evidence, evidence_path = _load_transition_run_evidence(state_paths, run_id)
+    root_context = evidence.get("root_context")
+    if not isinstance(root_context, Mapping):
+        raise ControllerError("transition evidence is missing root_context")
+    evidence_target = str(root_context.get("target_id") or "")
+    if evidence_target != record.target_id:
+        raise ControllerError("transition evidence target_id does not match target")
+    evidence_state_root = str(root_context.get("state_root") or "")
+    if evidence_state_root and Path(evidence_state_root).resolve() != state_paths.state_root.resolve():
+        raise ControllerError("transition evidence state_root does not match target")
+    checks = {
+        "status": "pass",
+        "product_execution": "enabled",
+        "product_implementation": "enabled",
+        "product_commit": "disabled",
+        "product_push": "disabled",
+        "lane_execution": "backlog-implementation",
+    }
+    for field, expected in checks.items():
+        if str(evidence.get(field) or "") != expected:
+            raise ControllerError(f"transition evidence `{field}` must be `{expected}`")
+    before_head = str(evidence.get("product_head_before") or "")
+    after_head = str(evidence.get("product_head_after") or "")
+    if not before_head or before_head != after_head:
+        raise ControllerError("transition evidence must leave product HEAD unchanged")
+    current_head = target_git_head(record.repo)
+    if current_head != after_head:
+        raise ControllerError("target product HEAD changed after implementation evidence")
+    expected_paths = [str(path) for path in evidence.get("product_diff_paths") or [] if str(path)]
+    if not expected_paths:
+        raise ControllerError("transition evidence has no product diff paths")
+    current_status = target_git_status_lines(record.repo)
+    current_paths = target_status_paths(current_status)
+    if current_paths != expected_paths:
+        raise ControllerError("target product diff no longer matches implementation evidence")
+    verification = verify_target(record)
+    post_blockers = [blocker for blocker in target_run_blockers(verification) if blocker != "target-git-dirty"]
+    if post_blockers:
+        raise ControllerError("target verification blocks backlog completion: " + ", ".join(post_blockers))
+    backlog_payload = evidence.get("external_backlog")
+    if not isinstance(backlog_payload, Mapping):
+        raise ControllerError("transition evidence is missing external_backlog")
+    backlog_id = str(backlog_payload.get("id") or "").strip()
+    backlog_path = str(backlog_payload.get("path") or "").strip()
+    if not backlog_id or not backlog_path:
+        raise ControllerError("transition evidence external_backlog is incomplete")
+    if not backlog_path.startswith("backlog/queued/"):
+        raise ControllerError("completed transition evidence must point to queued sidecar backlog")
+    return backlog_path, evidence, evidence_path
+
+
+def _allocate_transition_run_dir(state_paths: StatePaths) -> Path:
+    runs_root = _prepare_sidecar_directory_for_write(
+        state_root=state_paths.state_root,
+        path=state_paths.state_root / "runs" / "harness",
+        label="backlog transition evidence root",
+    )
+    base = f"external-{state_paths.target_id}-backlog-transition-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    candidate = runs_root / base
+    suffix = 1
+    while candidate.exists():
+        suffix += 1
+        candidate = runs_root / f"{base}-{suffix}"
+    return _prepare_sidecar_directory_for_write(
+        state_root=state_paths.state_root,
+        path=candidate,
+        label="backlog transition evidence directory",
+    )
+
+
+def _update_backlog_metadata(path: Path, updates: Mapping[str, str]) -> None:
+    from harness_autonomy import update_backlog_metadata
+
+    update_backlog_metadata(path, **dict(updates))
+
+
+def _move_backlog_item_if_needed(state_paths: StatePaths, source_rel: Path, target_state: str) -> Path:
+    from harness_autonomy import move_backlog_item_if_needed
+
+    source_path = state_paths.state_root / source_rel
+    destination = state_paths.state_root / "backlog" / target_state / source_path.name
+    if destination.exists() and destination.resolve() != source_path.resolve():
+        raise ControllerError(f"target backlog destination already exists: {destination.relative_to(state_paths.state_root)}")
+    return move_backlog_item_if_needed(state_paths.state_root, source_rel, target_state)
+
+
+def transition_sidecar_backlog(
+    *,
+    controller_root: Path,
+    record: TargetRecord,
+    status: str,
+    reason: str,
+    apply: bool = False,
+    run_id: str | None = None,
+    backlog_ref: str | None = None,
+) -> dict[str, Any]:
+    target_status = str(status or "").strip()
+    if target_status not in BACKLOG_TRANSITION_STATUSES:
+        raise ControllerError("backlog transition status must be completed, blocked, or manual-review")
+    reason_text = _single_line_metadata(reason)
+    if not reason_text:
+        raise ControllerError("backlog transition reason is required")
+    state_paths = record.state_paths(controller_root)
+    validate_sidecar_backlog_integrity(state_paths)
+    evidence: dict[str, Any] | None = None
+    evidence_path: Path | None = None
+    resolved_ref = str(backlog_ref or "").strip()
+    if target_status == "completed":
+        if not run_id:
+            raise ControllerError("completed backlog transition requires --run")
+        resolved_ref, evidence, evidence_path = _completed_transition_backlog_ref_from_evidence(record, state_paths, run_id)
+    elif run_id and not resolved_ref:
+        evidence, evidence_path = _load_transition_run_evidence(state_paths, run_id)
+        backlog_payload = evidence.get("external_backlog")
+        if isinstance(backlog_payload, Mapping):
+            resolved_ref = str(backlog_payload.get("path") or backlog_payload.get("id") or "").strip()
+    if not resolved_ref:
+        raise ControllerError("blocked/manual-review transition requires --backlog or evidence with external_backlog")
+    item = _discover_sidecar_backlog_item(state_paths, resolved_ref)
+    source_rel = item.path
+    source_path = state_paths.state_root / source_rel
+    if target_status == "completed":
+        if str(item.status) != "queued" or str(item.autonomy_execute) != "auto":
+            raise ControllerError("completed transition requires queued Autonomy-Execute auto backlog")
+        target_state = "completed"
+        metadata_updates = {
+            "Status": "completed",
+            "Completed-Run": _safe_evidence_run_id(str(run_id or "")),
+            "Completion-Reason": reason_text,
+            "Product-Diff-Paths": ", ".join(str(path) for path in (evidence or {}).get("product_diff_paths", []) if str(path)),
+            "Updated": datetime.now().strftime("%Y-%m-%d"),
+        }
+    elif target_status == "blocked":
+        if str(item.status) == "completed":
+            raise ControllerError("completed backlog cannot be moved to blocked by this gate")
+        target_state = "blocked"
+        metadata_updates = {
+            "Status": "blocked",
+            "Autonomy-Execute": "manual-review",
+            "Blocked-Reason": reason_text,
+            "Updated": datetime.now().strftime("%Y-%m-%d"),
+        }
+        if run_id:
+            metadata_updates["Blocked-Run"] = _safe_evidence_run_id(run_id)
+    else:
+        if str(item.status) == "completed":
+            raise ControllerError("completed backlog cannot be moved to manual-review by this gate")
+        target_state = "queued"
+        metadata_updates = {
+            "Status": "queued",
+            "Autonomy-Execute": "manual-review",
+            "Manual-Review-Reason": reason_text,
+            "Updated": datetime.now().strftime("%Y-%m-%d"),
+        }
+        if run_id:
+            metadata_updates["Manual-Review-Run"] = _safe_evidence_run_id(run_id)
+    target_rel = Path("backlog") / target_state / source_path.name
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "target_id": record.target_id,
+        "status": target_status,
+        "applied": bool(apply),
+        "reason": reason_text,
+        "source_path": source_rel.as_posix(),
+        "target_path": target_rel.as_posix(),
+        "backlog_id": str(item.item_id),
+        "backlog_title": str(item.title),
+        "run_id": _safe_evidence_run_id(run_id) if run_id else "",
+        "evidence_path": evidence_path.as_posix() if evidence_path is not None else "",
+        "product_diff_paths": [str(path) for path in (evidence or {}).get("product_diff_paths", []) if str(path)],
+        "product_head": str((evidence or {}).get("product_head_after") or ""),
+        "receipt_path": "",
+        "generated_evidence_path": "",
+    }
+    if not apply:
+        return payload
+
+    moved_rel = _move_backlog_item_if_needed(state_paths, source_rel, target_state)
+    moved_path = state_paths.state_root / moved_rel
+    _update_backlog_metadata(moved_path, metadata_updates)
+    run_dir = _allocate_transition_run_dir(state_paths)
+    applied_payload = dict(payload)
+    applied_payload.update(
+        {
+            "applied": True,
+            "target_path": moved_rel.as_posix(),
+            "receipt_path": (run_dir / "state-apply-receipt.json").as_posix(),
+            "generated_evidence_path": (run_dir / "generated-evidence.json").as_posix(),
+            "applied_at": datetime.now().isoformat(timespec="seconds"),
+            "metadata_updates": metadata_updates,
+        }
+    )
+    _write_sidecar_json(
+        state_paths.state_root,
+        run_dir / "state-apply-receipt.json",
+        applied_payload,
+        label="backlog transition receipt",
+    )
+    _write_sidecar_json(
+        state_paths.state_root,
+        run_dir / "generated-evidence.json",
+        applied_payload,
+        label="backlog transition generated evidence",
+    )
+    _write_sidecar_text(
+        state_paths.state_root,
+        run_dir / "generated-evidence.md",
+        "\n".join(
+            [
+                "# Generated Evidence",
+                "",
+                f"- Target ID: `{record.target_id}`",
+                f"- Transition: `{target_status}`",
+                "- Applied: `true`",
+                f"- Backlog: `{item.item_id}`",
+                f"- Source path: `{source_rel.as_posix()}`",
+                f"- Target path: `{moved_rel.as_posix()}`",
+                f"- Run ID: `{applied_payload['run_id'] or 'none'}`",
+                f"- Reason: `{reason_text}`",
+                f"- Product diff paths: `{', '.join(applied_payload['product_diff_paths']) if applied_payload['product_diff_paths'] else 'none'}`",
+                "",
+            ]
+        ),
+        label="backlog transition generated evidence markdown",
+    )
+    _write_sidecar_text(
+        state_paths.state_root,
+        run_dir / "report.md",
+        "\n".join(
+            [
+                "# External Backlog Transition",
+                "",
+                f"- Target: `{record.target_id}`",
+                f"- Backlog: `{item.item_id}`",
+                f"- Transition: `{target_status}`",
+                f"- Source: `{source_rel.as_posix()}`",
+                f"- Target: `{moved_rel.as_posix()}`",
+                f"- Reason: `{reason_text}`",
+                "- Product commit/push: `none`",
+                "- Mutation scope: `controller sidecar backlog only`",
+                "",
+            ]
+        ),
+        label="backlog transition report",
+    )
+    return applied_payload
+
+
 def product_implementation_rollback_guidance(target_root: Path, status_lines: Sequence[str]) -> list[str]:
     paths = target_status_paths(status_lines)
     if not paths:
@@ -1170,6 +1518,7 @@ def write_dashboard(*, controller_root: Path, record: TargetRecord, verification
             "- `target run --execute-once --commit` 은 그 smoke 파일만 local commit 으로 닫고 push 하지 않는다.",
             "- `target run --execute-once --commit --push` 는 advanced smoke 로 remote branch 를 갱신할 수 있다.",
             "- push smoke 는 deploy 명령이 아니지만 product repo 의 push-triggered automation 은 실행될 수 있다.",
+            "- `target backlog transition` 은 implementation evidence 를 검증한 뒤 sidecar backlog 상태만 바꾸는 dry-run-first gate 다.",
             "- 일반 product-changing autonomy lane 과 deployment 는 아직 별도 gate 전까지 비활성화돼 있다.",
             "- Telegram 지시는 target-aware relay 가 `targets/<id>/operator-inbox` 로 materialize 한다.",
             "- operator selector 는 canonical id 또는 `@alias`, `@default` 를 쓸 수 있지만 sidecar/Redis/signature 에는 canonical target id 만 남긴다.",
@@ -1317,6 +1666,7 @@ def write_target_run_smoke_report(
             "- `--plan-once` smoke 는 sidecar backlog 후보만 고르고 product repo 를 변경하지 않는다.",
             "- `--execute-backlog-once` smoke 는 선택 sidecar backlog 에 묶인 deterministic product diff 만 만들며 backlog 를 완료 처리하지 않는다.",
             "- `--implement-backlog-once` 는 선택 sidecar backlog 를 AI implementer 에 넘겨 local product diff 만 만들며 backlog 완료/commit/push 는 하지 않는다.",
+            "- `target backlog transition` 은 implementation evidence 를 검증한 뒤 sidecar backlog 상태만 바꾸는 별도 dry-run-first gate 다.",
             "- `--execute-once` smoke 는 명시 opt-in 일 때만 product diff 를 만든다.",
             "- `--execute-once --commit` smoke 는 deterministic product diff 를 local commit 으로 닫지만 push 하지 않는다.",
             "- `--execute-once --commit --push` smoke 는 remote branch 를 갱신하는 externally visible 검증이다.",

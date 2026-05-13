@@ -1116,6 +1116,47 @@ def command_target_dashboard(args: argparse.Namespace) -> int:
         return 2
 
 
+def command_target_backlog_transition(args: argparse.Namespace) -> int:
+    try:
+        record = _resolve_controller_target(args.target)
+        payload = harness_controller.transition_sidecar_backlog(
+            controller_root=repo_root(),
+            record=record,
+            status=args.status,
+            reason=args.reason,
+            apply=bool(args.apply),
+            run_id=args.run,
+            backlog_ref=args.backlog,
+        )
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+        action = "적용 완료" if payload["applied"] else "dry-run 완료"
+        print(f"external target backlog transition {action}")
+        print(f"- 대상 ID: `{payload['target_id']}`")
+        print(f"- backlog: `{payload['backlog_id']}`")
+        print(f"- 상태 전환: `{payload['status']}`")
+        print(f"- source: `{payload['source_path']}`")
+        print(f"- target: `{payload['target_path']}`")
+        print(f"- reason: {payload['reason']}")
+        if payload.get("run_id"):
+            print(f"- evidence run: `{payload['run_id']}`")
+        if payload.get("product_diff_paths"):
+            print(f"- product diff: {', '.join(payload['product_diff_paths'])}")
+        print("- product commit/push: 없음")
+        print("- product repo 변경: 없음")
+        print("- mutation scope: controller sidecar backlog only")
+        if payload["applied"]:
+            print(f"- receipt: `{payload['receipt_path']}`")
+            print(f"- generated evidence: `{payload['generated_evidence_path']}`")
+        else:
+            print("- apply하려면 같은 명령에 `--apply`를 붙이세요.")
+        return 0
+    except harness_controller.ControllerError as exc:
+        print(f"error: {exc}")
+        return 2
+
+
 def _run_target_autonomy_state_plumbing(
     record: harness_controller.TargetRecord,
     *,
@@ -1369,6 +1410,8 @@ def command_target_run(args: argparse.Namespace) -> int:
                 raise harness_controller.ControllerError(
                     "target push remote head does not match local HEAD; fetch/rebase before smoke push"
                 )
+        evidence_root = record.state_root / "runs" / "harness"
+        evidence_before = set(evidence_root.glob("*/generated-evidence.json")) if evidence_root.exists() else set()
         plumbing_result = _run_target_autonomy_state_plumbing(
             record,
             lock=lock,
@@ -1381,6 +1424,9 @@ def command_target_run(args: argparse.Namespace) -> int:
             runner_model=getattr(args, "runner_model", "auto"),
             command_template=getattr(args, "command_template", None),
         )
+        evidence_after = set(evidence_root.glob("*/generated-evidence.json")) if evidence_root.exists() else set()
+        new_evidence_paths = sorted(evidence_after - evidence_before)
+        new_evidence_run_id = new_evidence_paths[0].parent.name if len(new_evidence_paths) == 1 else ""
         after_status = harness_controller.target_git_status_lines(record.repo)
         after_head = harness_controller.target_git_head(record.repo)
         expected_after_status = (
@@ -1552,6 +1598,8 @@ def command_target_run(args: argparse.Namespace) -> int:
         print(f"- 대상 ID: `{record.target_id}`")
         if (backlog_execution or implementation_execution) and planned_backlog:
             print(f"- 선택 backlog: `{planned_backlog['id']}` (`{planned_backlog['path']}`)")
+        if new_evidence_run_id:
+            print(f"- evidence run: `{new_evidence_run_id}`")
         print(f"- dashboard: `{report.as_posix()}`")
         print(f"- smoke report: `{smoke_report.as_posix()}`")
         print(f"- lock: acquired/released `{lock.path.as_posix()}`")
@@ -1582,6 +1630,13 @@ def command_target_run(args: argparse.Namespace) -> int:
                 print("- product commit/push: 없음")
                 if backlog_execution or implementation_execution:
                     print("- backlog 상태 변경: 없음")
+                    if implementation_execution and planned_backlog and new_evidence_run_id:
+                        print(
+                            "- backlog transition dry-run: "
+                            f"`./harness target backlog transition {record.target_id} "
+                            f"--status completed --run {new_evidence_run_id} "
+                            "--reason \"implementation accepted\"`"
+                        )
             if rollback_guidance:
                 print(f"- rollback: `{rollback_guidance[0]}`")
                 if product_commit and not product_push:
@@ -2019,6 +2074,25 @@ def build_parser() -> argparse.ArgumentParser:
     target_alias_list = target_alias_subparsers.add_parser("list", help="List aliases for all targets.")
     target_alias_list.add_argument("--json", action="store_true")
     target_alias_list.set_defaults(func=command_target_alias_list)
+    target_backlog = target_subparsers.add_parser("backlog", help="Manage external target sidecar backlog state.")
+    target_backlog_subparsers = target_backlog.add_subparsers(dest="target_backlog_command", required=True)
+    target_backlog_transition = target_backlog_subparsers.add_parser(
+        "transition",
+        help="Dry-run or apply an explicit sidecar backlog state transition.",
+    )
+    target_backlog_transition.add_argument("target", help=target_selector_help)
+    target_backlog_transition.add_argument(
+        "--status",
+        required=True,
+        choices=harness_controller.BACKLOG_TRANSITION_STATUSES,
+        help="Target backlog state: completed, blocked, or manual-review.",
+    )
+    target_backlog_transition.add_argument("--run", help="Implementation run id with generated-evidence.json.")
+    target_backlog_transition.add_argument("--backlog", help="Backlog id or sidecar-relative backlog path.")
+    target_backlog_transition.add_argument("--reason", required=True, help="Short operator-visible transition reason.")
+    target_backlog_transition.add_argument("--apply", action="store_true", help="Apply the transition; default is dry-run.")
+    target_backlog_transition.add_argument("--json", action="store_true")
+    target_backlog_transition.set_defaults(func=command_target_backlog_transition)
     target_set_default = target_subparsers.add_parser("set-default", help="Set explicit @default selector for read-only convenience.")
     target_set_default.add_argument("target_id", help=target_id_help)
     target_set_default.set_defaults(func=command_target_set_default)

@@ -1,5 +1,12 @@
 # Harness Changelog
 
+## 1.8.8 - 2026-05-13
+
+- Added `./harness target backlog transition <target> --status completed|blocked|manual-review` for explicit external controller sidecar backlog state changes after implementation evidence.
+- Completion requires a passing `--implement-backlog-once` run, unchanged product HEAD, matching product diff paths, and the same queued auto sidecar backlog.
+- Kept the command dry-run by default; `--apply` writes only controller sidecar backlog metadata/path changes plus sidecar transition receipt/evidence.
+- Kept product commit/push, Telegram-triggered execution, and automatic backlog completion disabled.
+
 ## 1.8.7 - 2026-05-13
 
 - Added `requirements.txt` to controller export so the private controller repo CI can run `python -m pip install -r requirements.txt` from a clean clone.

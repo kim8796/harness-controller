@@ -945,6 +945,251 @@ def test_external_target_run_implement_backlog_once_creates_local_product_diff_o
     assert not (controller / "targets" / "demo" / "locks" / "target-run.lock").exists()
 
 
+def test_external_target_backlog_transition_completed_is_explicit_sidecar_only(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    head_before = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.strip()
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.7")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    backlog = _write_sidecar_backlog(controller)
+    capsys.readouterr()
+    command = "printf 'implemented\\n' > feature.txt && printf 'Implementation done\\n'"
+    assert (
+        module.main(
+            [
+                "target",
+                "run",
+                "demo",
+                "--implement-backlog-once",
+                "--runner",
+                "custom",
+                "--command-template",
+                command,
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    evidence_path = next((controller / "targets" / "demo" / "runs" / "harness").glob("*/generated-evidence.json"))
+    run_id = evidence_path.parent.name
+
+    assert (
+        module.main(
+            [
+                "target",
+                "backlog",
+                "transition",
+                "demo",
+                "--status",
+                "completed",
+                "--run",
+                run_id,
+                "--reason",
+                "implementation accepted",
+            ]
+        )
+        == 0
+    )
+    dry_run_output = capsys.readouterr().out
+    assert "dry-run 완료" in dry_run_output
+    assert backlog.exists()
+    assert not (controller / "targets" / "demo" / "backlog" / "completed" / "BL-demo.md").exists()
+
+    assert (
+        module.main(
+            [
+                "target",
+                "backlog",
+                "transition",
+                "demo",
+                "--status",
+                "completed",
+                "--run",
+                run_id,
+                "--reason",
+                "implementation accepted",
+                "--apply",
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    completed = controller / "targets" / "demo" / "backlog" / "completed" / "BL-demo.md"
+    body = completed.read_text(encoding="utf-8")
+    status_after = subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.splitlines()
+    head_after = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.strip()
+
+    assert "적용 완료" in output
+    assert "mutation scope: controller sidecar backlog only" in output
+    assert not backlog.exists()
+    assert completed.exists()
+    assert "Status: completed" in body
+    assert f"Completed-Run: {run_id}" in body
+    assert "Completion-Reason: implementation accepted" in body
+    assert "Product-Diff-Paths: feature.txt" in body
+    assert status_after == ["?? feature.txt"]
+    assert head_before == head_after
+    assert (product / "feature.txt").read_text(encoding="utf-8") == "implemented\n"
+    _assert_no_product_harness_pollution(product)
+    transition_receipts = list((controller / "targets" / "demo" / "runs" / "harness").glob("*/state-apply-receipt.json"))
+    assert transition_receipts
+    receipt = json.loads(transition_receipts[0].read_text(encoding="utf-8"))
+    assert receipt["status"] == "completed"
+    assert receipt["target_path"] == "backlog/completed/BL-demo.md"
+
+
+def test_external_target_backlog_transition_completed_rejects_stale_product_diff(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.7")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    backlog = _write_sidecar_backlog(controller)
+    capsys.readouterr()
+    command = "printf 'implemented\\n' > feature.txt && printf 'Implementation done\\n'"
+    assert (
+        module.main(
+            [
+                "target",
+                "run",
+                "demo",
+                "--implement-backlog-once",
+                "--runner",
+                "custom",
+                "--command-template",
+                command,
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    evidence_path = next((controller / "targets" / "demo" / "runs" / "harness").glob("*/generated-evidence.json"))
+    run_id = evidence_path.parent.name
+    (product / "feature.txt").unlink()
+
+    assert (
+        module.main(
+            [
+                "target",
+                "backlog",
+                "transition",
+                "demo",
+                "--status",
+                "completed",
+                "--run",
+                run_id,
+                "--reason",
+                "implementation accepted",
+                "--apply",
+            ]
+        )
+        == 2
+    )
+    output = capsys.readouterr().out
+
+    assert "product diff no longer matches" in output
+    assert backlog.exists()
+    assert not (controller / "targets" / "demo" / "backlog" / "completed" / "BL-demo.md").exists()
+
+
+def test_external_target_backlog_transition_manual_review_updates_sidecar_only(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.7")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    backlog = _write_sidecar_backlog(controller)
+    capsys.readouterr()
+
+    assert (
+        module.main(
+            [
+                "target",
+                "backlog",
+                "transition",
+                "demo",
+                "--status",
+                "manual-review",
+                "--backlog",
+                "BL-demo",
+                "--reason",
+                "needs owner review",
+                "--apply",
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    body = backlog.read_text(encoding="utf-8")
+
+    assert "적용 완료" in output
+    assert backlog.exists()
+    assert "Status: queued" in body
+    assert "Autonomy-Execute: manual-review" in body
+    assert "Manual-Review-Reason: needs owner review" in body
+    assert subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout == ""
+    _assert_no_product_harness_pollution(product)
+
+
 def test_external_target_run_implement_backlog_once_blocks_harness_pollution(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
