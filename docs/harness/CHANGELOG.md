@@ -1,5 +1,13 @@
 # Harness Changelog
 
+## 1.8.16 - 2026-05-14
+
+- Added beginner `./harness finish` for the post-run external controller path.
+- Bare `finish` is read-only and shows the latest implementation run, backlog, product diff paths, and next safe command.
+- `finish --apply` completes sidecar backlog state through the existing transition gate.
+- `finish --commit --message "<msg>"` and `finish --push` stay dry-run-first; adding `--apply` delegates to the existing commit/push gates.
+- Moved implementation evidence discovery into `scripts/harness_controller.py` so the CLI remains a thin wrapper.
+
 ## 1.8.15 - 2026-05-14
 
 - Made beginner task intake start with a guided interview from bare `./harness task`, while keeping `task draft|from|review|queue` available for advanced/manual flows.

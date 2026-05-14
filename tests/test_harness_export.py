@@ -344,6 +344,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "docs" / "harness" / "releases" / "v1.8.13.md").exists()
     assert (bundle / "docs" / "harness" / "releases" / "v1.8.14.md").exists()
     assert (bundle / "docs" / "harness" / "releases" / "v1.8.15.md").exists()
+    assert (bundle / "docs" / "harness" / "releases" / "v1.8.16.md").exists()
     assert not (bundle / "coverage-summary.txt").exists()
     assert not (bundle / "targets").exists()
     assert not (bundle / ".env").exists()
@@ -359,10 +360,16 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "./harness task review latest" in readme
     assert "./harness task review latest --ai" in readme
     assert "./harness task queue latest --auto" in readme
+    assert "./harness finish" in readme
     assert "`./harness run` 은 default target" in readme
+    assert "`./harness finish` 는 run 이후 남은 backlog 완료/commit/push 단계" in readme
+    assert "finish 순서: `./harness finish --apply`" in readme
+    assert "자동 remote rollback 은 없다" in readme
     assert "`./harness task` 는 guided interview" in readme
     assert "`./harness task review --ai` 는 packet-local AI prompt/schema artifact" in readme
     assert "Bare `./harness run` maps to `target run @default --implement-backlog-once`" in readme
+    assert "Bare `./harness finish` maps to a read-only summary" in readme
+    assert "finish --push --apply" in readme
     assert "./harness smoke implementation" in readme
     assert "HARNESS_RELAY_TARGET_IDS=my-app" in readme
     assert "HARNESS_RELAY_TARGET_ALIASES=app=my-app" in readme
@@ -496,6 +503,14 @@ def test_exported_controller_beginner_flow_runs_from_bundle(tmp_path: Path) -> N
         capture_output=True,
         env=_git_env(),
     )
+    finish_result = subprocess.run(
+        [str(harness), "finish"],
+        cwd=bundle,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    )
 
     head_after = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -516,6 +531,8 @@ def test_exported_controller_beginner_flow_runs_from_bundle(tmp_path: Path) -> N
 
     assert head_after == head_before
     assert status_after == [" M README.md"]
+    assert "하네스 finish" in finish_result.stdout
+    assert "다음 명령: `./harness finish --apply`" in finish_result.stdout
     assert (bundle / "targets" / "demo" / "backlog" / "queued").exists()
     preview = bundle / "targets" / "demo" / "backlog" / "drafts" / "task-demo" / "backlog-preview.md"
     assert "caption: Smoke reference image" in preview.read_text(encoding="utf-8")

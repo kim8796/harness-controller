@@ -38,6 +38,7 @@ UNSAFE_GLOBAL_SHIM_DIRS = (
     Path("/usr/local/bin"),
     Path("/opt/homebrew/bin"),
 )
+FINISH_PUSH_CAUTION_KO = "remote push는 배포나 외부 자동화를 트리거할 수 있고 자동 remote rollback은 없습니다."
 
 
 class HarnessCliError(RuntimeError):
@@ -52,6 +53,17 @@ class CommandResult:
     env_path: Path | None
     applied: bool
     profile: str
+
+
+@dataclass(frozen=True)
+class FinishEvidence:
+    run_id: str
+    path: Path
+    backlog_id: str
+    backlog_title: str
+    product_diff_paths: tuple[str, ...]
+    backlog_status: str
+    matching_commit_receipt: bool
 
 
 def repo_root() -> Path:
@@ -1045,6 +1057,162 @@ def command_run(args: argparse.Namespace) -> int:
             push=False,
         )
     )
+
+
+def _find_finish_evidence(record: harness_controller.TargetRecord, run_id: str | None) -> FinishEvidence:
+    try:
+        resolved = harness_controller.find_target_implementation_evidence(
+            controller_root=repo_root(),
+            record=record,
+            run_id=run_id,
+        )
+    except harness_controller.ControllerError as exc:
+        detail = str(exc)
+        if "multiple completed external implementation evidence runs found" in detail:
+            candidate_suffix = ""
+            if "candidates:" in detail:
+                candidate_suffix = " 후보: `" + detail.split("candidates:", 1)[1].strip() + "`."
+            raise HarnessCliError(
+                "완료할 구현 기록이 여러 개입니다."
+                f"{candidate_suffix} `./harness finish --target {record.target_id} --run <run-id>`로 지정하세요."
+            )
+        raise HarnessCliError("완료할 구현 기록이 없습니다. 먼저 `./harness run`을 실행하세요.")
+    return FinishEvidence(
+        run_id=str(resolved.get("run_id") or ""),
+        path=Path(str(resolved.get("evidence_path") or "")),
+        backlog_id=str(resolved.get("backlog_id") or ""),
+        backlog_title=str(resolved.get("backlog_title") or ""),
+        product_diff_paths=tuple(str(path) for path in resolved.get("product_diff_paths") or [] if str(path)),
+        backlog_status=str(resolved.get("backlog_status") or "unknown"),
+        matching_commit_receipt=bool(resolved.get("matching_commit_receipt")),
+    )
+
+
+def _finish_backlog_status(record: harness_controller.TargetRecord, evidence: FinishEvidence) -> str:
+    return evidence.backlog_status
+
+
+def _render_finish_intro(record: harness_controller.TargetRecord, evidence: FinishEvidence) -> None:
+    print("하네스 finish")
+    print(f"- 대상: `{record.target_id}`")
+    print(f"- 구현 기록: `{evidence.run_id}`")
+    print(f"- 작업 항목: `{evidence.backlog_id}`" + (f" - {evidence.backlog_title}" if evidence.backlog_title else ""))
+    print(f"- 제품 변경 파일: {', '.join(evidence.product_diff_paths) if evidence.product_diff_paths else '없음'}")
+    print("- 기본 동작: 상태 점검만 수행")
+
+
+def command_finish(args: argparse.Namespace) -> int:
+    stage_flags = [bool(args.complete), bool(args.commit), bool(args.push)]
+    if sum(1 for flag in stage_flags if flag) > 1:
+        print("error: `finish`는 `--complete`, `--commit`, `--push` 중 한 단계만 한 번에 실행합니다.")
+        return 2
+    if args.commit and not args.message:
+        print("error: `./harness finish --commit`에는 `--message \"...\"`가 필요합니다.")
+        return 2
+    if not args.commit and args.message:
+        print("error: `--message`는 `--commit`과 함께만 사용합니다.")
+        return 2
+    try:
+        record = _resolve_controller_target(args.target)
+        evidence = _find_finish_evidence(record, args.run)
+        _render_finish_intro(record, evidence)
+        reason = args.reason or "implementation accepted"
+        if args.complete or (args.apply and not (args.commit or args.push)):
+            payload = harness_controller.transition_sidecar_backlog(
+                controller_root=repo_root(),
+                record=record,
+                status="completed",
+                reason=reason,
+                run_id=evidence.run_id,
+                apply=bool(args.apply),
+            )
+            if payload["applied"]:
+                print("finish 적용 완료: backlog 상태를 completed로 전환했습니다.")
+                print(f"- receipt: `{payload['receipt_path']}`")
+                print("다음 확인 명령: `./harness finish --commit --message \"feat: ...\"`")
+                print("실제 local commit: `./harness finish --commit --message \"feat: ...\" --apply`")
+            else:
+                print("finish complete dry-run 완료")
+                print("- product repo 변경: 없음")
+                print("- 적용하려면: `./harness finish --complete --apply`")
+            return 0
+        if args.commit:
+            payload = harness_controller.commit_sidecar_backlog_product_diff(
+                controller_root=repo_root(),
+                record=record,
+                run_id=evidence.run_id,
+                message=args.message,
+                apply=bool(args.apply),
+            )
+            if payload["applied"]:
+                print("finish commit 완료: product repo에 local commit을 만들었습니다.")
+                print(f"- product commit: `{payload['product_commit_sha']}`")
+                print(f"- receipt: `{payload['receipt_path']}`")
+                print("- product push: 없음")
+                print("다음 확인 명령: `./harness finish --push`")
+                print(f"주의: {FINISH_PUSH_CAUTION_KO}")
+                print("실제 remote push: `./harness finish --push --apply`")
+            else:
+                print("finish commit dry-run 완료")
+                print("- product repo 변경: 없음")
+                print("- product push: 없음")
+                print("- 적용하려면: `./harness finish --commit --message \"...\" --apply`")
+            return 0
+        if args.push:
+            payload = harness_controller.push_sidecar_backlog_product_commit(
+                controller_root=repo_root(),
+                record=record,
+                run_id=evidence.run_id,
+                apply=bool(args.apply),
+            )
+            if payload["applied"]:
+                print("finish push 완료: product remote branch를 갱신했습니다.")
+                print(f"- product commit: `{payload['product_commit_sha']}`")
+                print(f"- product push: {payload['product_push_remote']}/{record.branch} -> `{payload['product_push_sha']}`")
+                print(f"- receipt: `{payload['receipt_path']}`")
+                print(f"- 주의: {FINISH_PUSH_CAUTION_KO}")
+            else:
+                print("finish push dry-run 완료")
+                print(f"- product commit: `{payload['product_commit_sha']}`")
+                print(f"- product push: {payload['product_push_remote']}/{record.branch}")
+                print("- remote 변경: 없음")
+                print(f"- 주의: {FINISH_PUSH_CAUTION_KO}")
+                print("- 적용하려면: `./harness finish --push --apply`")
+            return 0
+        backlog_status = _finish_backlog_status(record, evidence)
+        commit_receipt = evidence.matching_commit_receipt
+        print(f"- 작업 현재 상태: `{backlog_status}`")
+        print(f"- 제품 커밋 증거: {'있음' if commit_receipt else '없음'}")
+        if backlog_status == "queued":
+            print("다음 명령: `./harness finish --apply`")
+            print("dry-run 명령: `./harness finish --complete`")
+            print(
+                "고급 명령: "
+                f"`./harness target backlog transition {record.target_id} --status completed "
+                f"--run {evidence.run_id} --reason \"{reason}\" --apply`"
+            )
+        elif backlog_status == "completed" and not commit_receipt:
+            print("다음 명령: `./harness finish --commit --message \"feat: ...\"`")
+        elif backlog_status == "completed" and commit_receipt:
+            print("다음 명령: `./harness finish --push`")
+            print(f"주의: {FINISH_PUSH_CAUTION_KO}")
+        else:
+            print("다음 조치: backlog 상태가 명확하지 않습니다. 고급 dashboard/status로 확인하세요.")
+            print(f"확인 명령: `./harness target dashboard {record.target_id}`")
+            return 2
+        return 0
+    except (HarnessCliError, harness_controller.ControllerError) as exc:
+        print(f"error: {exc}")
+        if "완료할 구현 기록이 여러 개" in str(exc):
+            print("다음 명령: `./harness finish --run <run-id>`")
+            print(f"확인 명령: `./harness target dashboard {args.target}`")
+            return 2
+        if args.push and "target product repo must be clean before backlog product push" in str(exc):
+            print("다음 명령: `./harness finish --commit --message \"feat: ...\"`")
+            print("설명: push 전에는 product local commit receipt가 먼저 필요합니다.")
+            return 2
+        print("다음 명령: `./harness run` 또는 `./harness target dashboard @default`")
+        return 2
 
 
 def _init_smoke_product(path: Path) -> None:
@@ -2504,6 +2672,17 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--once", action="store_true")
     run.add_argument("extra", nargs=argparse.REMAINDER)
     run.set_defaults(func=command_run)
+
+    finish = subparsers.add_parser("finish", help="Beginner finish: complete, commit, or push the latest implementation.")
+    finish.add_argument("--target", default="@default", help="Target selector; default is @default.")
+    finish.add_argument("--run", help="Implementation run id. Defaults to the latest matching run for the target.")
+    finish.add_argument("--complete", action="store_true", help="Dry-run sidecar backlog completion; add --apply to mutate.")
+    finish.add_argument("--apply", action="store_true", help="Apply the selected finish stage. Alone, applies sidecar completion.")
+    finish.add_argument("--commit", action="store_true", help="Dry-run the validated local product commit; add --apply to commit.")
+    finish.add_argument("--push", action="store_true", help="Dry-run the validated product push; add --apply to push.")
+    finish.add_argument("--message", help="Product commit message for --commit.")
+    finish.add_argument("--reason", help="Backlog completion reason for --apply.")
+    finish.set_defaults(func=command_finish)
 
     smoke = subparsers.add_parser("smoke", help="Run beginner smoke checks without touching real targets.")
     smoke_subparsers = smoke.add_subparsers(dest="smoke_command", required=True)

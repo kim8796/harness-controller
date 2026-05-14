@@ -1,8 +1,16 @@
 # Harness Framework Version
 
-- Current Version: 1.8.15
+- Current Version: 1.8.16
 - Release Date: 2026-05-14
-- Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + beginner `install/task/run` controller UX + task interview + advisory AI review artifacts + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + managed-latest/xhigh external implementation gate + backlog-bound product push gate + controller release-history-preserving export + generated coverage artifact exclusion + on-demand export output.
+- Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + beginner `install/task/run/finish` controller UX + task interview + advisory AI review artifacts + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + managed-latest/xhigh external implementation gate + backlog-bound product push gate + controller release-history-preserving export + generated coverage artifact exclusion + on-demand export output.
+
+## What Changed In 1.8.16
+
+- Added beginner `./harness finish` for post-run external controller flow.
+- Bare `finish` is read-only: it finds the latest matching implementation evidence for the selected target, shows backlog/product diff status, and prints the next safe command.
+- `finish --apply` completes only the sidecar backlog via the existing transition gate.
+- `finish --commit --message "<msg>"` and `finish --push` are dry-run by default; adding `--apply` delegates to the existing product commit/push gates.
+- Moved implementation evidence discovery into `scripts/harness_controller.py` so `scripts/harness_cli.py` remains a thin wrapper rather than a second evidence selector.
 
 ## What Changed In 1.8.15
 

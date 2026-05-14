@@ -261,6 +261,309 @@ def test_beginner_run_delegates_to_default_target_implementation(monkeypatch, tm
     assert args.push is False
 
 
+def test_beginner_finish_dry_run_and_apply_complete_sidecar_backlog(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.16")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    _write_sidecar_backlog(controller)
+    capsys.readouterr()
+    assert (
+        module.main(
+            [
+                "target",
+                "run",
+                "demo",
+                "--implement-backlog-once",
+                "--runner",
+                "custom",
+                "--command-template",
+                "printf 'implemented\\n' > feature.txt && printf 'Implementation done\\n'",
+            ]
+        )
+        == 0
+    )
+    run_id = next((controller / "targets" / "demo" / "runs" / "harness").glob("*/generated-evidence.json")).parent.name
+    capsys.readouterr()
+
+    assert module.main(["finish"]) == 0
+    output = capsys.readouterr().out
+    assert "하네스 finish" in output
+    assert f"구현 기록: `{run_id}`" in output
+    assert "작업 현재 상태: `queued`" in output
+    assert "다음 명령: `./harness finish --apply`" in output
+    assert (controller / "targets" / "demo" / "backlog" / "queued" / "BL-demo.md").exists()
+
+    assert module.main(["finish", "--apply"]) == 0
+    output = capsys.readouterr().out
+    assert "backlog 상태를 completed로 전환" in output
+    assert "product repo" not in output.lower()
+    assert not (controller / "targets" / "demo" / "backlog" / "queued" / "BL-demo.md").exists()
+    assert (controller / "targets" / "demo" / "backlog" / "completed" / "BL-demo.md").exists()
+    assert _product_git_status(product) == ["?? feature.txt"]
+    _assert_no_product_harness_pollution(product)
+
+
+def test_beginner_finish_complete_dry_run_does_not_mutate(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.16")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    _write_sidecar_backlog(controller)
+    capsys.readouterr()
+    assert (
+        module.main(
+            [
+                "target",
+                "run",
+                "demo",
+                "--implement-backlog-once",
+                "--runner",
+                "custom",
+                "--command-template",
+                "printf 'implemented\\n' > feature.txt && printf 'Implementation done\\n'",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    assert module.main(["finish", "--complete"]) == 0
+    output = capsys.readouterr().out
+    assert "dry-run 완료" in output
+    assert "product repo 변경: 없음" in output
+    assert (controller / "targets" / "demo" / "backlog" / "queued" / "BL-demo.md").exists()
+    assert not (controller / "targets" / "demo" / "backlog" / "completed" / "BL-demo.md").exists()
+
+
+def test_beginner_finish_rejects_multiple_stages(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+
+    assert module.main(["finish", "--complete", "--commit", "--message", "feat: x"]) == 2
+    assert "한 단계만" in capsys.readouterr().out
+    assert module.main(["finish", "--commit", "--push", "--message", "feat: x"]) == 2
+    assert "한 단계만" in capsys.readouterr().out
+
+
+def test_beginner_finish_commit_requires_message(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product, configure_identity=True)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.16")
+    run_id = _create_completed_sidecar_backlog_with_product_diff(module, controller, product, capsys)
+
+    assert module.main(["finish", "--target", "demo", "--run", run_id, "--commit"]) == 2
+    output = capsys.readouterr().out
+    assert "--message" in output
+    assert _product_git_status(product) == ["?? feature.txt"]
+
+
+def test_beginner_finish_commit_and_push_delegate_existing_gates(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    remote = tmp_path / "remote.git"
+    controller.mkdir()
+    head_before = _init_product_repo(product, configure_identity=True)
+    _configure_product_upstream(product, remote)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.16")
+    run_id = _create_completed_sidecar_backlog_with_product_diff(module, controller, product, capsys)
+
+    assert module.main(["finish", "--target", "demo", "--run", run_id, "--push"]) == 2
+    output = capsys.readouterr().out
+    remote_before_commit = subprocess.run(
+        ["git", "ls-remote", "origin", "refs/heads/main"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.split()[0]
+    assert "target product repo must be clean before backlog product push" in output
+    assert './harness finish --commit --message "feat: ..."' in output
+    assert remote_before_commit == head_before
+    assert not list((controller / "targets" / "demo" / "runs" / "harness").glob("*/product-push-receipt.json"))
+
+    assert (
+        module.main(
+            [
+                "finish",
+                "--target",
+                "demo",
+                "--run",
+                run_id,
+                "--commit",
+                "--message",
+                "feat: implement demo backlog",
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    assert "finish commit dry-run 완료" in output
+    assert _product_head(product) == head_before
+    assert _product_git_status(product) == ["?? feature.txt"]
+    assert (
+        module.main(
+            [
+                "finish",
+                "--target",
+                "demo",
+                "--run",
+                run_id,
+                "--commit",
+                "--message",
+                "feat: implement demo backlog",
+                "--apply",
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    product_commit = _product_head(product)
+    assert "finish commit 완료" in output
+    assert "배포나 외부 자동화를 트리거" in output
+    assert "자동 remote rollback은 없습니다" in output
+    assert product_commit != head_before
+    assert _product_git_status(product) == []
+    assert module.main(["finish", "--target", "demo", "--run", run_id]) == 0
+    assert "제품 커밋 증거: 있음" in capsys.readouterr().out
+
+    assert module.main(["finish", "--target", "demo", "--run", run_id, "--push"]) == 0
+    output = capsys.readouterr().out
+    assert "finish push dry-run 완료" in output
+    assert "자동 remote rollback은 없습니다" in output
+    remote_before_apply = subprocess.run(
+        ["git", "ls-remote", "origin", "refs/heads/main"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.split()[0]
+    assert remote_before_apply == head_before
+
+    assert module.main(["finish", "--target", "demo", "--run", run_id, "--push", "--apply"]) == 0
+    output = capsys.readouterr().out
+    remote_after = subprocess.run(
+        ["git", "ls-remote", "origin", "refs/heads/main"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.split()[0]
+    assert "finish push 완료" in output
+    assert "배포나 외부 자동화를 트리거" in output
+    assert "자동 remote rollback은 없습니다" in output
+    assert remote_after == product_commit
+    _assert_no_product_harness_pollution(product)
+
+
+def test_beginner_finish_requires_run_when_multiple_implementation_evidence(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.16")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    _write_sidecar_backlog(controller)
+    runs_root = controller / "targets" / "demo" / "runs" / "harness"
+    for run_id in ("external-demo-impl-a", "external-demo-impl-b"):
+        run_dir = runs_root / run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "generated-evidence.json").write_text(
+            json.dumps(
+                {
+                    "status": "pass",
+                    "root_context": {
+                        "target_id": "demo",
+                        "state_root": str(controller / "targets" / "demo"),
+                    },
+                    "product_execution": "enabled",
+                    "product_implementation": "enabled",
+                    "product_commit": "disabled",
+                    "product_push": "disabled",
+                    "lane_execution": "backlog-implementation",
+                    "external_backlog": {
+                        "id": "BL-demo",
+                        "path": "backlog/queued/BL-demo.md",
+                        "title": "Demo sidecar task",
+                    },
+                    "product_diff_paths": ["feature.txt"],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    (runs_root / "external-demo-other" / "generated-evidence.json").parent.mkdir(parents=True)
+    (runs_root / "external-demo-other" / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "status": "pass",
+                "root_context": {"target_id": "other", "state_root": str(controller / "targets" / "demo")},
+                "product_execution": "enabled",
+                "product_implementation": "enabled",
+                "product_commit": "disabled",
+                "product_push": "disabled",
+                "lane_execution": "backlog-implementation",
+                "external_backlog": {"id": "BL-demo", "path": "backlog/queued/BL-demo.md"},
+                "product_diff_paths": ["feature.txt"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    capsys.readouterr()
+
+    assert module.main(["finish"]) == 2
+    output = capsys.readouterr().out
+    assert "여러 개입니다" in output
+    assert "--run <run-id>" in output
+    assert "다음 명령: `./harness finish --run <run-id>`" in output
+
+    assert module.main(["finish", "--run", "external-demo-impl-a"]) == 0
+    output = capsys.readouterr().out
+    assert "구현 기록: `external-demo-impl-a`" in output
+    assert "다음 명령: `./harness finish --apply`" in output
+
+
+def test_beginner_finish_fails_closed_without_default_or_evidence(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.16")
+
+    assert module.main(["finish"]) == 2
+    assert "default" in capsys.readouterr().out.lower()
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    capsys.readouterr()
+    assert module.main(["finish"]) == 2
+    output = capsys.readouterr().out
+    assert "먼저 `./harness run`" in output
+    _assert_no_product_harness_pollution(product)
+
+
 def test_beginner_install_does_not_default_failed_target(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_module()
     controller = tmp_path / "controller"

@@ -1138,6 +1138,133 @@ def _load_transition_run_evidence(state_paths: StatePaths, run_id: str) -> tuple
     return _read_json_file(evidence_path, label="transition generated evidence"), evidence_path
 
 
+def _target_implementation_evidence_matches(
+    record: TargetRecord,
+    state_paths: StatePaths,
+    payload: Mapping[str, Any],
+) -> bool:
+    root_context = payload.get("root_context")
+    if not isinstance(root_context, Mapping):
+        return False
+    evidence_state_root = str(root_context.get("state_root") or "")
+    if evidence_state_root and Path(evidence_state_root).resolve() != state_paths.state_root.resolve():
+        return False
+    external_backlog = payload.get("external_backlog")
+    return (
+        str(root_context.get("target_id") or "") == record.target_id
+        and str(payload.get("status") or "") == "pass"
+        and str(payload.get("product_execution") or "") == "enabled"
+        and str(payload.get("product_implementation") or "") == "enabled"
+        and str(payload.get("product_commit") or "") == "disabled"
+        and str(payload.get("product_push") or "") == "disabled"
+        and str(payload.get("lane_execution") or "") == "backlog-implementation"
+        and isinstance(external_backlog, Mapping)
+    )
+
+
+def find_target_implementation_evidence(
+    *,
+    controller_root: Path,
+    record: TargetRecord,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    """Find a target-scoped implementation evidence run without validating product state."""
+
+    state_paths = record.state_paths(controller_root)
+    runs_root = state_paths.state_root / "runs" / "harness"
+    if run_id:
+        safe_run_id = _safe_evidence_run_id(run_id)
+        payload, evidence_path = _load_transition_run_evidence(state_paths, safe_run_id)
+        if not _target_implementation_evidence_matches(record, state_paths, payload):
+            raise ControllerError("specified run is not a completed external implementation evidence run")
+        return _target_implementation_evidence_summary(record, state_paths, safe_run_id, evidence_path, payload)
+    candidates: list[tuple[int, str, Path, dict[str, Any]]] = []
+    if runs_root.exists():
+        for evidence_path in runs_root.glob("*/generated-evidence.json"):
+            if evidence_path.is_symlink() or not evidence_path.is_file():
+                continue
+            if not _path_is_relative_to(evidence_path.resolve(strict=False), state_paths.state_root.resolve()):
+                continue
+            try:
+                payload = _read_json_file(evidence_path, label="implementation generated evidence")
+            except ControllerError:
+                continue
+            if not _target_implementation_evidence_matches(record, state_paths, payload):
+                continue
+            try:
+                mtime = evidence_path.stat().st_mtime_ns
+            except OSError:
+                mtime = 0
+            candidates.append((mtime, evidence_path.parent.name, evidence_path, payload))
+    if not candidates:
+        raise ControllerError("completed external implementation evidence run not found")
+    if len(candidates) > 1:
+        candidate_ids = ", ".join(item[1] for item in sorted(candidates, key=lambda item: (item[0], item[1]))[-5:])
+        raise ControllerError(
+            "multiple completed external implementation evidence runs found; "
+            f"pass --run. candidates: {candidate_ids}"
+        )
+    _, selected_run_id, evidence_path, payload = sorted(candidates, key=lambda item: (item[0], item[1]))[-1]
+    return _target_implementation_evidence_summary(record, state_paths, selected_run_id, evidence_path, payload)
+
+
+def _target_implementation_backlog_status(state_paths: StatePaths, backlog_id: str) -> str:
+    if not backlog_id:
+        return "unknown"
+    try:
+        item = _discover_sidecar_backlog_item(state_paths, backlog_id)
+    except ControllerError:
+        return "missing"
+    return str(item.status)
+
+
+def _target_backlog_commit_receipt_exists(
+    record: TargetRecord,
+    state_paths: StatePaths,
+    implementation_run_id: str,
+) -> bool:
+    runs_root = state_paths.state_root / "runs" / "harness"
+    if not runs_root.exists():
+        return False
+    for evidence_path in runs_root.glob("external-*-backlog-commit-*/generated-evidence.json"):
+        try:
+            payload = _read_json_file(evidence_path, label="backlog product commit generated evidence")
+        except ControllerError:
+            continue
+        if (
+            str(payload.get("operation") or "") == "backlog-product-commit"
+            and bool(payload.get("applied")) is True
+            and str(payload.get("target_id") or "") == record.target_id
+            and str(payload.get("implementation_run_id") or "") == implementation_run_id
+        ):
+            return True
+    return False
+
+
+def _target_implementation_evidence_summary(
+    record: TargetRecord,
+    state_paths: StatePaths,
+    run_id: str,
+    evidence_path: Path,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    external_backlog = payload.get("external_backlog")
+    if not isinstance(external_backlog, Mapping):
+        raise ControllerError("implementation evidence is missing external_backlog")
+    backlog_id = str(external_backlog.get("id") or "").strip()
+    diff_paths = _safe_product_diff_paths([str(path) for path in payload.get("product_diff_paths") or [] if str(path)])
+    return {
+        "run_id": run_id,
+        "evidence_path": evidence_path.as_posix(),
+        "backlog_id": backlog_id,
+        "backlog_title": str(external_backlog.get("title") or "").strip(),
+        "backlog_path": str(external_backlog.get("path") or "").strip(),
+        "product_diff_paths": diff_paths,
+        "backlog_status": _target_implementation_backlog_status(state_paths, backlog_id),
+        "matching_commit_receipt": _target_backlog_commit_receipt_exists(record, state_paths, run_id),
+    }
+
+
 def _completed_transition_backlog_ref_from_evidence(
     record: TargetRecord,
     state_paths: StatePaths,
