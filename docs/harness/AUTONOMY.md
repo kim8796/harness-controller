@@ -4,7 +4,7 @@
 
 이 문서는 외부 스케줄러가 CLI 기반 AI 세션을 반복 실행할 때, 하네스 루프를 어떻게 안전하게 자동화할지 정의한다.
 
-`v1.8.17` 기준 external controller beginner entrypoint 는 bare `./harness` 와 `./harness help` 로 같은 한국어 시작 화면을 보여주고, 전체 argparse 명령 참조는 `./harness --help` 로 분리한다. `target run --implement-backlog-once` 는 기본 Codex 호출에서 literal `auto` 모델을 넘기지 않고 managed latest/default 모델과 `xhigh` reasoning 을 사용한다. External controller backlog completion 은 명시 `target backlog transition` gate 에서만 수행되고, product local commit 은 completed backlog 에 대한 명시 `target backlog commit` gate 에서만 수행된다. Product push 는 matching applied commit receipt 와 remote base preflight 를 요구하는 명시 `target backlog push` gate 에서만 수행된다. Controller export 는 v1.8+ release note 이력을 보존하고 generated coverage artifact 를 제외한다.
+`v1.8.18` 기준 external controller beginner entrypoint 는 bare `./harness` 와 `./harness help` 로 같은 한국어 시작 화면을 보여주고, `./harness install /path/to/product --id my-app --default` 와 TTY install prompt 를 첫 연결 경로로 둔다. 전체 argparse 명령 참조는 `./harness --help` 로 분리한다. `target run --implement-backlog-once` 는 기본 Codex 호출에서 literal `auto` 모델을 넘기지 않고 managed latest/default 모델과 `xhigh` reasoning 을 사용한다. External controller backlog completion 은 명시 `target backlog transition` gate 에서만 수행되고, product local commit 은 completed backlog 에 대한 명시 `target backlog commit` gate 에서만 수행된다. Product push 는 matching applied commit receipt 와 remote base preflight 를 요구하는 명시 `target backlog push` gate 에서만 수행된다. Controller export 는 v1.8+ release note 이력을 보존하고 generated coverage artifact 를 제외한다.
 
 현재 운영 baseline 은 `docs/harness/VERSION.md` 의 Current Version 을 따른다. 이 문서는 운영 계약과 CLI 사용법을 설명하고, 긴 릴리스별 기능 목록은 `VERSION.md`, `CHANGELOG.md`, 최신 release note 로 위임한다.
 

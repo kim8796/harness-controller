@@ -28,7 +28,7 @@ def test_beginner_help_home_no_args_and_help_are_static(monkeypatch, tmp_path: P
     assert module.main([]) == 0
     no_arg_output = capsys.readouterr().out
     assert "하네스 시작" in no_arg_output
-    assert "./harness install --repo /path/to/product --id my-app --default" in no_arg_output
+    assert "./harness install /path/to/product --id my-app --default" in no_arg_output
     assert "./harness task review latest" in no_arg_output
     assert "./harness task queue latest --auto" in no_arg_output
     assert "./harness run" in no_arg_output
@@ -256,7 +256,7 @@ def test_beginner_run_requires_default_target(monkeypatch, capsys) -> None:
     assert module.main(["run"]) == 2
     output = capsys.readouterr().out
     assert "기본 대상이 없습니다" in output
-    assert "./harness install --repo" in output
+    assert "./harness install /path/to/product" in output
 
 
 def test_beginner_run_rejects_extra_args_before_delegate(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -654,6 +654,123 @@ def test_beginner_install_surfaces_run_blockers_before_default(monkeypatch, tmp_
     assert "등록은 됐지만 run 전 수정 필요" in output
     assert "target-git-dirty" in output
     assert module.harness_controller.default_target(controller) is None
+
+
+def test_beginner_install_accepts_positional_repo(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.18")
+
+    assert module.main(["install", str(product), "--id", "demo", "--default"]) == 0
+    output = capsys.readouterr().out
+    assert "하네스 install 완료" in output
+    assert "대상 ID: `demo`" in output
+    assert module.harness_controller.default_target(controller).target_id == "demo"
+    _assert_no_product_harness_pollution(product)
+
+
+def test_beginner_install_rejects_mismatched_repo_inputs(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product_a = tmp_path / "product-a"
+    product_b = tmp_path / "product-b"
+    controller.mkdir()
+    _init_product_repo(product_a)
+    _init_product_repo(product_b)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.18")
+
+    assert module.main(["install", str(product_a), "--repo", str(product_b), "--id", "demo"]) == 2
+    output = capsys.readouterr().out
+    assert "install 경로가 서로 다릅니다" in output
+    assert "./harness install --repo /path/to/product" in output
+    assert not (controller / "targets").exists()
+
+
+def test_beginner_install_allows_matching_positional_and_repo(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.18")
+
+    assert module.main(["install", "product", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    output = capsys.readouterr().out
+    assert "하네스 install 완료" in output
+    assert module.harness_controller.default_target(controller).target_id == "demo"
+    _assert_no_product_harness_pollution(product)
+
+
+def test_beginner_install_no_args_non_tty_preserves_status(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    controller.mkdir()
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+
+    assert module.main(["install"]) == 2
+    output = capsys.readouterr().out
+    assert "하네스 install 상태" in output
+    assert "등록된 대상: 0개" in output
+    assert "./harness install /path/to/product --id my-app" in output
+    assert not (controller / "targets").exists()
+
+
+def test_beginner_install_tty_with_option_flags_does_not_prompt(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    controller.mkdir()
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": pytest.fail("install --json must not prompt"))
+
+    assert module.main(["install", "--json"]) == 2
+    output = capsys.readouterr().out
+    assert "하네스 install 상태" in output
+    assert "등록된 대상: 0개" in output
+    assert not (controller / "targets").exists()
+
+
+def test_beginner_install_tty_prompt_requires_repo(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    controller.mkdir()
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.sys.stdin, "isatty", lambda: True)
+    answers = iter([""])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+    assert module.main(["install"]) == 2
+    output = capsys.readouterr().out
+    assert "제품 저장소 경로가 필요합니다" in output
+    assert not (controller / "targets").exists()
+
+
+def test_beginner_install_tty_prompt_registers_target(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.18")
+    monkeypatch.setattr(module.sys.stdin, "isatty", lambda: True)
+    answers = iter([str(product), "demo", "main", "y"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+    assert module.main(["install"]) == 0
+    output = capsys.readouterr().out
+    assert "하네스 install 인터뷰" in output
+    assert "하네스 install 완료" in output
+    assert "대상 ID: `demo`" in output
+    assert module.harness_controller.default_target(controller).target_id == "demo"
+    _assert_no_product_harness_pollution(product)
 
 
 def test_beginner_install_status_surfaces_default_run_blockers(monkeypatch, tmp_path: Path, capsys) -> None:

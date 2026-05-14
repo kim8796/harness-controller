@@ -1,5 +1,12 @@
 # Harness Changelog
 
+## 1.8.18 - 2026-05-14
+
+- Added shorter beginner install syntax: `./harness install /path/to/product --id my-app --default`.
+- Preserved `--repo` for explicit scripts and fail closed when positional repo and `--repo` disagree.
+- Made bare `./harness install` ask for repo/id/branch/default only in interactive TTY sessions.
+- Kept non-interactive bare `install` as the read-only status/next-action view.
+
 ## 1.8.17 - 2026-05-14
 
 - Added a Korean beginner help home for bare `./harness` and `./harness help`.

@@ -378,7 +378,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "Harness Controller Bundle" in readme
     assert "`./harness` 와 `./harness help` 는 한국어 시작 화면" in readme
     assert "./harness controller doctor" in readme
-    assert "./harness install --repo /path/to/product-repo --id my-app --branch main --default" in readme
+    assert "./harness install /path/to/product-repo --id my-app --branch main --default" in readme
     assert "./harness task review latest" in readme
     assert "./harness task review latest --ai" in readme
     assert "./harness task queue latest --auto" in readme
@@ -433,14 +433,15 @@ def test_exported_controller_beginner_flow_runs_from_bundle(tmp_path: Path) -> N
     module.export_controller_bundle(source, bundle)
     harness = bundle / "harness"
 
-    subprocess.run(
-        [str(harness), "install", "--repo", str(product), "--id", "demo", "--default"],
+    install_result = subprocess.run(
+        [str(harness), "install", str(product), "--id", "demo", "--default"],
         cwd=bundle,
         check=True,
         text=True,
         capture_output=True,
         env=_git_env(),
     )
+    assert "하네스 install 완료" in install_result.stdout
     assert subprocess.run(
         [
             str(harness),

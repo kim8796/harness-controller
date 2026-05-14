@@ -69,7 +69,7 @@ class FinishEvidence:
 BEGINNER_HELP_TEXT = """하네스 시작
 
 5분 경로:
-1. ./harness install --repo /path/to/product --id my-app --default
+1. ./harness install /path/to/product --id my-app --default
 2. ./harness task
 3. ./harness task review latest
 4. ./harness task queue latest --auto
@@ -78,6 +78,7 @@ BEGINNER_HELP_TEXT = """하네스 시작
 
 무엇을 하는지:
 - install: 제품 저장소를 하네스 관리 대상으로 등록합니다. 제품 저장소에는 하네스 파일을 쓰지 않습니다.
+  터미널에서 ./harness install만 입력하면 경로와 이름을 물어봅니다.
 - task: 요구사항 초안을 만듭니다. 출력된 request.md는 외부 에디터로 수정해도 됩니다.
 - task review: 실행 전에 요구사항을 점검하고 작업 미리보기를 만듭니다. 아직 실행 대기열에 넣지 않습니다.
 - task queue: 검증된 작업만 실행 대기열에 넣습니다. 불명확하면 사람 확인이 필요한 상태로 둡니다.
@@ -740,7 +741,12 @@ def command_dashboard(args: argparse.Namespace) -> int:
 
 def command_install(args: argparse.Namespace) -> int:
     root = repo_root()
-    if args.repo is None:
+    try:
+        repo, target_id, branch, make_default = _install_inputs(args)
+    except HarnessCliError as exc:
+        print(f"error: {exc}")
+        return 2
+    if repo is None:
         try:
             records = harness_controller.list_targets(root, strict=True)
             default_record = harness_controller.default_target(root)
@@ -762,15 +768,15 @@ def command_install(args: argparse.Namespace) -> int:
             print("다음 명령: `./harness task` 또는 `./harness run`")
             return 0
         print("- 기본 대상: 없음")
-        print("다음 명령: `./harness install --repo /path/to/product --id my-app --branch main --default`")
+        print("다음 명령: `./harness install /path/to/product --id my-app --branch main --default`")
         return 2
     try:
-        target_id = args.id or args.repo.resolve().name
+        target_id = target_id or repo.resolve().name
         record = harness_controller.add_target(
             controller_root=root,
             target_id=target_id,
-            repo=_target_path(args.repo),
-            branch=args.branch,
+            repo=_target_path(repo),
+            branch=branch,
             controller_version=_controller_version(),
             profile=args.profile,
             display_name=args.display_name,
@@ -779,7 +785,7 @@ def command_install(args: argparse.Namespace) -> int:
         verification = harness_controller.verify_target(record)
         run_blockers = harness_controller.target_run_blockers(verification)
         ready_for_run = bool(verification["ok"]) and not run_blockers
-        if args.default and ready_for_run:
+        if make_default and ready_for_run:
             record = harness_controller.set_default_target(root, record.target_id)
         report = harness_controller.write_dashboard(
             controller_root=root,
@@ -825,6 +831,54 @@ def command_install(args: argparse.Namespace) -> int:
     except harness_controller.ControllerError as exc:
         print(f"error: {exc}")
         return 2
+
+
+def _install_inputs(args: argparse.Namespace) -> tuple[Path | None, str | None, str, bool]:
+    positional_repo = getattr(args, "repo_path", None)
+    option_repo = getattr(args, "repo", None)
+    if positional_repo is not None and option_repo is not None:
+        positional_resolved = _target_path(positional_repo)
+        option_resolved = _target_path(option_repo)
+        if positional_resolved != option_resolved:
+            raise HarnessCliError(
+                "install 경로가 서로 다릅니다. "
+                "`./harness install /path/to/product ...` 또는 "
+                "`./harness install --repo /path/to/product ...` 중 하나만 사용하세요."
+            )
+    repo = option_repo or positional_repo
+    target_id = getattr(args, "id", None)
+    branch = getattr(args, "branch", "main")
+    make_default = bool(getattr(args, "default", False))
+    if repo is None and _install_prompt_enabled(args):
+        print("하네스 install 인터뷰를 시작합니다. 제품 저장소 경로만 필수입니다.")
+        repo_value = _prompt_value("제품 저장소 경로")
+        if not repo_value:
+            raise HarnessCliError("제품 저장소 경로가 필요합니다")
+        repo = Path(repo_value)
+        if not target_id:
+            target_id = _prompt_value("대상 ID (Enter = 제품 폴더명)")
+        branch_value = _prompt_value(f"브랜치 (Enter = {branch})")
+        if branch_value:
+            branch = branch_value
+        default_value = _prompt_value("기본 대상으로 설정할까요? [Y/n, Enter = Y]")
+        make_default = default_value.strip().lower() not in {"n", "no", "아니오"}
+    return repo, target_id or None, branch, make_default
+
+
+def _install_prompt_enabled(args: argparse.Namespace) -> bool:
+    if not sys.stdin.isatty():
+        return False
+    return (
+        getattr(args, "repo_path", None) is None
+        and getattr(args, "repo", None) is None
+        and getattr(args, "id", None) is None
+        and getattr(args, "branch", "main") == "main"
+        and getattr(args, "profile", harness_profiles.DEFAULT_PROFILE) == harness_profiles.DEFAULT_PROFILE
+        and getattr(args, "display_name", None) is None
+        and not bool(getattr(args, "default", False))
+        and not bool(getattr(args, "force", False))
+        and not bool(getattr(args, "json", False))
+    )
 
 
 def _resolve_task_target(selector: str | None) -> harness_controller.TargetRecord:
@@ -914,7 +968,7 @@ def command_task_interview(args: argparse.Namespace) -> int:
         return 0
     except (HarnessCliError, harness_task_intake.TaskIntakeError) as exc:
         print(f"error: {exc}")
-        print("다음 명령: `./harness install --repo /path/to/product --id my-app --default`")
+        print("다음 명령: `./harness install /path/to/product --id my-app --default`")
         return 2
 
 
@@ -935,7 +989,7 @@ def command_task_draft(args: argparse.Namespace) -> int:
         return 0
     except (HarnessCliError, harness_task_intake.TaskIntakeError) as exc:
         print(f"error: {exc}")
-        print("다음 명령: `./harness install --repo /path/to/product --id my-app --default`")
+        print("다음 명령: `./harness install /path/to/product --id my-app --default`")
         return 2
 
 
@@ -1064,7 +1118,7 @@ def command_run(args: argparse.Namespace) -> int:
         return 2
     if record is None:
         print("run 중단: 기본 대상이 없습니다.")
-        print("다음 명령: `./harness install --repo /path/to/product --id my-app --branch main --default`")
+        print("다음 명령: `./harness install /path/to/product --id my-app --branch main --default`")
         return 2
     print("하네스 beginner run 시작")
     print(f"- 대상: `{record.target_id}`")
@@ -2637,6 +2691,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify.set_defaults(func=command_verify)
 
     install = subparsers.add_parser("install", help="Beginner path: connect a product repo to this controller.")
+    install.add_argument("repo_path", nargs="?", type=Path, help="Product git repo to register.")
     install.add_argument("--repo", type=Path, help="Product git repo to register. Omit to inspect current install state.")
     install.add_argument("--id", help="Canonical target id. Defaults to the product repo directory name.")
     install.add_argument("--branch", default="main")
