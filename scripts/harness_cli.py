@@ -66,6 +66,37 @@ class FinishEvidence:
     matching_commit_receipt: bool
 
 
+BEGINNER_HELP_TEXT = """하네스 시작
+
+5분 경로:
+1. ./harness install --repo /path/to/product --id my-app --default
+2. ./harness task
+3. ./harness task review latest
+4. ./harness task queue latest --auto
+5. ./harness run
+6. ./harness finish
+
+무엇을 하는지:
+- install: 제품 저장소를 하네스 관리 대상으로 등록합니다. 제품 저장소에는 하네스 파일을 쓰지 않습니다.
+- task: 요구사항 초안을 만듭니다. 출력된 request.md는 외부 에디터로 수정해도 됩니다.
+- task review: 실행 전에 요구사항을 점검하고 작업 미리보기를 만듭니다. 아직 실행 대기열에 넣지 않습니다.
+- task queue: 검증된 작업만 실행 대기열에 넣습니다. 불명확하면 사람 확인이 필요한 상태로 둡니다.
+- run: 자동 실행 가능한 요청 1개를 구현해 제품 파일 변경만 남깁니다. 완료 처리와 커밋/푸시는 자동이 아닙니다.
+- finish: 남은 완료 처리와 커밋/푸시 단계를 보여줍니다. 실제 변경은 --apply가 있을 때만 수행합니다.
+
+자주 쓰는 확인:
+- ./harness status
+- ./harness dashboard
+- ./harness verify --loop-ready
+- ./harness smoke implementation
+
+고급 명령:
+- ./harness --help
+- ./harness target --help
+- ./harness finish --help
+"""
+
+
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -1213,6 +1244,11 @@ def command_finish(args: argparse.Namespace) -> int:
             return 2
         print("다음 명령: `./harness run` 또는 `./harness target dashboard @default`")
         return 2
+
+
+def command_help(args: argparse.Namespace) -> int:
+    print(BEGINNER_HELP_TEXT.rstrip())
+    return 0
 
 
 def _init_smoke_product(path: Path) -> None:
@@ -2562,8 +2598,11 @@ def command_self_uninstall(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="One-command local harness starter CLI.")
+    parser = argparse.ArgumentParser(prog="harness", description="One-command local harness starter CLI.")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    help_parser = subparsers.add_parser("help", help="Show the Korean beginner quick-start home.")
+    help_parser.set_defaults(func=command_help)
 
     new = subparsers.add_parser("new", help="Create a new git repo and install the harness starter.")
     new.add_argument("target", type=Path)
@@ -2916,6 +2955,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv:
+        print(BEGINNER_HELP_TEXT.rstrip())
+        return 0
     args = build_parser().parse_args(argv)
     return int(args.func(args))
 

@@ -1,4 +1,4 @@
-# Harness Controller Bundle v1.8.16
+# Harness Controller Bundle v1.8.17
 
 이 디렉토리는 product repo 밖에서 실행하는 external harness controller 배포 번들이다.
 product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는다.
@@ -6,6 +6,8 @@ product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는�
 ## Clone/Use
 
 ```bash
+./harness
+./harness help
 ./harness controller doctor
 ./harness install --repo /path/to/product-repo --id my-app --branch main --default
 ./harness task
@@ -20,15 +22,17 @@ product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는�
 
 초보자 경로:
 
-- `./harness install` 은 전역 설치가 아니라 product repo 를 controller 대상에 등록하는 명령이다.
-- `./harness task` 는 guided interview 를 시작한다. 실행 가능한 작업은 `queue` 에서만 만들어진다.
-- `./harness task review` 는 자동 실행 가능 여부를 deterministic 하게 점검한다.
-- `./harness task review --ai` 는 packet-local AI prompt/schema artifact 만 만든다. AI를 직접 실행하지 않고 queue 판단에도 쓰지 않는다.
-- `./harness run` 은 default target 의 queued auto task 하나만 실행하고 local product diff 만 남긴다. 완료 처리, commit, push 는 자동이 아니다.
-- `./harness finish` 는 run 이후 남은 backlog 완료/commit/push 단계를 짧게 보여준다. 실제 변경은 `--apply` 가 있을 때만 수행한다.
-- finish 순서: `./harness finish --apply` 로 작업 상태를 완료 처리하고, `./harness finish --commit --message "feat: ..." --apply` 로 local commit 을 만든 뒤, 필요할 때만 `./harness finish --push --apply` 로 remote 를 갱신한다.
-- push 는 배포나 외부 자동화를 트리거할 수 있고 자동 remote rollback 은 없다.
-- `./harness smoke implementation` 은 임시 product repo/target 으로 구현 gate 를 검증한다.
+- `./harness` 와 `./harness help` 는 한국어 시작 화면을 보여준다. 전체 명령 참조는 `./harness --help` 를 쓴다.
+- `./harness install` 은 전역 설치가 아니라 제품 저장소를 하네스 관리 대상으로 등록하는 명령이다.
+- `./harness task` 는 요구사항 초안을 만든다. 출력된 `request.md` 는 외부 에디터로 수정해도 된다.
+- `./harness task review` 는 실행 전에 요구사항을 점검하고 작업 미리보기를 만든다.
+- `./harness task review --ai` 는 AI가 읽기 좋은 검토용 파일만 만들며, 자동 실행 여부를 혼자 결정하지 않는다.
+- `./harness task queue` 는 검증된 작업만 실행 대기열에 넣고, 불명확한 작업은 사람 확인이 필요한 상태로 둔다.
+- `./harness run` 은 자동 실행 가능한 요청 1개를 구현해 제품 파일 변경만 남긴다. 완료 처리와 커밋/푸시는 자동이 아니다.
+- `./harness finish` 는 실행 이후 남은 완료 처리와 커밋/푸시 단계를 짧게 보여준다. 실제 변경은 `--apply` 가 있을 때만 수행한다.
+- finish 순서: `./harness finish --apply` 로 작업 상태를 완료 처리하고, `./harness finish --commit --message "feat: ..." --apply` 로 로컬 커밋을 만든 뒤, 필요할 때만 `./harness finish --push --apply` 로 원격 저장소를 갱신한다.
+- 푸시는 배포나 외부 자동화를 트리거할 수 있고 자동 원격 롤백은 없다.
+- `./harness smoke implementation` 은 임시 제품 저장소로 구현 경로가 정상인지 검증한다.
 
 Advanced mapping:
 
@@ -162,7 +166,7 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `tests/test_harness_task_intake.py`
 - `tests/test_harness_telegram_bridge.py`
 - `tests/test_redis_relay.py`
-- `docs/harness/releases/v1.8.16.md`
+- `docs/harness/releases/v1.8.17.md`
 - `docs/harness/releases/v1.8.0.md`
 - `docs/harness/releases/v1.8.1.md`
 - `docs/harness/releases/v1.8.10.md`
@@ -171,6 +175,7 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `docs/harness/releases/v1.8.13.md`
 - `docs/harness/releases/v1.8.14.md`
 - `docs/harness/releases/v1.8.15.md`
+- `docs/harness/releases/v1.8.16.md`
 - `docs/harness/releases/v1.8.2.md`
 - `docs/harness/releases/v1.8.3.md`
 - `docs/harness/releases/v1.8.4.md`

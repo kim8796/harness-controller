@@ -1,5 +1,12 @@
 # Harness Changelog
 
+## 1.8.17 - 2026-05-14
+
+- Added a Korean beginner help home for bare `./harness` and `./harness help`.
+- Kept `./harness --help` and subcommand `--help` as the advanced argparse reference.
+- Made the quick-start path explicit: `install -> task -> task review latest -> task queue latest --auto -> run -> finish`.
+- Verified the help path does not inspect target state or create `targets/**`.
+
 ## 1.8.16 - 2026-05-14
 
 - Added beginner `./harness finish` for the post-run external controller path.

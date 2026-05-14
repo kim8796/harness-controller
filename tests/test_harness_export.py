@@ -353,20 +353,42 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "reports" / "harness-autonomy" / "README.md").exists()
     assert (bundle / "scripts" / "harness_task_intake.py").exists()
     assert (bundle / "tests" / "test_harness_task_intake.py").exists()
+    no_arg_help = subprocess.run(
+        [str(bundle / "harness")],
+        cwd=bundle,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    )
+    explicit_help = subprocess.run(
+        [str(bundle / "harness"), "help"],
+        cwd=bundle,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    )
+    assert no_arg_help.stdout == explicit_help.stdout
+    assert "하네스 시작" in no_arg_help.stdout
+    assert "./harness task review latest" in no_arg_help.stdout
+    assert "./harness task queue latest --auto" in no_arg_help.stdout
+    assert not (bundle / "targets").exists()
     readme = (bundle / "README.md").read_text(encoding="utf-8")
     assert "Harness Controller Bundle" in readme
+    assert "`./harness` 와 `./harness help` 는 한국어 시작 화면" in readme
     assert "./harness controller doctor" in readme
     assert "./harness install --repo /path/to/product-repo --id my-app --branch main --default" in readme
     assert "./harness task review latest" in readme
     assert "./harness task review latest --ai" in readme
     assert "./harness task queue latest --auto" in readme
     assert "./harness finish" in readme
-    assert "`./harness run` 은 default target" in readme
-    assert "`./harness finish` 는 run 이후 남은 backlog 완료/commit/push 단계" in readme
+    assert "`./harness run` 은 자동 실행 가능한 요청 1개" in readme
+    assert "`./harness finish` 는 실행 이후 남은 완료 처리와 커밋/푸시 단계" in readme
     assert "finish 순서: `./harness finish --apply`" in readme
-    assert "자동 remote rollback 은 없다" in readme
-    assert "`./harness task` 는 guided interview" in readme
-    assert "`./harness task review --ai` 는 packet-local AI prompt/schema artifact" in readme
+    assert "자동 원격 롤백은 없다" in readme
+    assert "`./harness task` 는 요구사항 초안을 만든다" in readme
+    assert "`./harness task review --ai` 는 AI가 읽기 좋은 검토용 파일만 만들며" in readme
     assert "Bare `./harness run` maps to `target run @default --implement-backlog-once`" in readme
     assert "Bare `./harness finish` maps to a read-only summary" in readme
     assert "finish --push --apply" in readme

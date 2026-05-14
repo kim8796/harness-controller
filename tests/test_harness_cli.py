@@ -16,6 +16,57 @@ def _load_module():
     return load_script_module("harness_cli", "scripts/harness_cli.py")
 
 
+def test_beginner_help_home_no_args_and_help_are_static(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+
+    def fail_resolve(*_args, **_kwargs):
+        raise AssertionError("help must not inspect target state")
+
+    monkeypatch.setattr(module, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(module, "_resolve_controller_target", fail_resolve)
+
+    assert module.main([]) == 0
+    no_arg_output = capsys.readouterr().out
+    assert "하네스 시작" in no_arg_output
+    assert "./harness install --repo /path/to/product --id my-app --default" in no_arg_output
+    assert "./harness task review latest" in no_arg_output
+    assert "./harness task queue latest --auto" in no_arg_output
+    assert "./harness run" in no_arg_output
+    assert "./harness finish" in no_arg_output
+    assert "./harness --help" in no_arg_output
+    assert not (tmp_path / "targets").exists()
+
+    assert module.main(["help"]) == 0
+    help_output = capsys.readouterr().out
+    assert help_output == no_arg_output
+    assert not (tmp_path / "targets").exists()
+
+
+def test_argparse_help_and_invalid_command_remain_advanced_reference(capsys) -> None:
+    module = _load_module()
+
+    with pytest.raises(SystemExit) as top_help:
+        module.main(["--help"])
+    assert top_help.value.code == 0
+    output = capsys.readouterr().out
+    assert "usage: harness" in output
+    assert "target" in output
+    assert "하네스 시작" not in output
+
+    with pytest.raises(SystemExit) as target_help:
+        module.main(["target", "--help"])
+    assert target_help.value.code == 0
+    output = capsys.readouterr().out
+    assert "usage: harness target" in output
+    assert "alias" in output
+    assert "하네스 시작" not in output
+
+    with pytest.raises(SystemExit) as invalid:
+        module.main(["unknown-command"])
+    assert invalid.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
+
+
 def _git_env() -> dict[str, str]:
     env = dict(os.environ)
     for key in tuple(env):
