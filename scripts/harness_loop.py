@@ -317,6 +317,7 @@ class BacklogItem:
     parent_backlog: str = ""
     failure_kind: str = ""
     blocked_reason: str = ""
+    intake_packet: str = ""
 
 
 @dataclass(frozen=True)
@@ -538,6 +539,7 @@ def discover_backlog_items(root: Path) -> tuple[BacklogItem, ...]:
                     parent_backlog=metadata.get("parent_backlog", metadata.get("parent-backlog", "")),
                     failure_kind=metadata.get("failure_kind", metadata.get("failure-kind", "")).strip().lower(),
                     blocked_reason=metadata.get("blocked_reason", metadata.get("blocked-reason", "")).strip(),
+                    intake_packet=metadata.get("intake_packet", metadata.get("intake-packet", "")).strip(),
                 )
             )
     return tuple(items)

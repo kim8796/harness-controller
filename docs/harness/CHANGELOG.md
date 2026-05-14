@@ -1,5 +1,12 @@
 # Harness Changelog
 
+## 1.8.19 - 2026-05-14
+
+- Added read-only `./harness task list` for beginner task intake packets.
+- Shows review state, stale-review state, queued backlog state, attachment count, and packet-specific next commands.
+- Keeps JSON output secret-safe by excluding raw request bodies, captions, attachment paths, hashes, and secret values.
+- Keeps non-default target guidance target-bound instead of suggesting bare `./harness run`.
+
 ## 1.8.18 - 2026-05-14
 
 - Added shorter beginner install syntax: `./harness install /path/to/product --id my-app --default`.

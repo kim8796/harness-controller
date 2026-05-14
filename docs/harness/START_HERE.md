@@ -4,7 +4,7 @@
 
 현재 starter baseline 은 `docs/harness/VERSION.md` 의 Current Version 을 따른다. 이 문서는 기능 목록이 아니라 “새 프로젝트에 하네스를 어떻게 설치하고 시작하는지”만 설명한다. 긴 기능 목록은 `VERSION.md`, `CHANGELOG.md`, `FRAMEWORK_EXPORT.md` 를 본다.
 
-`v1.8.18` 기준 external controller 는 bare `./harness` 또는 `./harness help` 에서 한국어 beginner home 을 먼저 보여준다. 초보자 경로는 `./harness install /path/to/my-app --id my-app --default -> ./harness task -> ./harness task review latest -> ./harness task queue latest --auto -> ./harness run -> ./harness finish` 이다. TTY 에서 bare `./harness install` 은 repo/id/branch/default 를 물어보고, non-TTY 에서는 read-only status 를 유지한다. `./harness --help` 는 고급 argparse 명령 참조다. `install` 은 product repo 에 하네스 파일을 쓰지 않고 controller 에 대상만 등록한다. `task` 는 질문형 interview 로 요구사항 draft 를 만들고 review/queue 를 거쳐 실행 가능한 backlog 로 바꾼다. `task review --ai` 는 모델을 직접 실행하지 않고 packet-local prompt/schema 와 선택적 advisory response artifact 만 만든다. `run` 은 기본 대상의 queued auto task 하나를 구현 lane 에 넘기며, 결과는 local product diff 로만 남긴다. `finish` 는 남은 backlog 완료/commit/push 단계를 짧게 보여주고, 실제 적용은 `--apply` 가 있을 때만 기존 dry-run-first gate 에 위임한다.
+`v1.8.19` 기준 external controller 는 bare `./harness` 또는 `./harness help` 에서 한국어 beginner home 을 먼저 보여준다. 초보자 경로는 `./harness install /path/to/my-app --id my-app --default -> ./harness task -> ./harness task list -> ./harness task review <packet-id> -> ./harness task queue <packet-id> --auto -> ./harness run -> ./harness finish` 이다. TTY 에서 bare `./harness install` 은 repo/id/branch/default 를 물어보고, non-TTY 에서는 read-only status 를 유지한다. `./harness --help` 는 고급 argparse 명령 참조다. `install` 은 product repo 에 하네스 파일을 쓰지 않고 controller 에 대상만 등록한다. `task` 는 질문형 interview 로 요구사항 draft 를 만들고 review/queue 를 거쳐 실행 가능한 backlog 로 바꾼다. `task list` 는 draft/review/queue 상태와 다음 명령을 read-only 로 보여주며, `request.md` 가 review 뒤 바뀌면 `다시 검토 필요` 로 표시한다. `task review --ai` 는 모델을 직접 실행하지 않고 packet-local prompt/schema 와 선택적 advisory response artifact 만 만든다. `run` 은 기본 대상의 queued auto task 하나를 구현 lane 에 넘기며, 결과는 local product diff 로만 남긴다. `finish` 는 남은 backlog 완료/commit/push 단계를 짧게 보여주고, 실제 적용은 `--apply` 가 있을 때만 기존 dry-run-first gate 에 위임한다.
 
 ## 초간단 사용법
 
@@ -50,17 +50,18 @@ cd /path/to/harness-controller
 ./harness install /path/to/my-app --id my-app --branch main --default
 ./harness task
 # 인터뷰에 답하거나 출력된 request.md 를 외부 에디터로 수정
-./harness task review latest
+./harness task list
+./harness task review <packet-id>
 # 선택: AI에게 물어볼 prompt/schema artifact 생성
-./harness task review latest --ai
-./harness task queue latest --auto
+./harness task review <packet-id> --ai
+./harness task queue <packet-id> --auto
 ./harness run
 ./harness finish
 ```
 
 이 preview 는 product repo 를 검사하고 controller 기록 디렉토리에 대상 설정, dashboard, 작업 draft 를 만든다. product repo 에 `HARNESS.md`, `scripts/harness*`, `runs/**`, `reports/**`, `backlog/**`, `targets/**`, `.env*` 를 쓰지 않는다.
 
-`./harness task` 는 guided interview 를 시작한다. 이미지 첨부는 파일 경로/크기/sha256/caption 으로 기록하고 base64 본문을 backlog 에 넣지 않는다. 먼저 `task review` 로 자동 실행 가능 여부를 deterministic 하게 점검한다. 그 뒤 `task review --ai` 를 쓰면 참고용 prompt/schema 와 선택적 response artifact 만 만들며, 기존 review/queue 판단을 바꾸지 않는다. `task queue --auto` 는 acceptance, file scope, validation command 가 명확할 때만 통과한다.
+`./harness task` 는 guided interview 를 시작한다. 이미지 첨부는 파일 경로/크기/sha256/caption 으로 기록하고 base64 본문을 backlog 에 넣지 않는다. `./harness task list` 는 여러 draft 중 무엇을 review/queue/run 해야 하는지 packet id 기준으로 보여준다. 먼저 `task review <packet-id>` 로 자동 실행 가능 여부를 deterministic 하게 점검한다. 그 뒤 `task review <packet-id> --ai` 를 쓰면 참고용 prompt/schema 와 선택적 response artifact 만 만들며, 기존 review/queue 판단을 바꾸지 않는다. `task queue <packet-id> --auto` 는 acceptance, file scope, validation command 가 명확할 때만 통과한다.
 
 `./harness finish` 는 기본적으로 읽기 전용이다. backlog 완료는 `./harness finish --apply`, local commit 은 `./harness finish --commit --message "feat: ..." --apply`, remote push 는 `./harness finish --push --apply` 로 각각 명시해야 한다. 고급 명령이 필요하면 `./harness target ...` 명령을 직접 쓴다. report 는 `targets/<target_id>/reports/target-run-latest.md`, implementation rollback 은 report 의 changed path guidance 를 따른다. Push smoke/backlog push 는 deployment 가 아니고 자동 remote rollback 을 하지 않는다. Detached HEAD, dirty target, branch mismatch 는 run blocker 다.
 

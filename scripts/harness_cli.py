@@ -71,15 +71,17 @@ BEGINNER_HELP_TEXT = """하네스 시작
 5분 경로:
 1. ./harness install /path/to/product --id my-app --default
 2. ./harness task
-3. ./harness task review latest
-4. ./harness task queue latest --auto
-5. ./harness run
-6. ./harness finish
+3. ./harness task list
+4. ./harness task review <packet-id>
+5. ./harness task queue <packet-id> --auto
+6. ./harness run
+7. ./harness finish
 
 무엇을 하는지:
 - install: 제품 저장소를 하네스 관리 대상으로 등록합니다. 제품 저장소에는 하네스 파일을 쓰지 않습니다.
   터미널에서 ./harness install만 입력하면 경로와 이름을 물어봅니다.
 - task: 요구사항 초안을 만듭니다. 출력된 request.md는 외부 에디터로 수정해도 됩니다.
+- task list: 여러 요청의 검토/대기열 상태와 다음 명령을 보여줍니다.
 - task review: 실행 전에 요구사항을 점검하고 작업 미리보기를 만듭니다. 아직 실행 대기열에 넣지 않습니다.
 - task queue: 검증된 작업만 실행 대기열에 넣습니다. 불명확하면 사람 확인이 필요한 상태로 둡니다.
 - run: 자동 실행 가능한 요청 1개를 구현해 제품 파일 변경만 남깁니다. 완료 처리와 커밋/푸시는 자동이 아닙니다.
@@ -88,6 +90,7 @@ BEGINNER_HELP_TEXT = """하네스 시작
 자주 쓰는 확인:
 - ./harness status
 - ./harness dashboard
+- ./harness task list
 - ./harness verify --loop-ready
 - ./harness smoke implementation
 
@@ -901,6 +904,8 @@ def command_task(args: argparse.Namespace) -> int:
         return command_task_interview(args)
     if getattr(args, "task_command", None) == "draft":
         return command_task_draft(args)
+    if getattr(args, "task_command", None) == "list":
+        return command_task_list(args)
     print("error: unknown task command")
     return 2
 
@@ -963,8 +968,11 @@ def command_task_interview(args: argparse.Namespace) -> int:
         print(f"- 대상: `{record.target_id}`")
         print(f"- request: `{request_path.as_posix()}`")
         print("- 이 파일은 외부 에디터로 자유롭게 보강해도 됩니다.")
-        print("다음 명령: `./harness task review latest`")
-        print("선택 명령: review가 끝난 뒤 `./harness task review latest --ai`")
+        task_prefix = _task_target_prefix(record)
+        packet_id = request_path.parent.name
+        print(f"다음 명령: `{task_prefix} list`")
+        print(f"바로 검토: `{task_prefix} review {packet_id}`")
+        print(f"선택 명령: review가 끝난 뒤 `{task_prefix} review {packet_id} --ai`")
         return 0
     except (HarnessCliError, harness_task_intake.TaskIntakeError) as exc:
         print(f"error: {exc}")
@@ -985,7 +993,9 @@ def command_task_draft(args: argparse.Namespace) -> int:
         print(f"- 대상: `{record.target_id}`")
         print(f"- request: `{request_path.as_posix()}`")
         print("- 이 파일은 외부 에디터로 자유롭게 수정해도 됩니다.")
-        print("다음 명령: `./harness task review latest`")
+        task_prefix = _task_target_prefix(record)
+        print(f"다음 명령: `{task_prefix} list`")
+        print(f"바로 검토: `{task_prefix} review {request_path.parent.name}`")
         return 0
     except (HarnessCliError, harness_task_intake.TaskIntakeError) as exc:
         print(f"error: {exc}")
@@ -1009,7 +1019,9 @@ def command_task_from(args: argparse.Namespace) -> int:
         print(f"- 대상: `{record.target_id}`")
         print(f"- request: `{request_path.as_posix()}`")
         print("- 첨부는 base64로 넣지 않고 path/size/sha256 메타데이터로 기록했습니다.")
-        print("다음 명령: `./harness task review latest`")
+        task_prefix = _task_target_prefix(record)
+        print(f"다음 명령: `{task_prefix} list`")
+        print(f"바로 검토: `{task_prefix} review {request_path.parent.name}`")
         return 0
     except (HarnessCliError, harness_task_intake.TaskIntakeError) as exc:
         print(f"error: {exc}")
@@ -1039,7 +1051,8 @@ def command_task_review(args: argparse.Namespace) -> int:
             if ai_review.risk_notes:
                 print("- AI 위험 메모: " + ", ".join(ai_review.risk_notes))
             print("- AI 검토는 참고용이며 자동 실행 판단에는 사용되지 않습니다.")
-            print("다음 명령: `./harness task queue latest` 또는 `./harness task queue latest --auto`")
+            task_prefix = _task_target_prefix(record)
+            print(f"다음 명령: `{task_prefix} queue {packet_id}` 또는 `{task_prefix} queue {packet_id} --auto`")
             return 0
         review = harness_task_intake.review_packet(
             state_root=record.state_root,
@@ -1050,12 +1063,14 @@ def command_task_review(args: argparse.Namespace) -> int:
         print(f"- 대상: `{review.target_id}`")
         print(f"- 요청 묶음: `{review.packet_id}`")
         print(f"- 미리보기: `{review.preview_path.as_posix()}`")
-        print(f"- 자동 실행 가능: {'yes' if review.auto_eligible else 'no'}")
+        print(f"- 자동 실행 가능: {'예' if review.auto_eligible else '아니오'}")
         if review.open_questions:
             print(f"- 확인 질문: {', '.join(review.open_questions)}")
         if review.risk_flags:
             print(f"- 안전 경고: {', '.join(review.risk_flags)}")
-        print("다음 명령: `./harness task queue latest` 또는 `./harness task queue latest --auto`")
+        task_prefix = _task_target_prefix(record)
+        print(f"다음 명령: `{task_prefix} list`")
+        print(f"바로 queue: `{task_prefix} queue {packet_id}` 또는 `{task_prefix} queue {packet_id} --auto`")
         return 0
     except (HarnessCliError, harness_task_intake.TaskIntakeError) as exc:
         print(f"error: {exc}")
@@ -1072,18 +1087,174 @@ def command_task_queue(args: argparse.Namespace) -> int:
             auto=args.auto,
             expected_target_id=record.target_id,
         )
-        print("작업 요청 queue 완료")
+        print("실행 대기열 등록 완료")
         print(f"- 대상: `{queued.target_id}`")
-        print(f"- backlog: `{queued.backlog_path.as_posix()}`")
-        print(f"- 실행 모드: `{queued.autonomy_execute}`")
+        print(f"- 실행 대기열 항목: `{queued.backlog_path.as_posix()}`")
+        execute_label = "자동" if queued.autonomy_execute == "auto" else "사람 확인"
+        print(f"- 실행 방식: {execute_label}")
         print("- 제품 저장소 변경: 없음")
         if queued.autonomy_execute == "auto":
-            print("다음 명령: `./harness run`")
-            print(f"고급 명령: `./harness target run {queued.target_id} --implement-backlog-once`")
+            if _task_target_prefix(record) == "./harness task":
+                print("다음 명령: `./harness run`")
+                print(f"고급 명령: `./harness target run {queued.target_id} --implement-backlog-once`")
+            else:
+                print(f"다음 명령: `./harness target run {queued.target_id} --implement-backlog-once`")
         else:
-            print("다음 조치: manual-review backlog로 남겼습니다. 자동 실행하려면 새 draft에서 안전 조건을 채운 뒤 `--auto`로 queue하세요.")
+            print("다음 조치: 사람 확인 상태로 남겼습니다. 자동 실행하려면 새 요청 초안에서 안전 조건을 채운 뒤 다시 등록하세요.")
         return 0
     except (HarnessCliError, harness_task_intake.TaskIntakeError) as exc:
+        print(f"error: {exc}")
+        return 2
+
+
+def _task_target_prefix(record: harness_controller.TargetRecord) -> str:
+    try:
+        default_record = harness_controller.default_target(repo_root())
+    except harness_controller.ControllerError:
+        default_record = None
+    if default_record is not None and default_record.target_id == record.target_id:
+        return "./harness task"
+    return f"./harness task --target {record.target_id}"
+
+
+def _task_review_label(summary: harness_task_intake.TaskPacketSummary) -> str:
+    if summary.request_issue:
+        return "요청 파일 확인 필요"
+    if summary.review_status == "not-reviewed":
+        return "검토 전"
+    if summary.review_status == "stale":
+        return "다시 검토 필요"
+    if summary.review_status == "invalid":
+        return "검토 기록 확인 필요"
+    if summary.review_status == "reviewed":
+        return "검토 완료"
+    return summary.review_status or "알 수 없음"
+
+
+def _task_backlog_status_label(status: str) -> str:
+    return {
+        "queued": "실행 대기 중",
+        "active": "진행 중",
+        "blocked": "차단됨",
+        "completed": "완료됨",
+        "manual-review": "사람 확인",
+    }.get(status, status or "알 수 없음")
+
+
+def _task_next_command(record: harness_controller.TargetRecord, summary: harness_task_intake.TaskPacketSummary) -> str:
+    task_prefix = _task_target_prefix(record)
+    if summary.request_issue:
+        return f"요청 파일에서 비밀값/민감정보를 제거한 뒤 `{task_prefix} review {summary.packet_id}`"
+    if summary.backlog_path is not None and summary.backlog_status != "queued":
+        status_label = _task_backlog_status_label(summary.backlog_status)
+        return f"연결된 작업 항목이 {status_label} 상태입니다. 필요하면 새 요청 초안을 만들거나 사람 확인 상태를 확인하세요."
+    if summary.review_status in {"not-reviewed", "stale", "invalid"}:
+        return f"`{task_prefix} review {summary.packet_id}`"
+    if summary.queued_backlog_path is None:
+        auto_suffix = " --auto" if summary.auto_eligible else ""
+        return f"`{task_prefix} queue {summary.packet_id}{auto_suffix}`"
+    if summary.autonomy_execute == "auto":
+        if _task_target_prefix(record) == "./harness task":
+            return "`./harness run`"
+        return f"`./harness target run {record.target_id} --implement-backlog-once`"
+    return "사람 확인 항목입니다. 요청을 보강하려면 새 요청 초안을 만들거나 사람 확인 상태를 확인하세요."
+
+
+def _task_summary_json(
+    record: harness_controller.TargetRecord,
+    summary: harness_task_intake.TaskPacketSummary,
+) -> dict[str, object]:
+    queued_relative = (
+        summary.queued_backlog_path.relative_to(record.state_root.resolve()).as_posix()
+        if summary.queued_backlog_path is not None
+        else ""
+    )
+    backlog_relative = (
+        summary.backlog_path.relative_to(record.state_root.resolve()).as_posix()
+        if summary.backlog_path is not None
+        else ""
+    )
+    return {
+        "packet_id": summary.packet_id,
+        "target_id": summary.target_id,
+        "source": summary.source,
+        "updated_at": summary.updated_at,
+        "title": summary.title if not summary.request_issue else "redacted",
+        "request_status": "needs-sanitization" if summary.request_issue else "ok",
+        "review_status": summary.review_status,
+        "review_label": _task_review_label(summary),
+        "auto_eligible": summary.auto_eligible,
+        "open_question_count": summary.open_question_count,
+        "risk_flag_count": summary.risk_flag_count,
+        "attachment_count": summary.attachment_count,
+        "backlog_path": backlog_relative,
+        "backlog_status": summary.backlog_status,
+        "queued": summary.queued_backlog_path is not None,
+        "queued_backlog_path": queued_relative,
+        "autonomy_execute": summary.autonomy_execute,
+        "next_command": _task_next_command(record, summary),
+    }
+
+
+def command_task_list(args: argparse.Namespace) -> int:
+    try:
+        record = _resolve_task_target(getattr(args, "target", None))
+        harness_controller.validate_sidecar_backlog_integrity(record.state_paths(repo_root()))
+        summaries = harness_task_intake.summarize_packets(
+            state_root=record.state_root,
+            target_id=record.target_id,
+        )
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "target_id": record.target_id,
+                        "count": len(summaries),
+                        "tasks": [_task_summary_json(record, summary) for summary in summaries],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 0
+        print("작업 요청 목록")
+        print(f"- 대상: `{record.target_id}`")
+        if not summaries:
+            print("- 요청: 없음")
+            print(f"다음 명령: `{_task_target_prefix(record)}`")
+            return 0
+        for index, summary in enumerate(summaries, start=1):
+            queued_relative = (
+                summary.queued_backlog_path.relative_to(record.state_root.resolve()).as_posix()
+                if summary.queued_backlog_path is not None
+                else "없음"
+            )
+            backlog_relative = (
+                summary.backlog_path.relative_to(record.state_root.resolve()).as_posix()
+                if summary.backlog_path is not None
+                else ""
+            )
+            backlog_label = summary.backlog_path.name if summary.backlog_path is not None else ""
+            print(f"{index}. 요청: `{summary.packet_id}`")
+            print(f"   - 제목: {summary.title if not summary.request_issue else '비밀값 확인 필요'}")
+            print(f"   - 요청 파일: `{summary.request_path.as_posix()}`")
+            print(f"   - 검토 상태: {_task_review_label(summary)}")
+            if summary.review_status == "reviewed":
+                print(f"   - 자동 실행 가능: {'예' if summary.auto_eligible else '아니오'}")
+                if summary.open_question_count or summary.risk_flag_count:
+                    print(
+                        "   - 확인 필요: "
+                        f"질문 {summary.open_question_count}개, 안전 경고 {summary.risk_flag_count}개"
+                    )
+            print(f"   - 첨부: {summary.attachment_count}개")
+            print(f"   - 실행 대기열: `{queued_relative}`")
+            if backlog_relative and summary.queued_backlog_path is None:
+                print(f"   - 연결된 작업 항목: `{backlog_label}` ({_task_backlog_status_label(summary.backlog_status)})")
+            print(f"   - 다음 명령: {_task_next_command(record, summary)}")
+        return 0
+    except (HarnessCliError, harness_controller.ControllerError, harness_loop.LoopError, harness_task_intake.TaskIntakeError) as exc:
         print(f"error: {exc}")
         return 2
 
@@ -2725,6 +2896,10 @@ def build_parser() -> argparse.ArgumentParser:
     task_draft.add_argument("--title", default=argparse.SUPPRESS)
     task_draft.add_argument("--packet-id")
     task_draft.set_defaults(func=command_task_draft)
+    task_list = task_subparsers.add_parser("list", help="List task request packets and next actions.")
+    task_list.add_argument("--target", default=argparse.SUPPRESS, help="Target selector; default is @default.")
+    task_list.add_argument("--json", action="store_true", help="Emit secret-safe JSON summary.")
+    task_list.set_defaults(func=command_task_list)
     task_from = task_subparsers.add_parser("from", help="Create a task packet from a requirements file.")
     task_from.add_argument("source", type=Path)
     task_from.add_argument("--target", default=argparse.SUPPRESS, help="Target selector; default is @default.")

@@ -29,8 +29,9 @@ def test_beginner_help_home_no_args_and_help_are_static(monkeypatch, tmp_path: P
     no_arg_output = capsys.readouterr().out
     assert "하네스 시작" in no_arg_output
     assert "./harness install /path/to/product --id my-app --default" in no_arg_output
-    assert "./harness task review latest" in no_arg_output
-    assert "./harness task queue latest --auto" in no_arg_output
+    assert "./harness task list" in no_arg_output
+    assert "./harness task review <packet-id>" in no_arg_output
+    assert "./harness task queue <packet-id> --auto" in no_arg_output
     assert "./harness run" in no_arg_output
     assert "./harness finish" in no_arg_output
     assert "./harness --help" in no_arg_output
@@ -123,6 +124,39 @@ def _write_sidecar_backlog(controller: Path, target_id: str = "demo") -> Path:
         encoding="utf-8",
     )
     return backlog
+
+
+def _write_safe_task_request(path: Path, *, title: str = "Add welcome copy") -> None:
+    path.write_text(
+        "\n".join(
+            [
+                f"# {title}",
+                "",
+                "## Goal",
+                "- Add concise welcome copy to README.md.",
+                "",
+                "## Summary",
+                "- Update the product README with a short note.",
+                "",
+                "## Acceptance",
+                "- README.md contains the new note.",
+                "",
+                "## File Scope",
+                "- README.md",
+                "",
+                "## Forbidden Scope",
+                "- .env*",
+                "- runs/**",
+                "- reports/**",
+                "- targets/**",
+                "",
+                "## Validation",
+                "- `git diff -- README.md`",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
 
 def _init_product_repo(path: Path, *, configure_identity: bool = False) -> str:
@@ -872,12 +906,356 @@ def test_beginner_install_task_review_queue_auto(monkeypatch, tmp_path: Path, ca
     assert module.main(["task", "review", "latest"]) == 0
     assert module.main(["task", "queue", "latest", "--auto"]) == 0
     output = capsys.readouterr().out
-    assert "작업 요청 queue 완료" in output
+    assert "실행 대기열 등록 완료" in output
+    assert "실행 방식: 자동" in output
     queued = tuple((controller / "targets" / "demo" / "backlog" / "queued").glob("*.md"))
     assert len(queued) == 1
     body = queued[0].read_text(encoding="utf-8")
     assert "Autonomy-Execute: auto" in body
     assert "Target-ID: demo" in body
+    _assert_no_product_harness_pollution(product)
+
+
+def test_beginner_task_list_empty_and_target_bound_next_action(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product_default = tmp_path / "product-default"
+    product_other = tmp_path / "product-other"
+    controller.mkdir()
+    _init_product_repo(product_default)
+    _init_product_repo(product_other)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.19")
+
+    assert module.main(["install", "--repo", str(product_default), "--id", "demo", "--default"]) == 0
+    assert module.main(["install", "--repo", str(product_other), "--id", "other"]) == 0
+    capsys.readouterr()
+
+    assert module.main(["task", "list"]) == 0
+    output = capsys.readouterr().out
+    assert "작업 요청 목록" in output
+    assert "대상: `demo`" in output
+    assert "요청: 없음" in output
+    assert "다음 명령: `./harness task`" in output
+
+    assert module.main(["task", "list", "--target", "other"]) == 0
+    output = capsys.readouterr().out
+    assert "대상: `other`" in output
+    assert "다음 명령: `./harness task --target other`" in output
+    _assert_no_product_harness_pollution(product_default)
+    _assert_no_product_harness_pollution(product_other)
+
+
+def test_beginner_task_list_requires_default_target_without_selector(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    controller.mkdir()
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+
+    assert module.main(["task", "list"]) == 2
+    output = capsys.readouterr().out
+    assert "default" in output.lower()
+    assert not (controller / "targets").exists()
+
+
+def test_beginner_task_list_reports_packet_specific_next_actions(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    request = tmp_path / "request.md"
+    _write_safe_task_request(request)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.19")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    assert module.main(["task", "from", str(request), "--packet-id", "task-reviewed"]) == 0
+    assert module.main(["task", "review", "task-reviewed"]) == 0
+    assert module.main(["task", "draft", "--packet-id", "task-draft"]) == 0
+    capsys.readouterr()
+
+    assert module.main(["task", "list"]) == 0
+    output = capsys.readouterr().out
+    assert "요청: `task-reviewed`" in output
+    assert "검토 상태: 검토 완료" in output
+    assert "다음 명령: `./harness task queue task-reviewed --auto`" in output
+    assert "요청: `task-draft`" in output
+    assert "검토 상태: 검토 전" in output
+    assert "다음 명령: `./harness task review task-draft`" in output
+    assert "latest" not in output
+    _assert_no_product_harness_pollution(product)
+
+
+def test_beginner_task_list_marks_stale_review(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    request = tmp_path / "request.md"
+    _write_safe_task_request(request)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.19")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    assert module.main(["task", "from", str(request), "--packet-id", "task-stale"]) == 0
+    assert module.main(["task", "review", "task-stale"]) == 0
+    packet_request = controller / "targets" / "demo" / "backlog" / "drafts" / "task-stale" / "request.md"
+    packet_request.write_text(packet_request.read_text(encoding="utf-8") + "\n## Notes\n\n- Edited after review.\n", encoding="utf-8")
+    capsys.readouterr()
+
+    assert module.main(["task", "list"]) == 0
+    output = capsys.readouterr().out
+    assert "검토 상태: 다시 검토 필요" in output
+    assert "다음 명령: `./harness task review task-stale`" in output
+    assert not tuple((controller / "targets" / "demo" / "backlog" / "queued").glob("*.md"))
+    _assert_no_product_harness_pollution(product)
+
+
+def test_beginner_task_list_json_is_secret_safe_and_read_only(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    request = tmp_path / "request.md"
+    request.write_text(
+        "\n".join(
+            [
+                "# Visual task",
+                "",
+                "## Summary",
+                "- DONOTLEAK requirement body should stay out of list JSON.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    image = tmp_path / "visual-mock.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.19")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    assert (
+        module.main(
+            [
+                "task",
+                "from",
+                str(request),
+                "--packet-id",
+                "task-visual",
+                "--image",
+                str(image),
+                "--caption",
+                "Reference caption should not leak",
+            ]
+        )
+        == 0
+    )
+    state_root = controller / "targets" / "demo"
+    before = {
+        path.relative_to(state_root).as_posix(): path.read_bytes()
+        for path in sorted(state_root.rglob("*"))
+        if path.is_file() and not path.is_symlink()
+    }
+    capsys.readouterr()
+
+    assert module.main(["task", "list", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    rendered = json.dumps(payload, ensure_ascii=False)
+
+    assert payload["tasks"][0]["packet_id"] == "task-visual"
+    assert payload["tasks"][0]["attachment_count"] == 1
+    assert payload["tasks"][0]["review_status"] == "not-reviewed"
+    assert "DONOTLEAK" not in rendered
+    assert "Reference caption" not in rendered
+    assert str(image) not in rendered
+    assert "sha256" not in rendered
+    assert {
+        path.relative_to(state_root).as_posix(): path.read_bytes()
+        for path in sorted(state_root.rglob("*"))
+        if path.is_file() and not path.is_symlink()
+    } == before
+    assert not tuple((state_root / "backlog" / "queued").glob("*.md"))
+    _assert_no_product_harness_pollution(product)
+
+
+def test_beginner_task_list_explicit_target_filters_and_uses_canonical_run(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product_default = tmp_path / "product-default"
+    product_other = tmp_path / "product-other"
+    controller.mkdir()
+    _init_product_repo(product_default)
+    _init_product_repo(product_other)
+    request = tmp_path / "request.md"
+    _write_safe_task_request(request)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.19")
+
+    assert module.main(["install", "--repo", str(product_default), "--id", "demo", "--default"]) == 0
+    assert module.main(["install", "--repo", str(product_other), "--id", "other"]) == 0
+    assert module.main(["task", "--target", "other", "from", str(request), "--packet-id", "task-other"]) == 0
+    assert module.main(["task", "--target", "other", "review", "task-other"]) == 0
+    assert module.main(["task", "--target", "other", "queue", "task-other", "--auto"]) == 0
+    capsys.readouterr()
+
+    assert module.main(["task", "list", "--target", "other"]) == 0
+    output = capsys.readouterr().out
+    assert "대상: `other`" in output
+    assert "요청: `task-other`" in output
+    assert "요청: `task-demo`" not in output
+    assert "다음 명령: `./harness target run other --implement-backlog-once`" in output
+    assert "`./harness run`" not in output
+    _assert_no_product_harness_pollution(product_default)
+    _assert_no_product_harness_pollution(product_other)
+
+
+def test_beginner_task_list_does_not_run_non_queued_intake_backlog(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    request = tmp_path / "request.md"
+    _write_safe_task_request(request)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.19")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    assert module.main(["task", "from", str(request), "--packet-id", "task-done"]) == 0
+    assert module.main(["task", "review", "task-done"]) == 0
+    assert module.main(["task", "queue", "task-done", "--auto"]) == 0
+    queued = next((controller / "targets" / "demo" / "backlog" / "queued").glob("*.md"))
+    completed = controller / "targets" / "demo" / "backlog" / "completed" / queued.name
+    completed.parent.mkdir(parents=True, exist_ok=True)
+    completed.write_text(
+        queued.read_text(encoding="utf-8").replace("Status: queued", "Status: completed", 1),
+        encoding="utf-8",
+    )
+    queued.unlink()
+    capsys.readouterr()
+
+    assert module.main(["task", "list"]) == 0
+    output = capsys.readouterr().out
+
+    assert "연결된 작업 항목" in output
+    assert "완료됨" in output
+    assert "상태 backlog입니다" not in output
+    assert "completed" not in output
+    assert "`./harness run`" not in output
+    assert "queue task-done" not in output
+    _assert_no_product_harness_pollution(product)
+
+
+def test_beginner_task_list_rejects_symlinked_sidecar_backlog_dir(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.19")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    queued = controller / "targets" / "demo" / "backlog" / "queued"
+    queued.parent.mkdir(parents=True, exist_ok=True)
+    if queued.exists():
+        queued.rmdir()
+    outside = tmp_path / "outside-queued"
+    outside.mkdir()
+    queued.symlink_to(outside, target_is_directory=True)
+    capsys.readouterr()
+
+    assert module.main(["task", "list"]) == 2
+    output = capsys.readouterr().out
+    assert "sidecar backlog path must not be a symlink" in output
+    _assert_no_product_harness_pollution(product)
+
+
+def test_beginner_task_list_rejects_symlinked_sidecar_backlog_file(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.19")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    queued = controller / "targets" / "demo" / "backlog" / "queued"
+    queued.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "BL-outside.md"
+    outside.write_text(
+        "\n".join(
+            [
+                "ID: BL-outside",
+                "Title: Outside",
+                "Status: queued",
+                "Priority: P2",
+                "Goal: unlinked",
+                "Source: test",
+                "Autonomy-Execute: auto",
+                "Intake-Packet: task-demo",
+                "",
+                "## Summary",
+                "- Outside file.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (queued / "BL-link.md").symlink_to(outside)
+    capsys.readouterr()
+
+    assert module.main(["task", "list"]) == 2
+    output = capsys.readouterr().out
+    assert "sidecar backlog file must not be a symlink" in output
+    _assert_no_product_harness_pollution(product)
+
+
+def test_beginner_task_list_reports_canonical_backlog_parser_errors(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    request = tmp_path / "request.md"
+    _write_safe_task_request(request)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.19")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    assert module.main(["task", "from", str(request), "--packet-id", "task-invalid"]) == 0
+    invalid = controller / "targets" / "demo" / "backlog" / "queued" / "BL-invalid.md"
+    invalid.parent.mkdir(parents=True, exist_ok=True)
+    invalid.write_text(
+        "\n".join(
+            [
+                "ID: BL-invalid",
+                "Title: Invalid",
+                "Status: invalid-state",
+                "Priority: P2",
+                "Goal: unlinked",
+                "Source: test",
+                "Autonomy-Execute: auto",
+                "Intake-Packet: task-invalid",
+                "",
+                "## Summary",
+                "- Invalid status.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    capsys.readouterr()
+
+    assert module.main(["task", "list"]) == 2
+    output = capsys.readouterr().out
+    assert "unsupported backlog status" in output
+    assert "Traceback" not in output
     _assert_no_product_harness_pollution(product)
 
 

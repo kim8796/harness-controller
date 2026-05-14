@@ -105,6 +105,26 @@ class AiReviewResult:
     risk_notes: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class TaskPacketSummary:
+    packet_id: str
+    target_id: str
+    source: str
+    updated_at: str
+    request_path: Path
+    title: str
+    request_issue: str
+    review_status: str
+    auto_eligible: bool | None
+    open_question_count: int
+    risk_flag_count: int
+    attachment_count: int
+    backlog_path: Path | None
+    backlog_status: str
+    queued_backlog_path: Path | None
+    autonomy_execute: str
+
+
 def utc_timestamp() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -616,6 +636,25 @@ def latest_packet_id(state_root: Path, *, target_id: str | None = None) -> str:
     return sorted(candidates)[-1][1]
 
 
+def _packet_ids(state_root: Path, *, target_id: str | None = None) -> tuple[str, ...]:
+    drafts_root = _sidecar_path(state_root, DRAFTS_DIR)
+    if not drafts_root.exists():
+        return ()
+    candidates: list[tuple[float, str]] = []
+    for packet_json in drafts_root.glob("*/task-packet.json"):
+        if packet_json.parent.is_symlink() or packet_json.is_symlink():
+            raise TaskIntakeError("refusing sidecar symlink task packet")
+        packet_id = validate_packet_id(packet_json.parent.name)
+        try:
+            payload = json.loads(_read_text(packet_json))
+        except json.JSONDecodeError:
+            continue
+        if target_id is not None and payload.get("target_id") != target_id:
+            continue
+        candidates.append((packet_json.stat().st_mtime, packet_id))
+    return tuple(packet_id for _mtime, packet_id in sorted(candidates, reverse=True))
+
+
 def _section(text: str, names: Iterable[str]) -> str:
     escaped = "|".join(re.escape(name) for name in names)
     pattern = re.compile(rf"^##\s+(?:{escaped})\s*$\n(?P<body>.*?)(?=^##\s+|\Z)", re.MULTILINE | re.DOTALL | re.IGNORECASE)
@@ -646,6 +685,16 @@ def _first_heading(text: str) -> str:
             if title:
                 return title[:120]
     return "Task intake request"
+
+
+def _safe_title_and_hash(path: Path) -> tuple[str, str, str]:
+    text = _read_text(path)
+    digest = sha256_text(text)
+    try:
+        _reject_secretish_text(text)
+    except TaskIntakeError:
+        return "비밀값 확인 필요", digest, "secret-like-request"
+    return _first_heading(text), digest, ""
 
 
 def _request_model(state_root: Path, packet_id: str) -> dict[str, object]:
@@ -1170,6 +1219,100 @@ def _existing_backlog_for_packet(state_root: Path, packet_id: str) -> Path | Non
             if parse_backlog_metadata_text(_read_text(path)).get("intake_packet") == packet_id:
                 return path
     return None
+
+
+def _backlog_for_packet(
+    state_root: Path,
+    packet: Mapping[str, object],
+    packet_id: str,
+) -> tuple[Path | None, Path | None, str, str]:
+    discovered_items = {item.path: item for item in harness_loop.discover_backlog_items(state_root)}
+    queued_backlog_path = str(packet.get("queued_backlog_path") or "").strip()
+    if queued_backlog_path:
+        candidate = Path(queued_backlog_path)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            raise TaskIntakeError("task packet queued backlog path is unsafe")
+        path = _sidecar_path(state_root, candidate)
+        if path.exists():
+            item = discovered_items.get(candidate)
+            if item is None:
+                raise TaskIntakeError("task backlog is not visible to canonical backlog discovery")
+            if item.intake_packet and item.intake_packet != packet_id:
+                raise TaskIntakeError("task backlog intake packet mismatch")
+            if item.status == "queued":
+                return path, path, item.status, item.autonomy_execute
+            return None, path, item.status, item.autonomy_execute
+    for item in discovered_items.values():
+        if item.intake_packet == packet_id:
+            path = _sidecar_path(state_root, item.path)
+            if item.status == "queued":
+                return path, path, item.status, item.autonomy_execute
+            return None, path, item.status, item.autonomy_execute
+    return None, None, "", ""
+
+
+def _read_review_summary(
+    *,
+    state_root: Path,
+    packet_id: str,
+    target_id: str,
+    request_sha256: str,
+) -> tuple[str, bool | None, int, int]:
+    review_path = _sidecar_path(state_root, DRAFTS_DIR, packet_id, "review.json")
+    if not review_path.exists():
+        return "not-reviewed", None, 0, 0
+    try:
+        payload = json.loads(_read_text(review_path))
+    except json.JSONDecodeError:
+        return "invalid", None, 0, 0
+    if payload.get("target_id") != target_id:
+        return "invalid", None, 0, 0
+    if payload.get("request_sha256") != request_sha256:
+        return "stale", None, 0, 0
+    return (
+        "reviewed",
+        bool(payload.get("auto_eligible")),
+        len(payload.get("open_questions") or ()),
+        len(payload.get("risk_flags") or ()),
+    )
+
+
+def summarize_packets(state_root: Path, *, target_id: str | None = None) -> tuple[TaskPacketSummary, ...]:
+    summaries: list[TaskPacketSummary] = []
+    for packet_id in _packet_ids(state_root, target_id=target_id):
+        packet = load_packet(state_root, packet_id)
+        resolved_target_id = _assert_expected_target(packet, target_id)
+        request_path = _request_path(state_root, packet_id)
+        title, request_sha256, request_issue = _safe_title_and_hash(request_path)
+        review_status, auto_eligible, open_question_count, risk_flag_count = _read_review_summary(
+            state_root=state_root,
+            packet_id=packet_id,
+            target_id=resolved_target_id,
+            request_sha256=request_sha256,
+        )
+        queued_path, backlog_path, backlog_status, autonomy_execute = _backlog_for_packet(state_root, packet, packet_id)
+        attachments = packet.get("attachments") if isinstance(packet, Mapping) else None
+        summaries.append(
+            TaskPacketSummary(
+                packet_id=packet_id,
+                target_id=resolved_target_id,
+                source=str(packet.get("source") or ""),
+                updated_at=str(packet.get("updated_at") or ""),
+                request_path=request_path,
+                title=title,
+                request_issue=request_issue,
+                review_status=review_status,
+                auto_eligible=auto_eligible,
+                open_question_count=open_question_count,
+                risk_flag_count=risk_flag_count,
+                attachment_count=len(attachments) if isinstance(attachments, list) else 0,
+                backlog_path=backlog_path,
+                backlog_status=backlog_status,
+                queued_backlog_path=queued_path,
+                autonomy_execute=autonomy_execute,
+            )
+        )
+    return tuple(summaries)
 
 
 def queue_packet(

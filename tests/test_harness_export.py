@@ -371,17 +371,19 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     )
     assert no_arg_help.stdout == explicit_help.stdout
     assert "하네스 시작" in no_arg_help.stdout
-    assert "./harness task review latest" in no_arg_help.stdout
-    assert "./harness task queue latest --auto" in no_arg_help.stdout
+    assert "./harness task list" in no_arg_help.stdout
+    assert "./harness task review <packet-id>" in no_arg_help.stdout
+    assert "./harness task queue <packet-id> --auto" in no_arg_help.stdout
     assert not (bundle / "targets").exists()
     readme = (bundle / "README.md").read_text(encoding="utf-8")
     assert "Harness Controller Bundle" in readme
     assert "`./harness` 와 `./harness help` 는 한국어 시작 화면" in readme
     assert "./harness controller doctor" in readme
     assert "./harness install /path/to/product-repo --id my-app --branch main --default" in readme
-    assert "./harness task review latest" in readme
-    assert "./harness task review latest --ai" in readme
-    assert "./harness task queue latest --auto" in readme
+    assert "./harness task list" in readme
+    assert "./harness task review <packet-id>" in readme
+    assert "./harness task review <packet-id> --ai" in readme
+    assert "./harness task queue <packet-id> --auto" in readme
     assert "./harness finish" in readme
     assert "`./harness run` 은 자동 실행 가능한 요청 1개" in readme
     assert "`./harness finish` 는 실행 이후 남은 완료 처리와 커밋/푸시 단계" in readme
@@ -472,8 +474,19 @@ def test_exported_controller_beginner_flow_runs_from_bundle(tmp_path: Path) -> N
         capture_output=True,
         env=_git_env(),
     ).returncode == 0
+    list_before_review = subprocess.run(
+        [str(harness), "task", "list"],
+        cwd=bundle,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    )
+    assert "요청: `task-demo`" in list_before_review.stdout
+    assert "검토 상태: 검토 전" in list_before_review.stdout
+    assert "다음 명령: `./harness task review task-demo`" in list_before_review.stdout
     subprocess.run(
-        [str(harness), "task", "review", "latest"],
+        [str(harness), "task", "review", "task-demo"],
         cwd=bundle,
         check=True,
         text=True,
@@ -481,13 +494,23 @@ def test_exported_controller_beginner_flow_runs_from_bundle(tmp_path: Path) -> N
         env=_git_env(),
     )
     subprocess.run(
-        [str(harness), "task", "review", "latest", "--ai"],
+        [str(harness), "task", "review", "task-demo", "--ai"],
         cwd=bundle,
         check=True,
         text=True,
         capture_output=True,
         env=_git_env(),
     )
+    list_after_review = subprocess.run(
+        [str(harness), "task", "list"],
+        cwd=bundle,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    )
+    assert "검토 상태: 검토 완료" in list_after_review.stdout
+    assert "다음 명령: `./harness task queue task-demo --auto`" in list_after_review.stdout
     assert (bundle / "targets" / "demo" / "backlog" / "drafts" / "task-demo" / "ai-review-prompt.md").exists()
     assert not tuple((bundle / "targets" / "demo" / "backlog" / "queued").glob("*.md"))
     no_backlog_run = subprocess.run(
@@ -501,7 +524,7 @@ def test_exported_controller_beginner_flow_runs_from_bundle(tmp_path: Path) -> N
     assert no_backlog_run.returncode == 2
     assert "실행 가능한 sidecar backlog" in no_backlog_run.stdout
     subprocess.run(
-        [str(harness), "task", "queue", "latest", "--auto"],
+        [str(harness), "task", "queue", "task-demo", "--auto"],
         cwd=bundle,
         check=True,
         text=True,

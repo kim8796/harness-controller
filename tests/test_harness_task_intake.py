@@ -71,6 +71,127 @@ def test_task_intake_draft_review_and_queue_auto(tmp_path: Path) -> None:
     assert [item.item_id for item in discovered] == [queued.backlog_id]
 
 
+def _file_snapshot(root: Path) -> dict[str, bytes]:
+    if not root.exists():
+        return {}
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and not path.is_symlink()
+    }
+
+
+def test_task_intake_summarize_packets_reports_states_and_stale_review(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-demo")
+    request.write_text(_safe_request(), encoding="utf-8")
+
+    summaries = module.summarize_packets(state_root, target_id="demo")
+    assert len(summaries) == 1
+    assert summaries[0].packet_id == "task-demo"
+    assert summaries[0].review_status == "not-reviewed"
+    assert summaries[0].auto_eligible is None
+    assert summaries[0].queued_backlog_path is None
+
+    module.review_packet(state_root=state_root, packet_id="task-demo")
+    summaries = module.summarize_packets(state_root, target_id="demo")
+    assert summaries[0].review_status == "reviewed"
+    assert summaries[0].auto_eligible is True
+    assert summaries[0].open_question_count == 0
+    assert summaries[0].risk_flag_count == 0
+
+    request.write_text(_safe_request() + "\n## Notes\n\n- Update added after review.\n", encoding="utf-8")
+    summaries = module.summarize_packets(state_root, target_id="demo")
+    assert summaries[0].review_status == "stale"
+    assert summaries[0].auto_eligible is None
+
+    module.review_packet(state_root=state_root, packet_id="task-demo")
+    queued = module.queue_packet(state_root=state_root, packet_id="task-demo", auto=True)
+    summaries = module.summarize_packets(state_root, target_id="demo")
+    assert summaries[0].review_status == "reviewed"
+    assert summaries[0].queued_backlog_path == queued.backlog_path
+    assert summaries[0].autonomy_execute == "auto"
+
+
+def test_task_intake_summarize_packets_is_read_only(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-demo")
+    request.write_text(_safe_request(), encoding="utf-8")
+    module.review_packet(state_root=state_root, packet_id="task-demo")
+    before = _file_snapshot(state_root)
+
+    summaries = module.summarize_packets(state_root, target_id="demo")
+
+    assert summaries[0].packet_id == "task-demo"
+    assert _file_snapshot(state_root) == before
+    assert not (state_root / "backlog" / "queued").exists()
+
+
+@pytest.mark.parametrize("state", ["active", "blocked", "completed"])
+def test_task_intake_summarize_does_not_treat_non_queued_backlog_as_runnable(
+    tmp_path: Path,
+    state: str,
+) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-demo")
+    request.write_text(_safe_request(), encoding="utf-8")
+    module.review_packet(state_root=state_root, packet_id="task-demo")
+    queued = module.queue_packet(state_root=state_root, packet_id="task-demo", auto=True)
+    destination = state_root / "backlog" / state / queued.backlog_path.name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    body = queued.backlog_path.read_text(encoding="utf-8").replace("Status: queued", f"Status: {state}", 1)
+    destination.write_text(body, encoding="utf-8")
+    queued.backlog_path.unlink()
+
+    summary = module.summarize_packets(state_root, target_id="demo")[0]
+
+    assert summary.queued_backlog_path is None
+    assert summary.backlog_path == destination
+    assert summary.backlog_status == state
+    assert summary.autonomy_execute == "auto"
+
+
+def test_task_intake_summarize_redacts_secret_like_request_title(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-secret")
+    request.write_text("# Safe heading\n\n## Summary\n\n- API_KEY=abcdef12345678901234567890\n", encoding="utf-8")
+
+    summary = module.summarize_packets(state_root, target_id="demo")[0]
+
+    assert summary.title == "비밀값 확인 필요"
+    assert summary.request_issue == "secret-like-request"
+    assert summary.review_status == "not-reviewed"
+
+
+def test_task_intake_summarize_rejects_unsafe_sidecar_state(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-demo")
+    request.write_text(_safe_request(), encoding="utf-8")
+    packet_path = state_root / "backlog" / "drafts" / "task-demo" / "task-packet.json"
+    packet = module.load_packet(state_root, "task-demo")
+    packet["queued_backlog_path"] = "../escape.md"
+    packet_path.write_text(module.json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    with pytest.raises(module.TaskIntakeError, match="unsafe"):
+        module.summarize_packets(state_root, target_id="demo")
+
+    packet_path.write_text(module.json.dumps({**packet, "queued_backlog_path": ""}), encoding="utf-8")
+    link_root = state_root / "backlog" / "drafts" / "task-link"
+    outside = tmp_path / "outside-packet"
+    outside.mkdir()
+    (outside / "task-packet.json").write_text("{}", encoding="utf-8")
+    link_root.symlink_to(outside)
+
+    with pytest.raises(module.TaskIntakeError, match="symlink"):
+        module.summarize_packets(state_root, target_id="demo")
+
+
 def test_task_intake_rejects_secret_files_and_symlinks(tmp_path: Path) -> None:
     module = _load_module()
     state_root = tmp_path / "targets" / "demo"
