@@ -21,6 +21,45 @@ def _load_module():
     return module
 
 
+def _git_env() -> dict[str, str]:
+    env = dict(os.environ)
+    for key in tuple(env):
+        if key.startswith("GIT_"):
+            env.pop(key, None)
+    env.update(
+        {
+            "GIT_AUTHOR_NAME": "Harness Test",
+            "GIT_AUTHOR_EMAIL": "harness-test@example.invalid",
+            "GIT_COMMITTER_NAME": "Harness Test",
+            "GIT_COMMITTER_EMAIL": "harness-test@example.invalid",
+        }
+    )
+    return env
+
+
+def _init_product_repo(path: Path) -> str:
+    path.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, text=True, capture_output=True, env=_git_env())
+    (path / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=path, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=path, check=True, env=_git_env())
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=path,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.strip()
+
+
+def _assert_no_product_harness_pollution(product: Path) -> None:
+    for path in ("HARNESS.md", "harness", "runs", "reports", "backlog", "targets", ".env", ".env.harness.generated"):
+        assert not (product / path).exists()
+    if (product / "scripts").exists():
+        assert not any((product / "scripts").glob("harness*"))
+
+
 def test_read_current_version_parses_version_file(tmp_path: Path) -> None:
     module = _load_module()
     (tmp_path / "docs" / "harness").mkdir(parents=True)
@@ -301,15 +340,25 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "docs" / "harness" / "releases" / "v1.8.9.md").exists()
     assert (bundle / "docs" / "harness" / "releases" / "v1.8.10.md").exists()
     assert (bundle / "docs" / "harness" / "releases" / "v1.8.11.md").exists()
+    assert (bundle / "docs" / "harness" / "releases" / "v1.8.12.md").exists()
+    assert (bundle / "docs" / "harness" / "releases" / "v1.8.13.md").exists()
+    assert (bundle / "docs" / "harness" / "releases" / "v1.8.14.md").exists()
     assert not (bundle / "coverage-summary.txt").exists()
     assert not (bundle / "targets").exists()
     assert not (bundle / ".env").exists()
     assert not (bundle / "runs" / "autonomy" / "control.json").exists()
     assert (bundle / "runs" / "autonomy" / "inbox" / "README.md").exists()
     assert (bundle / "reports" / "harness-autonomy" / "README.md").exists()
+    assert (bundle / "scripts" / "harness_task_intake.py").exists()
+    assert (bundle / "tests" / "test_harness_task_intake.py").exists()
     readme = (bundle / "README.md").read_text(encoding="utf-8")
     assert "Harness Controller Bundle" in readme
     assert "./harness controller doctor" in readme
+    assert "./harness install --repo /path/to/product-repo --id my-app --branch main --default" in readme
+    assert "./harness task queue latest --auto" in readme
+    assert "`./harness run` runs one queued auto task" in readme
+    assert "Bare `./harness run` maps to `target run @default --implement-backlog-once`" in readme
+    assert "./harness smoke implementation" in readme
     assert "HARNESS_RELAY_TARGET_IDS=my-app" in readme
     assert "HARNESS_RELAY_TARGET_ALIASES=app=my-app" in readme
     assert "./harness target alias add my-app app" in readme
@@ -337,6 +386,121 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     sanitization = module.build_controller_sanitization_report(bundle)
     assert sanitization["ok"] is True
     assert sanitization["blockers"] == []
+
+
+def test_exported_controller_beginner_flow_runs_from_bundle(tmp_path: Path) -> None:
+    module = _load_module()
+    source = Path(__file__).resolve().parents[1]
+    bundle = tmp_path / "controller-bundle"
+    product = tmp_path / "product"
+    head_before = _init_product_repo(product)
+    request = tmp_path / "request.md"
+    request.write_text(
+        "\n".join(
+            [
+                "# Add smoke note",
+                "",
+                "## Goal",
+                "- Add a small smoke note to README.md.",
+                "",
+                "## Summary",
+                "- Verify exported controller beginner commands work from the bundle.",
+                "",
+                "## Acceptance",
+                "- README.md contains the smoke note.",
+                "",
+                "## File Scope",
+                "- README.md",
+                "",
+                "## Forbidden Scope",
+                "- .env*",
+                "- runs/**",
+                "- reports/**",
+                "- targets/**",
+                "",
+                "## Validation",
+                "- `git diff -- README.md`",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    module.export_controller_bundle(source, bundle)
+    harness = bundle / "harness"
+
+    subprocess.run(
+        [str(harness), "install", "--repo", str(product), "--id", "demo", "--default"],
+        cwd=bundle,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    )
+    subprocess.run(
+        [str(harness), "task", "from", str(request), "--packet-id", "task-demo"],
+        cwd=bundle,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    )
+    subprocess.run(
+        [str(harness), "task", "review", "latest"],
+        cwd=bundle,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    )
+    subprocess.run(
+        [str(harness), "task", "queue", "latest", "--auto"],
+        cwd=bundle,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    )
+    subprocess.run(
+        [
+            str(harness),
+            "target",
+            "run",
+            "@default",
+            "--implement-backlog-once",
+            "--runner",
+            "custom",
+            "--command-template",
+            "printf '\\nSmoke implemented\\n' >> README.md && printf 'Implementation done\\n'",
+        ],
+        cwd=bundle,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    )
+
+    head_after = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.strip()
+    status_after = subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.splitlines()
+
+    assert head_after == head_before
+    assert status_after == [" M README.md"]
+    assert (bundle / "targets" / "demo" / "backlog" / "queued").exists()
+    assert (bundle / "targets" / "demo" / "runs" / "harness").exists()
+    _assert_no_product_harness_pollution(product)
 
 
 def test_controller_bundle_rejects_existing_git_output(tmp_path: Path) -> None:

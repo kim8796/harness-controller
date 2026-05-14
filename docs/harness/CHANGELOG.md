@@ -1,5 +1,12 @@
 # Harness Changelog
 
+## 1.8.14 - 2026-05-14
+
+- Added beginner external controller wrappers: `./harness install`, `./harness task`, bare `./harness run`, and `./harness smoke implementation`.
+- Kept the advanced target gates as the canonical implementation path; beginner commands delegate to target registration, sidecar backlog intake, and `target run @default --implement-backlog-once`.
+- Added task packet intake under `targets/<id>/backlog/drafts`, including secret-safe file/image import metadata, review previews, and fail-closed `queue --auto` checks.
+- Preserved product repo safety: no harness files/state, backlog completion, product commit, or product push are performed by beginner commands.
+
 ## 1.8.13 - 2026-05-14
 
 - Fixed external `target run --implement-backlog-once` so the default Codex path no longer forwards unsupported model `auto`.

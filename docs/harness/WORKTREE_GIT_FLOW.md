@@ -175,6 +175,7 @@ pre-push 시 harness version sync 는 기본적으로 upstream 또는 branch bas
 - 이 규칙은 `scripts/harness_loop.py` 의 auto-PR 판단, `scripts/harness_workspace.py` 의 worktree 생성, `scripts/harness_autonomy.py` 의 outer loop 상태 확인, `scripts/harness_guard.py` 의 hook 검증에도 동일하게 적용한다.
 - starter env provider checks 는 현재 checkout 의 env readiness 를 읽기 전용으로 점검하는 경로다. 다른 worktree 의 `.env` 값을 복사하거나 provider env 를 자동 수정하는 cleanup/upgrade 단계로 섞지 않는다.
 - optional global wrapper 는 worktree state 를 소유하지 않는다. wrapper 는 현재 cwd 기준 local `./harness` 를 찾아 위임만 하며, linked worktree 를 자동 선택하거나 branch cleanup 을 수행하지 않는다.
+- beginner `./harness install` 은 global wrapper 설치가 아니라 external controller target registration 이다. 이 경로도 product repo 에 `HARNESS.md`, `harness`, `scripts/harness*`, `runs/**`, `reports/**`, `backlog/**`, `targets/**`, `.env*` 를 쓰면 안 되며, 기록은 controller 의 target sidecar 아래에만 남긴다.
 - worktree 생성과 autonomy backup commit 은 operator identity 를 먼저 고정한다. source 순서는 `HARNESS_GIT_AUTHOR_NAME` / `HARNESS_GIT_AUTHOR_EMAIL`, `HARNESS_GIT_IDENTITY_FILE`, global `git config --global user.name/user.email` 이며, 한 source 가 비어 있거나 `test@example.com` 같은 placeholder 면 다음 source 로 섞지 않고 fail-fast 한다.
 - `scripts/harness_guard.py --mode pre-push` 는 HEAD commit 의 author / committer identity 를 출력하고 known-bad placeholder 는 warning 으로 표시한다. warning 은 과거 commit 을 고쳐 쓰는 blocker 가 아니라 push 전 회귀 가시화 장치다.
 - branch cleanup 자체도 같은 문서 규칙을 따라 도구와 무관하게 같은 안전 기준으로 처리한다.

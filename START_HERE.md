@@ -4,7 +4,7 @@
 
 현재 starter baseline 은 `docs/harness/VERSION.md` 의 Current Version 을 따른다. 이 문서는 기능 목록이 아니라 “새 프로젝트에 하네스를 어떻게 설치하고 시작하는지”만 설명한다. 긴 기능 목록은 `VERSION.md`, `CHANGELOG.md`, `FRAMEWORK_EXPORT.md` 를 본다.
 
-`v1.8.13` 기준 external controller 는 `--implement-backlog-once` 뒤에도 backlog 완료, commit, push 를 자동으로 하지 않는다. 이 구현 gate 는 기본적으로 Codex 의 managed latest/default 모델을 쓰고 reasoning 을 `xhigh` 로 고정하며, 다른 모델이 필요하면 `--runner-model <model-id>` 를 명시한다. `./harness target backlog transition <target> --status completed|blocked|manual-review` 로 sidecar backlog 를 완료 처리한 뒤, `./harness target backlog commit <target> --run <run-id> --message "<msg>"` 를 dry-run 하고 `--apply` 에서만 product repo local commit 을 만든다. 원격 공유는 별도 `./harness target backlog push <target> --run <run-id>` dry-run 후 `--apply` 에서만 수행한다. Controller export 는 v1.8+ release note 이력을 보존하고 generated coverage artifact 를 제외한다.
+`v1.8.14` 기준 external controller 의 초보자 경로는 `./harness install -> ./harness task -> ./harness run` 이다. `install` 은 product repo 에 하네스 파일을 쓰지 않고 controller 에 대상만 등록한다. `task` 는 요구사항 draft 를 만들고 review/queue 를 거쳐 실행 가능한 backlog 로 바꾼다. `run` 은 기본 대상의 queued auto task 하나를 구현 lane 에 넘기며, 결과는 local product diff 로만 남긴다. backlog 완료, commit, push 는 자동으로 하지 않는다. 고급 전환/commit/push 명령은 아래 “고급 명령”에서만 다룬다.
 
 ## 초간단 사용법
 
@@ -47,15 +47,15 @@ cd /path/to/my-project
 cd /path/to/harness-controller
 ./harness controller doctor
 ./harness controller export /path/to/controller-bundle
-./harness target add my-app --repo /path/to/my-app --branch main
-./harness target alias add my-app app
-./harness target set-default my-app
-./harness target verify my-app
-./harness target dashboard my-app
-./harness target run my-app --once
+./harness install --repo /path/to/my-app --id my-app --branch main --default
+./harness task
+# 출력된 request.md 를 외부 에디터로 수정
+./harness task review latest
+./harness task queue latest --auto
+./harness run
 ```
 
-이 preview 는 product repo 를 검사하고 controller 쪽 `targets/<id>/` sidecar 에 registry/dashboard 를 만든다. product repo 에 `HARNESS.md`, `scripts/harness*`, `runs/**`, `reports/**`, `backlog/**` 를 쓰지 않는다. `./harness controller export <dir>` 는 private `harness-controller` repo 를 ad hoc 복사 없이 seed 하기 위한 controller-safe bundle 을 만든다. v1.7.100 부터 controller bundle 은 GitHub Actions workflow 와 그 workflow 가 실행할 focused tests / generated controller conftest 를 함께 포함하고, v1.7.101 부터 그 focused tests 는 clean hosted runner 에서도 git identity 없이 깨지지 않게 자체 identity 를 쓴다. v1.7.102 부터 controller workflow 는 Node 24-compatible official actions 를 쓰며, v1.7.103 부터 target sidecar 경로는 단일 `StatePaths` resolver 로 정한다. v1.7.104 부터 `./harness target run my-app --once` 는 target별 lock 을 잡고, v1.7.105 부터 Telegram/Redis owner 지시는 signed target id 를 검증해 `targets/<id>/operator-inbox` 로 들어간다. v1.7.107 기준 target run 은 verified target 에 대해 read-only/no-op smoke 로 성공하고 `targets/<id>/reports/target-run-latest.md` 를 남긴다. v1.7.108 부터 operator 는 `@app`, `@default` selector 를 쓸 수 있지만 sidecar/Redis/signature/inbox 에는 canonical `my-app` 만 남는다. v1.8.0 부터 이 smoke 는 autonomy RootContext state plumbing 까지 호출해 `targets/<id>/runs/harness`, `targets/<id>/reports/harness-autonomy`, `targets/<id>/operator-outbox`, `targets/<id>/state/` 에 evidence 를 남긴다. v1.8.1 부터 product diff smoke 는 `./harness target run my-app --execute-once` 처럼 명시 opt-in 일 때만 켜지고, uncommitted `product-smoke-change.txt` 하나만 만든다. v1.8.2 부터 `./harness target run my-app --execute-once --commit` 은 이 smoke 파일만 local commit 으로 닫고 push 는 하지 않는다. v1.8.3 부터 advanced `./harness target run my-app --execute-once --commit --push` 는 registered branch remote 를 갱신할 수 있고 product repo push automation 이 실행될 수 있다. v1.8.4 부터 `./harness target run my-app --plan-once` 는 `targets/my-app/backlog/queued` 의 실행 가능한 backlog 후보만 고르고 product repo 를 바꾸지 않는다. v1.8.5 부터 `./harness target run my-app --execute-backlog-once` 는 그 후보에 묶인 local `product-smoke-change.txt` diff 만 만들며 AI 구현 lane, backlog 완료 처리, commit, push 는 하지 않는다. v1.8.6 부터 `./harness target run my-app --implement-backlog-once` 는 그 후보를 AI implementer 에 넘겨 local product diff 만 만들며 backlog 완료 처리, commit, push 는 하지 않는다. v1.8.13 부터 이 구현 gate 의 기본 Codex 호출은 literal `auto` 모델을 넘기지 않고 managed latest/default 모델과 `xhigh` reasoning 을 쓴다. v1.8.8 부터 완료/blocked/manual-review 전환은 `./harness target backlog transition my-app --status completed|blocked|manual-review ...` 로 먼저 dry-run 하고 `--apply` 를 붙일 때만 sidecar backlog 를 바꾼다. v1.8.9 부터 `./harness target backlog commit my-app --run <run-id> --message "<msg>"` 는 completed sidecar backlog 와 product diff fingerprint 를 확인한 뒤 evidence path 만 local product commit 으로 닫는다. v1.8.12 부터 `./harness target backlog push my-app --run <run-id>` 는 matching commit receipt 와 registered branch remote base 를 확인한 뒤 dry-run 후 `--apply` 로만 product remote branch 를 갱신한다. v1.8.11 부터 controller export 는 v1.8+ release note 이력을 함께 보존하고 generated coverage artifact 를 제외한다. report 는 `targets/<target_id>/reports/target-run-latest.md`, smoke rollback 은 `git -C <target_repo> clean -f -- product-smoke-change.txt`, implementation rollback 은 report 의 changed path guidance 를 따른다. Quick path 는 계속 `--once` 이며, push smoke/backlog push 는 deployment 가 아니고 자동 remote rollback 을 하지 않는다. Detached HEAD, dirty target, branch mismatch 는 smoke blocker 다.
+이 preview 는 product repo 를 검사하고 controller 기록 디렉토리에 대상 설정, dashboard, 작업 draft 를 만든다. product repo 에 `HARNESS.md`, `scripts/harness*`, `runs/**`, `reports/**`, `backlog/**`, `targets/**`, `.env*` 를 쓰지 않는다. `./harness task draft|from|review|queue` 는 요구사항을 draft 로 보존하고, `queue` 할 때만 실행 가능한 작업으로 만든다. `--auto` 는 acceptance, file scope, validation command 가 명확할 때만 통과한다. 고급 명령이 필요하면 `./harness target add`, `./harness target alias add`, `./harness target set-default`, `./harness target verify`, `./harness target dashboard`, `./harness target run my-app --once|--plan-once|--implement-backlog-once` 를 직접 쓴다. report 는 `targets/<target_id>/reports/target-run-latest.md`, implementation rollback 은 report 의 changed path guidance 를 따른다. Push smoke/backlog push 는 deployment 가 아니고 자동 remote rollback 을 하지 않는다. Detached HEAD, dirty target, branch mismatch 는 run blocker 다.
 
 ### B. controller repo 없이 설치 도구만 따로 들고 간다
 

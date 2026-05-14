@@ -1,4 +1,4 @@
-# Harness Controller Bundle v1.8.13
+# Harness Controller Bundle v1.8.14
 
 이 디렉토리는 product repo 밖에서 실행하는 external harness controller 배포 번들이다.
 product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는다.
@@ -7,13 +7,27 @@ product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는�
 
 ```bash
 ./harness controller doctor
-./harness target add my-app --repo /path/to/product-repo --branch main
-./harness target alias add my-app app
-./harness target set-default my-app
-./harness target verify my-app
-./harness target dashboard my-app
-./harness target run my-app --once
+./harness install --repo /path/to/product-repo --id my-app --branch main --default
+./harness task
+# Edit the printed request.md, then:
+./harness task review latest
+./harness task queue latest --auto
+./harness run
 ```
+
+Beginner path:
+
+- `./harness install` means controller registration, not global wrapper install and not product repo file installation.
+- `./harness task draft|from|review|queue` stores drafts in controller records and creates an executable task only on `queue`.
+- `./harness run` runs one queued auto task for the default target and leaves local product diffs only; no completion, commit, or push is automatic.
+- `./harness smoke implementation` creates a temporary product repo and sidecar target to verify the implementation gate without touching real targets.
+
+Advanced mapping:
+
+- `./harness target add my-app --repo /path/to/product-repo --branch main` is the lower-level form behind `install`.
+- `./harness target alias add my-app app` and `./harness target set-default my-app` are available when operators need shorter selectors.
+- `./harness target verify my-app`, `./harness target dashboard my-app`, and `./harness target run my-app --once` remain the explicit inspection/smoke commands.
+- Bare `./harness run` maps to `target run @default --implement-backlog-once`.
 
 Telegram/Redis owner commands are target-scoped in external mode:
 
@@ -87,6 +101,7 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `scripts/harness_env.py`
 - `scripts/harness_profiles.py`
 - `scripts/harness_shared.py`
+- `scripts/harness_task_intake.py`
 - `scripts/harness_autonomy/__init__.py`
 - `scripts/harness_autonomy/core.py`
 - `scripts/harness_autonomy/contracts.py`
@@ -134,14 +149,16 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `tests/test_harness_cli.py`
 - `tests/test_harness_controller.py`
 - `tests/test_harness_export.py`
+- `tests/test_harness_task_intake.py`
 - `tests/test_harness_telegram_bridge.py`
 - `tests/test_redis_relay.py`
-- `docs/harness/releases/v1.8.13.md`
+- `docs/harness/releases/v1.8.14.md`
 - `docs/harness/releases/v1.8.0.md`
 - `docs/harness/releases/v1.8.1.md`
 - `docs/harness/releases/v1.8.10.md`
 - `docs/harness/releases/v1.8.11.md`
 - `docs/harness/releases/v1.8.12.md`
+- `docs/harness/releases/v1.8.13.md`
 - `docs/harness/releases/v1.8.2.md`
 - `docs/harness/releases/v1.8.3.md`
 - `docs/harness/releases/v1.8.4.md`

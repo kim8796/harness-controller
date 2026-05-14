@@ -545,6 +545,8 @@ git 기본 정책:
 - `scripts/harness_loop.py` 의 low-risk auto-PR 판단과 `scripts/harness_workspace.py` 의 worktree 생성도 같은 env safety 규칙을 사용해야 한다
 - `./harness env check` 와 `./harness env register --dry-run` 은 starter operator readiness helper 이며 loop 실행기나 provider mutator 가 아니다. loop 는 이 출력만 근거로 외부 env 를 직접 수정하지 않는다
 - `./harness self install` 이 만든 global wrapper 는 convenience shim 일 뿐이다. loop 실행기, scheduler, profile owner 가 아니며, current directory 또는 parent 의 local `./harness` 로 위임해야 한다
+- External controller beginner UX 에서 `./harness install` 은 global wrapper 설치가 아니라 target 등록/검증/default 설정 wrapper 다. `./harness task` 는 draft/review/queue 단계로 canonical backlog markdown 을 만들고, `./harness run` 은 default target 의 implement-backlog gate 로만 위임한다. transition, commit, push 는 beginner run 에서 자동으로 함께 수행하지 않는다.
+- `./harness task queue --auto` 는 canonical file-scope / forbidden-scope / validation parser proof 를 통과한 경우에만 auto backlog 를 만든다. 불명확한 요구사항, 이미지 단독 요구, unsafe scope, manual validation 은 `manual-review` 로 남긴다.
 
 ## 권장 스케줄러 역할 분리
 

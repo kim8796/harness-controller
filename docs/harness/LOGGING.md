@@ -196,6 +196,7 @@ v1.8.8 부터 external backlog transition evidence 는 `target backlog transitio
 - starter quick start, launcher 기본값, operator launch 예시를 바꿨다면 `docs/harness/AUTONOMY.md`, `docs/harness/START_HERE.md`, `harness_guide.md` 를 같은 변경 범위 안에서 같이 맞추고 `python3 scripts/harness_autonomy.py run-once --help`, `loop --help`, `status --help`, `python3 scripts/harness_autonomy_launch.py --help` 로 실제 CLI 옵션과 다시 맞춘다.
 - starter env provider checks 를 기록할 때는 `./harness env check --provider ...` / `env register --dry-run` 의 present/missing/weak 상태와 다음 조치만 남기고 raw token, signing key, chat id, Redis URL/token 값은 evidence 에 적지 않는다.
 - optional global wrapper 를 설치/제거했다면 prefix, marker 검증 결과, shell profile 미수정, local `./harness` delegation 여부를 기록한다. 기존 non-harness 파일을 덮어쓴 기록은 허용하지 않는다.
+- beginner controller path 를 썼다면 `./harness install`, `./harness task ...`, `./harness run`, `./harness smoke implementation` 중 어떤 wrapper 가 어떤 advanced command 로 위임됐는지 기록한다. task intake 는 queued backlog 가 아니라 draft/review/attachment metadata 를 먼저 남기며, `queue --auto` 는 canonical scope/validation parser proof 를 통과했는지도 함께 남긴다.
 - persistent branch 를 썼다면 어떤 branch 가 준비/승격/동기화됐는지 report 와 verifier 근거에 남긴다.
 - state carry-forward 를 썼다면 어떤 `state_source` 로 selection 했는지와 repo-root/persistent-branch 중 어느 snapshot 을 기준으로 삼았는지 report 와 verifier 근거에 남긴다.
 - low-risk promotion gate 가 blocked 됐다면 이유를 숨기지 말고 report/reviewer/verifier 에 남긴다.

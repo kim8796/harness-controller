@@ -189,5 +189,6 @@
 - `exports/harness/v<version>/`
 - autonomy CLI 예시나 launcher 기본값이 바뀌면 `docs/harness/AUTONOMY.md`, `docs/harness/START_HERE.md`, `harness_guide.md` 도 같이 갱신한다.
 - lane control field 해석이나 notes section naming 이 바뀌면 `docs/harness/TASK_TEMPLATE.md`, `docs/harness/LOGGING.md`, operator 문서를 같이 갱신한다. narrative note 와 explicit fallback control 은 같은 것으로 취급하지 않는다.
+- external controller beginner intake 를 쓸 때는 draft packet 이 backlog source of truth 가 아니다. 실행 가능한 source of truth 는 `./harness task queue` 가 만든 canonical `backlog/queued/*.md` 이며, `queue --auto` 는 canonical scope/validation parser proof 를 통과해야 한다.
 
 `CURRENT_STATE.md` and `RUNS_INDEX.md` are generated views. Refresh them with `python3 scripts/harness_loop.py sync-state`.

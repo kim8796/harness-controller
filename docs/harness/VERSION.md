@@ -1,8 +1,16 @@
 # Harness Framework Version
 
-- Current Version: 1.8.13
+- Current Version: 1.8.14
 - Release Date: 2026-05-14
-- Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + managed-latest/xhigh external implementation gate + backlog-bound product push gate + controller release-history-preserving export + generated coverage artifact exclusion + on-demand export output.
+- Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + beginner `install/task/run` controller UX + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + managed-latest/xhigh external implementation gate + backlog-bound product push gate + controller release-history-preserving export + generated coverage artifact exclusion + on-demand export output.
+
+## What Changed In 1.8.14
+
+- Added beginner external controller commands: `./harness install`, `./harness task`, `./harness run`, and `./harness smoke implementation`.
+- `install` registers a product repo as a controller target without writing harness files into the product repo.
+- `task` creates editable draft packets, imports requirement files/images with hashes, reviews them into backlog previews, and queues canonical sidecar backlog only on `queue`.
+- Bare `run` delegates to `target run @default --implement-backlog-once` with managed-latest Codex defaults and `xhigh` reasoning, while preserving `run --once` as the embedded starter smoke.
+- `smoke implementation` creates a temporary product repo/target to verify the implementation gate without destructive cleanup.
 
 ## What Changed In 1.8.13
 

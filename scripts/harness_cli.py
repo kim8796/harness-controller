@@ -22,6 +22,7 @@ import harness_export
 import harness_loop
 import harness_profiles
 import harness_starter_install
+import harness_task_intake
 from harness_autonomy.relay import normalize_relay_repo_id
 
 
@@ -694,28 +695,365 @@ def command_dashboard(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_run(args: argparse.Namespace) -> int:
-    if not args.once:
-        print("error: starter 실행은 bounded smoke 만 허용합니다. --once 를 붙이세요.")
-        print("다음 명령: `./harness run --once`")
+def command_install(args: argparse.Namespace) -> int:
+    root = repo_root()
+    if args.repo is None:
+        try:
+            records = harness_controller.list_targets(root, strict=True)
+            default_record = harness_controller.default_target(root)
+        except harness_controller.ControllerError as exc:
+            print(f"error: {exc}")
+            return 2
+        print("하네스 install 상태")
+        print("- 의미: 제품 저장소에 하네스 파일을 설치하지 않고 controller에 대상만 연결합니다.")
+        print(f"- 등록된 대상: {len(records)}개")
+        if default_record is not None:
+            print(f"- 기본 대상: `{default_record.target_id}`")
+            verification = harness_controller.verify_target(default_record)
+            run_blockers = harness_controller.target_run_blockers(verification)
+            if run_blockers:
+                print("- 기본 대상은 등록되어 있지만 run 전 수정 필요")
+                print(f"- run blockers: {', '.join(run_blockers)}")
+                print(f"- 다음 명령: `./harness target status {default_record.target_id}`")
+                return 2
+            print("다음 명령: `./harness task` 또는 `./harness run`")
+            return 0
+        print("- 기본 대상: 없음")
+        print("다음 명령: `./harness install --repo /path/to/product --id my-app --branch main --default`")
         return 2
     try:
-        target_root = harness_starter_install._git_toplevel(Path.cwd())
+        target_id = args.id or args.repo.resolve().name
+        record = harness_controller.add_target(
+            controller_root=root,
+            target_id=target_id,
+            repo=_target_path(args.repo),
+            branch=args.branch,
+            controller_version=_controller_version(),
+            profile=args.profile,
+            display_name=args.display_name,
+            force=args.force,
+        )
+        verification = harness_controller.verify_target(record)
+        run_blockers = harness_controller.target_run_blockers(verification)
+        ready_for_run = bool(verification["ok"]) and not run_blockers
+        if args.default and ready_for_run:
+            record = harness_controller.set_default_target(root, record.target_id)
+        report = harness_controller.write_dashboard(
+            controller_root=root,
+            record=record,
+            verification=verification,
+        )
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "target": record.to_json(root),
+                        "verification": verification,
+                        "run_blockers": run_blockers,
+                        "dashboard": report.as_posix(),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 0 if ready_for_run else 2
+        print("하네스 install 완료")
+        print(f"- 대상 ID: `{record.target_id}`")
+        print(f"- 제품 저장소: `{record.repo.as_posix()}`")
+        print(f"- 컨트롤러 기록: `{record.state_root.as_posix()}`")
+        print(f"- 기본 대상: {'yes' if record.is_default else 'no'}")
+        print("- 제품 저장소 변경: 없음")
+        print("- 제품 저장소에는 HARNESS.md, scripts/harness*, runs, reports, backlog, targets, .env* 를 쓰지 않습니다.")
+        if verification["blockers"]:
+            print(f"- 확인 필요: {', '.join(verification['blockers'])}")
+            print(f"- dashboard: `{report.as_posix()}`")
+            return 2
+        if run_blockers:
+            print("- 등록은 됐지만 run 전 수정 필요")
+            print(f"- run blockers: {', '.join(run_blockers)}")
+            print(f"- dashboard: `{report.as_posix()}`")
+            print(f"- 다음 명령: `./harness target status {record.target_id}`")
+            return 2
+        print(f"- dashboard: `{report.as_posix()}`")
+        print("다음 명령: `./harness task`")
+        return 0
+    except harness_controller.ControllerError as exc:
+        print(f"error: {exc}")
+        return 2
+
+
+def _resolve_task_target(selector: str | None) -> harness_controller.TargetRecord:
+    try:
+        return harness_controller.resolve_target_selector(repo_root(), selector or "@default")
+    except harness_controller.ControllerError as exc:
+        raise HarnessCliError(str(exc)) from exc
+
+
+def _task_packet_id(record: harness_controller.TargetRecord, raw: str | None) -> str:
+    if raw in (None, "", "latest"):
+        return harness_task_intake.latest_packet_id(record.state_root, target_id=record.target_id)
+    return harness_task_intake.validate_packet_id(raw)
+
+
+def command_task(args: argparse.Namespace) -> int:
+    if getattr(args, "task_command", None) in (None, "draft"):
+        return command_task_draft(args)
+    print("error: unknown task command")
+    return 2
+
+
+def command_task_draft(args: argparse.Namespace) -> int:
+    try:
+        record = _resolve_task_target(getattr(args, "target", None))
+        request_path = harness_task_intake.create_draft(
+            state_root=record.state_root,
+            target_id=record.target_id,
+            title=getattr(args, "title", None),
+            packet_id=getattr(args, "packet_id", None),
+        )
+        print("작업 요청 draft 생성 완료")
+        print(f"- 대상: `{record.target_id}`")
+        print(f"- request: `{request_path.as_posix()}`")
+        print("- 이 파일은 외부 에디터로 자유롭게 수정해도 됩니다.")
+        print("다음 명령: `./harness task review latest`")
+        return 0
+    except (HarnessCliError, harness_task_intake.TaskIntakeError) as exc:
+        print(f"error: {exc}")
+        print("다음 명령: `./harness install --repo /path/to/product --id my-app --default`")
+        return 2
+
+
+def command_task_from(args: argparse.Namespace) -> int:
+    try:
+        record = _resolve_task_target(args.target)
+        request_path = harness_task_intake.create_from_file(
+            state_root=record.state_root,
+            target_id=record.target_id,
+            source=_target_path(args.source),
+            images=tuple(_target_path(path) for path in args.image),
+            title=args.title,
+            packet_id=args.packet_id,
+        )
+        print("작업 요청 파일 가져오기 완료")
+        print(f"- 대상: `{record.target_id}`")
+        print(f"- request: `{request_path.as_posix()}`")
+        print("- 첨부는 base64로 넣지 않고 path/size/sha256 메타데이터로 기록했습니다.")
+        print("다음 명령: `./harness task review latest`")
+        return 0
+    except (HarnessCliError, harness_task_intake.TaskIntakeError) as exc:
+        print(f"error: {exc}")
+        return 2
+
+
+def command_task_review(args: argparse.Namespace) -> int:
+    try:
+        record = _resolve_task_target(args.target)
+        packet_id = _task_packet_id(record, args.packet)
+        review = harness_task_intake.review_packet(
+            state_root=record.state_root,
+            packet_id=packet_id,
+            expected_target_id=record.target_id,
+        )
+        print("작업 요청 review 완료")
+        print(f"- 대상: `{review.target_id}`")
+        print(f"- packet: `{review.packet_id}`")
+        print(f"- preview: `{review.preview_path.as_posix()}`")
+        print(f"- auto queue 가능: {'yes' if review.auto_eligible else 'no'}")
+        if review.open_questions:
+            print(f"- 확인 질문: {', '.join(review.open_questions)}")
+        if review.risk_flags:
+            print(f"- 안전 경고: {', '.join(review.risk_flags)}")
+        print("다음 명령: `./harness task queue latest` 또는 `./harness task queue latest --auto`")
+        return 0
+    except (HarnessCliError, harness_task_intake.TaskIntakeError) as exc:
+        print(f"error: {exc}")
+        return 2
+
+
+def command_task_queue(args: argparse.Namespace) -> int:
+    try:
+        record = _resolve_task_target(args.target)
+        packet_id = _task_packet_id(record, args.packet)
+        queued = harness_task_intake.queue_packet(
+            state_root=record.state_root,
+            packet_id=packet_id,
+            auto=args.auto,
+            expected_target_id=record.target_id,
+        )
+        print("작업 요청 queue 완료")
+        print(f"- 대상: `{queued.target_id}`")
+        print(f"- backlog: `{queued.backlog_path.as_posix()}`")
+        print(f"- 실행 모드: `{queued.autonomy_execute}`")
+        print("- 제품 저장소 변경: 없음")
+        if queued.autonomy_execute == "auto":
+            print("다음 명령: `./harness run`")
+            print(f"고급 명령: `./harness target run {queued.target_id} --implement-backlog-once`")
+        else:
+            print("다음 조치: manual-review backlog로 남겼습니다. 자동 실행하려면 새 draft에서 안전 조건을 채운 뒤 `--auto`로 queue하세요.")
+        return 0
+    except (HarnessCliError, harness_task_intake.TaskIntakeError) as exc:
+        print(f"error: {exc}")
+        return 2
+
+
+def command_run(args: argparse.Namespace) -> int:
+    try:
+        if args.once:
+            target_root = harness_starter_install._git_toplevel(Path.cwd())
+            payload = _build_verify_payload(target_root, loop_ready=True)
+            if not payload["ok"]:
+                _render_verify_text(payload, loop_ready=True)
+                print("run --once 중단: 위 blocker를 먼저 해결해야 합니다.")
+                return 2
+            extra = list(args.extra)
+            if extra[:1] == ["--"]:
+                extra = extra[1:]
+            return _run_existing_script(
+                "harness_autonomy.py",
+                ["run-once", "--mode", "auto", "--runner", "codex", "--runner-model", "auto", "--git-backup", "off", *extra],
+            )
     except harness_starter_install.InstallerError as exc:
         print(f"error: {exc}")
         return 2
-    payload = _build_verify_payload(target_root, loop_ready=True)
-    if not payload["ok"]:
-        _render_verify_text(payload, loop_ready=True)
-        print("run --once 중단: 위 blocker를 먼저 해결해야 합니다.")
+    if args.extra:
+        print("error: `./harness run` beginner path does not accept extra arguments.")
+        print("고급 실행: `./harness target run @default --implement-backlog-once ...`")
         return 2
-    extra = list(args.extra)
-    if extra[:1] == ["--"]:
-        extra = extra[1:]
-    return _run_existing_script(
-        "harness_autonomy.py",
-        ["run-once", "--mode", "auto", "--runner", "codex", "--runner-model", "auto", "--git-backup", "off", *extra],
+    try:
+        record = harness_controller.default_target(repo_root())
+    except harness_controller.ControllerError as exc:
+        print(f"error: {exc}")
+        return 2
+    if record is None:
+        print("run 중단: 기본 대상이 없습니다.")
+        print("다음 명령: `./harness install --repo /path/to/product --id my-app --branch main --default`")
+        return 2
+    print("하네스 beginner run 시작")
+    print(f"- 대상: `{record.target_id}`")
+    print("- 실행: queued auto backlog 1개를 AI 구현 lane에 넘깁니다.")
+    print("- 모델: Codex managed latest/default, reasoning=xhigh")
+    print("- 제품 변경: local diff only")
+    print("- backlog 완료/commit/push: 자동 수행 안 함")
+    return command_target_run(
+        argparse.Namespace(
+            target="@default",
+            once=False,
+            plan_once=False,
+            execute_once=False,
+            execute_backlog_once=False,
+            implement_backlog_once=True,
+            runner="codex",
+            runner_model=None,
+            runner_reasoning_effort="xhigh",
+            command_template=None,
+            commit=False,
+            push=False,
+        )
     )
+
+
+def _init_smoke_product(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=False)
+    _git_checked(["init", "-b", "main"], cwd=path)
+    _git_checked(["config", "user.name", "Harness Smoke"], cwd=path)
+    _git_checked(["config", "user.email", "harness-smoke@example.invalid"], cwd=path)
+    (path / "README.md").write_text("# Harness smoke product\n", encoding="utf-8")
+    _git_checked(["add", "README.md"], cwd=path)
+    _git_checked(["commit", "-m", "chore: init smoke product"], cwd=path)
+
+
+def command_smoke_implementation(args: argparse.Namespace) -> int:
+    root = repo_root()
+    target_id = f"smoke-{datetime.now().strftime('%H%M%S')}"
+    temp_root = Path(tempfile.mkdtemp(prefix="harness-implementation-smoke-"))
+    product = temp_root / "product"
+    try:
+        _init_smoke_product(product)
+        record = harness_controller.add_target(
+            controller_root=root,
+            target_id=target_id,
+            repo=product,
+            branch="main",
+            controller_version=_controller_version(),
+            profile=harness_profiles.PROFILE_MINIMAL,
+            display_name="Implementation Smoke",
+        )
+        request = temp_root / "request.md"
+        request.write_text(
+            "\n".join(
+                [
+                    "# Smoke implementation task",
+                    "",
+                    "## Goal",
+                    "- Add a small deterministic smoke note to the product README.",
+                    "",
+                    "## Summary",
+                    "- Verify the external implementation gate can create a local product diff.",
+                    "",
+                    "## Acceptance",
+                    "- README.md contains a smoke implementation note.",
+                    "",
+                    "## File Scope",
+                    "- README.md",
+                    "",
+                    "## Forbidden Scope",
+                    "- .env*",
+                    "- runs/**",
+                    "- reports/**",
+                    "- targets/**",
+                    "",
+                    "## Validation",
+                    "- `git diff -- README.md`",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        draft = harness_task_intake.create_from_file(
+            state_root=record.state_root,
+            target_id=record.target_id,
+            source=request,
+            title="Smoke implementation task",
+        )
+        harness_task_intake.review_packet(
+            state_root=record.state_root,
+            packet_id=draft.parent.name,
+            expected_target_id=record.target_id,
+        )
+        queued = harness_task_intake.queue_packet(
+            state_root=record.state_root,
+            packet_id=draft.parent.name,
+            auto=True,
+            expected_target_id=record.target_id,
+        )
+        print("하네스 implementation smoke 준비 완료")
+        print(f"- 임시 제품 저장소: `{product.as_posix()}`")
+        print(f"- 임시 대상: `{record.target_id}`")
+        print(f"- queued backlog: `{queued.backlog_path.as_posix()}`")
+        print("- 자동 cleanup/destructive git 명령은 실행하지 않습니다.")
+        return command_target_run(
+            argparse.Namespace(
+                target=record.target_id,
+                once=False,
+                plan_once=False,
+                execute_once=False,
+                execute_backlog_once=False,
+                implement_backlog_once=True,
+                runner=args.runner,
+                runner_model=args.runner_model,
+                runner_reasoning_effort=args.runner_reasoning_effort,
+                command_template=args.command_template,
+                commit=False,
+                push=False,
+            )
+        )
+    except (HarnessCliError, harness_controller.ControllerError, harness_task_intake.TaskIntakeError) as exc:
+        print(f"error: {exc}")
+        if temp_root.exists():
+            print(f"- 임시 경로: `{temp_root.as_posix()}`")
+        return 2
 
 
 def command_export(args: argparse.Namespace) -> int:
@@ -1998,6 +2336,44 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--loop-ready", action="store_true", help="Check whether a bounded starter loop can run.")
     verify.set_defaults(func=command_verify)
 
+    install = subparsers.add_parser("install", help="Beginner path: connect a product repo to this controller.")
+    install.add_argument("--repo", type=Path, help="Product git repo to register. Omit to inspect current install state.")
+    install.add_argument("--id", help="Canonical target id. Defaults to the product repo directory name.")
+    install.add_argument("--branch", default="main")
+    install.add_argument("--profile", choices=harness_profiles.profile_names(), default=harness_profiles.DEFAULT_PROFILE)
+    install.add_argument("--display-name", help="Operator-facing display name.")
+    install.add_argument("--default", action="store_true", help="Set this target as @default for beginner run/task commands.")
+    install.add_argument("--force", action="store_true", help="Replace an existing target entry.")
+    install.add_argument("--json", action="store_true")
+    install.set_defaults(func=command_install)
+
+    task = subparsers.add_parser("task", help="Beginner task intake: draft, review, and queue a product request.")
+    task.add_argument("--target", default="@default", help="Target selector for `./harness task`; default is @default.")
+    task.add_argument("--title", help="Title for the default draft command.")
+    task_subparsers = task.add_subparsers(dest="task_command")
+    task_draft = task_subparsers.add_parser("draft", help="Create an editable task request draft.")
+    task_draft.add_argument("--target", default=argparse.SUPPRESS, help="Target selector; default is @default.")
+    task_draft.add_argument("--title", default=argparse.SUPPRESS)
+    task_draft.add_argument("--packet-id")
+    task_draft.set_defaults(func=command_task_draft)
+    task_from = task_subparsers.add_parser("from", help="Create a task packet from a requirements file.")
+    task_from.add_argument("source", type=Path)
+    task_from.add_argument("--target", default=argparse.SUPPRESS, help="Target selector; default is @default.")
+    task_from.add_argument("--title", default=argparse.SUPPRESS)
+    task_from.add_argument("--packet-id")
+    task_from.add_argument("--image", type=Path, action="append", default=[])
+    task_from.set_defaults(func=command_task_from)
+    task_review = task_subparsers.add_parser("review", help="Build a backlog preview without queueing it.")
+    task_review.add_argument("packet", nargs="?", default="latest")
+    task_review.add_argument("--target", default=argparse.SUPPRESS, help="Target selector; default is @default.")
+    task_review.set_defaults(func=command_task_review)
+    task_queue = task_subparsers.add_parser("queue", help="Queue a reviewed task as sidecar backlog.")
+    task_queue.add_argument("packet", nargs="?", default="latest")
+    task_queue.add_argument("--target", default=argparse.SUPPRESS, help="Target selector; default is @default.")
+    task_queue.add_argument("--auto", action="store_true", help="Queue as Autonomy-Execute auto only when safety checks pass.")
+    task_queue.set_defaults(func=command_task_queue)
+    task.set_defaults(func=command_task)
+
     complete_setup = subparsers.add_parser("complete-setup", help="Render/apply the bootstrap wizard through ./harness.")
     complete_setup.add_argument("target", nargs="?", type=Path, default=Path("."))
     complete_setup.add_argument("--run", type=Path)
@@ -2014,10 +2390,27 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard = subparsers.add_parser("dashboard", help="Show local operator dashboard paths.")
     dashboard.set_defaults(func=command_dashboard)
 
-    run = subparsers.add_parser("run", help="Run a bounded one-cycle launcher smoke.")
+    run = subparsers.add_parser("run", help="Beginner run. No --once runs @default sidecar backlog local diff only.")
     run.add_argument("--once", action="store_true")
     run.add_argument("extra", nargs=argparse.REMAINDER)
     run.set_defaults(func=command_run)
+
+    smoke = subparsers.add_parser("smoke", help="Run beginner smoke checks without touching real targets.")
+    smoke_subparsers = smoke.add_subparsers(dest="smoke_command", required=True)
+    smoke_implementation = smoke_subparsers.add_parser(
+        "implementation",
+        help="Create a temporary product repo and verify the implementation gate.",
+    )
+    smoke_implementation.add_argument("--runner", choices=("codex", "claude", "custom"), default="codex", help=argparse.SUPPRESS)
+    smoke_implementation.add_argument("--runner-model", default=None, help=argparse.SUPPRESS)
+    smoke_implementation.add_argument(
+        "--runner-reasoning-effort",
+        default="xhigh",
+        choices=("minimal", "low", "medium", "high", "xhigh"),
+        help=argparse.SUPPRESS,
+    )
+    smoke_implementation.add_argument("--command-template", help=argparse.SUPPRESS)
+    smoke_implementation.set_defaults(func=command_smoke_implementation)
 
     export = subparsers.add_parser("export", help="Write a starter-safe bundle for installing elsewhere.")
     export.add_argument("output_dir", type=Path)

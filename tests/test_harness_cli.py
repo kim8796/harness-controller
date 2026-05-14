@@ -166,7 +166,7 @@ def _create_completed_sidecar_backlog_with_product_diff(module, controller: Path
     return run_id
 
 
-def test_run_requires_once_and_delegates_bounded_launcher(monkeypatch) -> None:
+def test_run_once_delegates_bounded_launcher(monkeypatch) -> None:
     module = _load_module()
     calls: list[tuple[str, list[str]]] = []
 
@@ -176,9 +176,6 @@ def test_run_requires_once_and_delegates_bounded_launcher(monkeypatch) -> None:
 
     monkeypatch.setattr(module, "_run_existing_script", fake_run_existing_script)
     monkeypatch.setattr(module, "_build_verify_payload", lambda target_root, *, loop_ready: {"ok": True})
-
-    assert module.main(["run"]) == 2
-    assert calls == []
 
     assert module.main(["run", "--once", "--", "--runner-timeout-seconds", "60"]) == 0
     assert calls == [
@@ -199,6 +196,128 @@ def test_run_requires_once_and_delegates_bounded_launcher(monkeypatch) -> None:
             ],
         )
     ]
+
+
+def test_beginner_run_requires_default_target(monkeypatch, capsys) -> None:
+    module = _load_module()
+    monkeypatch.setattr(module.harness_controller, "default_target", lambda root: None)
+
+    assert module.main(["run"]) == 2
+    output = capsys.readouterr().out
+    assert "기본 대상이 없습니다" in output
+    assert "./harness install --repo" in output
+
+
+def test_beginner_run_rejects_extra_args_before_delegate(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    controller.mkdir()
+    calls: list[object] = []
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module, "command_target_run", lambda args: calls.append(args) or 0)
+
+    assert module.main(["run", "--", "--unexpected"]) == 2
+    output = capsys.readouterr().out
+    assert "does not accept extra arguments" in output
+    assert calls == []
+
+
+def test_beginner_run_delegates_to_default_target_implementation(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    record = module.harness_controller.TargetRecord(
+        target_id="demo",
+        repo=product,
+        branch="main",
+        state_root=controller / "targets" / "demo",
+        controller_version="test",
+        created_at="",
+        updated_at="",
+        is_default=True,
+    )
+    captured: list[object] = []
+
+    def fake_target_run(args) -> int:
+        captured.append(args)
+        return 0
+
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_controller, "default_target", lambda root: record)
+    monkeypatch.setattr(module, "command_target_run", fake_target_run)
+
+    assert module.main(["run"]) == 0
+    output = capsys.readouterr().out
+    assert "하네스 beginner run 시작" in output
+    assert "Codex managed latest/default" in output
+    args = captured[0]
+    assert args.target == "@default"
+    assert args.implement_backlog_once is True
+    assert args.runner_model is None
+    assert args.runner_reasoning_effort == "xhigh"
+    assert args.commit is False
+    assert args.push is False
+
+
+def test_beginner_install_does_not_default_failed_target(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.14")
+    original_verify = module.harness_controller.verify_target
+
+    def failed_verify(record):
+        payload = original_verify(record)
+        payload["ok"] = False
+        payload["blockers"] = ["synthetic-blocker"]
+        return payload
+
+    monkeypatch.setattr(module.harness_controller, "verify_target", failed_verify)
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 2
+    output = capsys.readouterr().out
+    assert "synthetic-blocker" in output
+    assert module.harness_controller.default_target(controller) is None
+
+
+def test_beginner_install_surfaces_run_blockers_before_default(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    (product / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.14")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 2
+    output = capsys.readouterr().out
+    assert "등록은 됐지만 run 전 수정 필요" in output
+    assert "target-git-dirty" in output
+    assert module.harness_controller.default_target(controller) is None
+
+
+def test_beginner_install_status_surfaces_default_run_blockers(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.14")
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    capsys.readouterr()
+    (product / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+
+    assert module.main(["install"]) == 2
+    output = capsys.readouterr().out
+    assert "기본 대상은 등록되어 있지만 run 전 수정 필요" in output
+    assert "target-git-dirty" in output
 
 
 def test_run_once_blocks_when_loop_ready_verify_fails(monkeypatch, capsys) -> None:
@@ -229,6 +348,124 @@ def test_run_once_blocks_when_loop_ready_verify_fails(monkeypatch, capsys) -> No
     assert module.main(["run", "--once"]) == 2
     assert calls == []
     assert "run --once 중단" in capsys.readouterr().out
+
+
+def test_beginner_install_task_review_queue_auto(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    request = tmp_path / "request.md"
+    request.write_text(
+        "\n".join(
+            [
+                "# Add welcome copy",
+                "",
+                "## Goal",
+                "- Add concise welcome copy to README.md.",
+                "",
+                "## Summary",
+                "- Update the product README with a short note.",
+                "",
+                "## Acceptance",
+                "- README.md contains the new note.",
+                "",
+                "## File Scope",
+                "- README.md",
+                "",
+                "## Forbidden Scope",
+                "- .env*",
+                "- runs/**",
+                "- reports/**",
+                "- targets/**",
+                "",
+                "## Validation",
+                "- `git diff -- README.md`",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.14")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    output = capsys.readouterr().out
+    assert "하네스 install 완료" in output
+    assert "제품 저장소 변경: 없음" in output
+    assert module.harness_controller.default_target(controller).target_id == "demo"
+    _assert_no_product_harness_pollution(product)
+
+    assert module.main(["task", "from", str(request), "--packet-id", "task-demo"]) == 0
+    assert module.main(["task", "review", "latest"]) == 0
+    assert module.main(["task", "queue", "latest", "--auto"]) == 0
+    output = capsys.readouterr().out
+    assert "작업 요청 queue 완료" in output
+    queued = tuple((controller / "targets" / "demo" / "backlog" / "queued").glob("*.md"))
+    assert len(queued) == 1
+    body = queued[0].read_text(encoding="utf-8")
+    assert "Autonomy-Execute: auto" in body
+    assert "Target-ID: demo" in body
+    _assert_no_product_harness_pollution(product)
+
+
+def test_task_parent_target_option_is_preserved_for_subcommands(monkeypatch, tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product_default = tmp_path / "product-default"
+    product_other = tmp_path / "product-other"
+    controller.mkdir()
+    _init_product_repo(product_default)
+    _init_product_repo(product_other)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.14")
+
+    assert module.main(["install", "--repo", str(product_default), "--id", "demo", "--default"]) == 0
+    assert module.main(["install", "--repo", str(product_other), "--id", "other"]) == 0
+    assert module.main(["task", "--target", "other", "draft", "--packet-id", "task-other"]) == 0
+
+    assert (controller / "targets" / "other" / "backlog" / "drafts" / "task-other" / "request.md").exists()
+    assert not (controller / "targets" / "demo" / "backlog" / "drafts" / "task-other").exists()
+
+
+def test_smoke_implementation_creates_temp_target_and_delegates(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    controller.mkdir()
+    captured: list[object] = []
+
+    def fake_target_run(args) -> int:
+        captured.append(args)
+        return 0
+
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.14")
+    monkeypatch.setattr(module, "command_target_run", fake_target_run)
+
+    assert (
+        module.main(
+            [
+                "smoke",
+                "implementation",
+                "--runner",
+                "custom",
+                "--command-template",
+                "printf 'implemented\\n' > feature.txt",
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    assert "하네스 implementation smoke 준비 완료" in output
+    args = captured[0]
+    assert args.implement_backlog_once is True
+    assert args.commit is False
+    assert args.push is False
+    record = module.harness_controller.load_target(controller, args.target)
+    assert record.repo.exists()
+    assert (controller / "targets" / record.target_id / "backlog" / "queued").exists()
+    _assert_no_product_harness_pollution(record.repo)
 
 
 def test_export_delegates_to_starter_bundle(monkeypatch, tmp_path) -> None:
