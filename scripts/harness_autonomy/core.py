@@ -209,8 +209,11 @@ GOAL_LANE = "goal"
 META_LANE = "meta"
 META_GOAL_ID_NORMALIZED = "meta"
 AUTO_RUNNER_MODEL = "auto"
+CODEX_MANAGED_LATEST_MODEL = "latest"
 DEFAULT_CODEX_FAST_MODEL = "gpt-5.3-codex-spark"
 DEFAULT_CODEX_QUALITY_MODEL = "gpt-5.5"
+DEFAULT_CODEX_REASONING_EFFORT = "xhigh"
+CODEX_REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh"})
 AUTONOMY_STARTUP_PATH = os.environ.get("PATH", "")
 HOMEBREW_BIN_PATH = Path("/opt/homebrew/bin")
 CODEX_HOME_PASSTHROUGH_FILES = ("auth.json", "config.toml", "installation_id", "version.json")
@@ -2130,6 +2133,10 @@ def validate_configuration(args: argparse.Namespace) -> None:
         raise AutonomyError("state carry-forward requires `--persistent-branch` so the next cycle has a state anchor")
     if fixed_timeout_seconds is not None and fixed_timeout_seconds <= 0:
         raise AutonomyError("`--runner-timeout-seconds` must be greater than zero when provided")
+    runner_reasoning_effort = getattr(args, "runner_reasoning_effort", None)
+    if runner_reasoning_effort and runner_reasoning_effort not in CODEX_REASONING_EFFORTS:
+        allowed = ", ".join(sorted(CODEX_REASONING_EFFORTS))
+        raise AutonomyError(f"`--runner-reasoning-effort` must be one of: {allowed}")
     if adaptive_timeout_cap_seconds < DEFAULT_RUNNER_TIMEOUT_SECONDS:
         raise AutonomyError(
             "`--adaptive-runner-timeout-cap-seconds` must be greater than or equal to "
@@ -7197,6 +7204,7 @@ def run_lane(
     runner: str,
     runner_model: str | None,
     codex_global_skills: Sequence[str] = (),
+    codex_reasoning_effort: str | None = None,
     command_template: str | None,
     prompt: str,
     timeout_seconds: int,
@@ -7220,6 +7228,8 @@ def run_lane(
             "-o",
             str(response_path),
         ]
+        if codex_reasoning_effort:
+            command.extend(["-c", f'model_reasoning_effort="{codex_reasoning_effort}"'])
         if runner_model:
             command.extend(["-m", runner_model])
         command.append("-")
@@ -8513,6 +8523,26 @@ def build_external_product_implementation_prompt(
     )
 
 
+def resolve_external_product_implementation_runner_model(
+    *, runner: str, requested_runner_model: str | None
+) -> tuple[str | None, str]:
+    requested = str(requested_runner_model or "").strip()
+    if runner != "codex":
+        return (
+            requested or None,
+            f"external implementation runner `{runner}` uses its own model handling",
+        )
+    if requested in {"", AUTO_RUNNER_MODEL, CODEX_MANAGED_LATEST_MODEL}:
+        return (
+            None,
+            (
+                "external implementation: Codex-managed latest/default model "
+                "(no literal `auto` model is forwarded)"
+            ),
+        )
+    return requested, f"external implementation: explicit Codex model `{requested}`"
+
+
 def _allocate_external_run_dir(state_root: Path, target_id: str, requested_run_id: str | None) -> Path:
     run_id = requested_run_id or (
         f"external-{slugify(target_id)}-rootcontext-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
@@ -8606,11 +8636,25 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
     product_push_error = ""
     expected_status_after: list[str] = []
     implementation_lane_result: RunnerInvocation | None = None
+    implementation_model_strategy = ""
+    implementation_reasoning_effort = ""
     if context.product_implementation_enabled:
         if backlog_payload is None:
             raise AutonomyError("external product implementation requires selected backlog payload")
         backlog_relative = Path(backlog_payload["path"])
         backlog_text = read_text(context.state_root / backlog_relative)
+        implementation_runner = str(getattr(args, "runner", "codex") or "codex")
+        implementation_runner_model, implementation_model_strategy = (
+            resolve_external_product_implementation_runner_model(
+                runner=implementation_runner,
+                requested_runner_model=getattr(args, "runner_model", None),
+            )
+        )
+        implementation_reasoning_effort = (
+            str(getattr(args, "runner_reasoning_effort", "") or "").strip()
+            if implementation_runner == "codex"
+            else ""
+        )
         implementation_selection = SelectedTask(
             mode="execute",
             task_slug=run_dir.name,
@@ -8636,9 +8680,10 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
             worktree_path=context.target_root,
             run_dir=run_dir,
             report_dir=report_dir,
-            runner=str(getattr(args, "runner", "codex") or "codex"),
-            runner_model=getattr(args, "runner_model", None),
+            runner=implementation_runner,
+            runner_model=implementation_runner_model,
             codex_global_skills=tuple(getattr(args, "codex_global_skill", ())),
+            codex_reasoning_effort=implementation_reasoning_effort or None,
             command_template=getattr(args, "command_template", None),
             prompt=implementation_prompt,
             timeout_seconds=timeout_budget.timeout_seconds,
@@ -8766,7 +8811,10 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
         diff_summary=diff_summary,
         significant=context.product_execution_enabled,
         runner_model_summary=(
-            "external product implementation; local diff only"
+            (
+                "external product implementation; local diff only; "
+                f"{implementation_model_strategy}; reasoning={implementation_reasoning_effort or 'runner-default'}"
+            )
             if context.product_implementation_enabled
             else "external product smoke; product push enabled"
             if context.product_push_enabled
@@ -8815,6 +8863,8 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
             {
                 "returncode": implementation_lane_result.returncode,
                 "runner_model": implementation_lane_result.runner_model or "",
+                "model_strategy": implementation_model_strategy,
+                "reasoning_effort": implementation_reasoning_effort,
                 "prompt_path": implementation_lane_result.prompt_path.as_posix(),
                 "response_path": implementation_lane_result.response_path.as_posix(),
                 "stdout_path": implementation_lane_result.stdout_path.as_posix(),
@@ -9488,6 +9538,9 @@ def run_cycle(args: argparse.Namespace) -> CycleOutcome:
                                 workspace_key=workspace_key,
                             )
                             try:
+                                run_lane_kwargs: dict[str, Any] = {}
+                                if lane_runner == "codex" and getattr(args, "runner_reasoning_effort", None):
+                                    run_lane_kwargs["codex_reasoning_effort"] = args.runner_reasoning_effort
                                 result = run_lane(
                                     lane,
                                     repo_root=repo_root,
@@ -9504,6 +9557,7 @@ def run_cycle(args: argparse.Namespace) -> CycleOutcome:
                                     command_template=args.command_template,
                                     prompt=prompt,
                                     timeout_seconds=lane_timeout_seconds,
+                                    **run_lane_kwargs,
                                 )
                             except subprocess.TimeoutExpired as exc:
                                 timeout_reason = f"{lane} lane timed out after {lane_timeout_seconds} seconds"
@@ -10607,7 +10661,15 @@ def build_parser() -> argparse.ArgumentParser:
         )
     common.add_argument(
         "--runner-model",
-        help="Explicit model override. Use `auto` to let the Codex runner pick between fast and quality models per cycle.",
+        help=(
+            "Explicit model override. Use `auto` to let embedded Codex cycles pick between fast and "
+            "quality models; external implementation gates also accept `latest` for the Codex-managed default."
+        ),
+    )
+    common.add_argument(
+        "--runner-reasoning-effort",
+        choices=sorted(CODEX_REASONING_EFFORTS),
+        help="Optional Codex reasoning effort override, for example `xhigh` for extra high.",
     )
     common.add_argument(
         "--codex-global-skill",

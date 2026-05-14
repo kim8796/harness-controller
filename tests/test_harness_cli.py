@@ -694,6 +694,10 @@ def test_external_target_run_help_describes_commit_gate(capsys) -> None:
     assert "no AI" in output
     assert "local product diff only" in output
     assert "implementation lane" in output
+    assert "--runner-model" in output
+    assert "Codex-managed latest/default" in output
+    assert "--runner-reasoning-effort" in output
+    assert "xhigh" in output
     assert "no backlog completion" in output
     assert "no commit" in output
     assert "no push" in output

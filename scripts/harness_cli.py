@@ -1236,7 +1236,8 @@ def _run_target_autonomy_state_plumbing(
     product_push: bool = False,
     planned_backlog: Mapping[str, str] | None = None,
     runner: str = "codex",
-    runner_model: str | None = "auto",
+    runner_model: str | None = None,
+    runner_reasoning_effort: str | None = None,
     command_template: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     root = repo_root()
@@ -1289,6 +1290,8 @@ def _run_target_autonomy_state_plumbing(
     )
     if runner_model:
         forwarded.extend(["--runner-model", runner_model])
+    if runner_reasoning_effort:
+        forwarded.extend(["--runner-reasoning-effort", runner_reasoning_effort])
     if command_template:
         forwarded.extend(["--command-template", command_template])
     stdout = io.StringIO()
@@ -1490,7 +1493,8 @@ def command_target_run(args: argparse.Namespace) -> int:
             product_push=product_push,
             planned_backlog=planned_backlog if (backlog_execution or implementation_execution) else None,
             runner=str(getattr(args, "runner", "codex") or "codex"),
-            runner_model=getattr(args, "runner_model", "auto"),
+            runner_model=getattr(args, "runner_model", None),
+            runner_reasoning_effort=getattr(args, "runner_reasoning_effort", None),
             command_template=getattr(args, "command_template", None),
         )
         evidence_after = set(evidence_root.glob("*/generated-evidence.json")) if evidence_root.exists() else set()
@@ -2110,7 +2114,20 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     target_run.add_argument("--runner", choices=("codex", "claude", "custom"), default="codex", help=argparse.SUPPRESS)
-    target_run.add_argument("--runner-model", default="auto", help=argparse.SUPPRESS)
+    target_run.add_argument(
+        "--runner-model",
+        default=None,
+        help=(
+            "Model for --implement-backlog-once. Omit it to use the Codex-managed latest/default "
+            "model without forwarding literal `auto`; pass a concrete model id to override."
+        ),
+    )
+    target_run.add_argument(
+        "--runner-reasoning-effort",
+        default="xhigh",
+        choices=("minimal", "low", "medium", "high", "xhigh"),
+        help="Codex reasoning effort for --implement-backlog-once; default is xhigh (extra high).",
+    )
     target_run.add_argument("--command-template", help=argparse.SUPPRESS)
     target_run.add_argument(
         "--commit",

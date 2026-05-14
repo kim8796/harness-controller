@@ -1,5 +1,12 @@
 # Harness Changelog
 
+## 1.8.13 - 2026-05-14
+
+- Fixed external `target run --implement-backlog-once` so the default Codex path no longer forwards unsupported model `auto`.
+- Defaulted the external implementation gate to Codex's managed latest/default model with `model_reasoning_effort="xhigh"`.
+- Kept explicit model override support through `--runner-model <model>` and recorded model strategy/reasoning effort in sidecar evidence.
+- Kept backlog completion, commit, push, and Telegram-triggered implementation disabled.
+
 ## 1.8.12 - 2026-05-14
 
 - Added `./harness target backlog push <target> --run <implementation-run>` as the explicit dry-run-first product push gate for completed sidecar backlog work.

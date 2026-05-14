@@ -6775,6 +6775,69 @@ def test_build_custom_command_supports_quoted_placeholders(tmp_path: Path) -> No
     assert "'" in command or '"' not in command
 
 
+def test_external_implementation_auto_model_resolves_to_codex_managed_latest() -> None:
+    module = _load_module()
+
+    runner_model, summary = module.resolve_external_product_implementation_runner_model(
+        runner="codex",
+        requested_runner_model="auto",
+    )
+    explicit_model, explicit_summary = module.resolve_external_product_implementation_runner_model(
+        runner="codex",
+        requested_runner_model="gpt-5.5",
+    )
+
+    assert runner_model is None
+    assert "Codex-managed latest/default" in summary
+    assert "literal `auto`" in summary
+    assert explicit_model == "gpt-5.5"
+    assert "explicit Codex model `gpt-5.5`" in explicit_summary
+
+
+def test_codex_run_lane_can_use_xhigh_without_forwarding_auto_model(monkeypatch, tmp_path: Path) -> None:
+    module = _load_module()
+    captured: dict[str, object] = {}
+
+    class FakeCodexHome:
+        def cleanup(self) -> None:
+            captured["cleaned"] = True
+
+    def fake_prepare(allowed_global_skills=()):
+        captured["allowed_global_skills"] = tuple(allowed_global_skills)
+        return FakeCodexHome(), {}
+
+    def fake_run(command, *, cwd, timeout_seconds, prompt, env=None):
+        captured["command"] = tuple(command)
+        response_path = Path(command[command.index("-o") + 1])
+        response_path.write_text("done\n", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "stdout\n", "")
+
+    monkeypatch.setattr(module, "_prepare_isolated_codex_runner_env", fake_prepare)
+    monkeypatch.setattr(module, "run_captured_process", fake_run)
+
+    invocation = module.run_lane(
+        "implementer",
+        repo_root=tmp_path,
+        worktree_path=tmp_path,
+        run_dir=tmp_path / "runs" / "harness" / "demo",
+        report_dir=tmp_path / "reports",
+        runner="codex",
+        runner_model=None,
+        codex_reasoning_effort="xhigh",
+        command_template=None,
+        prompt="Implement demo",
+        timeout_seconds=30,
+    )
+
+    command = captured["command"]
+    assert "-m" not in command
+    assert "auto" not in command
+    assert ("-c", 'model_reasoning_effort="xhigh"') in tuple(zip(command, command[1:]))
+    assert invocation.runner_model is None
+    assert invocation.response_text == "done\n"
+    assert captured["cleaned"] is True
+
+
 def test_build_claude_command_uses_print_mode_and_optional_model(tmp_path: Path) -> None:
     module = _load_module()
 
