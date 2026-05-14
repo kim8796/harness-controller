@@ -1,8 +1,16 @@
 # Harness Framework Version
 
-- Current Version: 1.8.14
+- Current Version: 1.8.15
 - Release Date: 2026-05-14
-- Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + beginner `install/task/run` controller UX + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + managed-latest/xhigh external implementation gate + backlog-bound product push gate + controller release-history-preserving export + generated coverage artifact exclusion + on-demand export output.
+- Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + beginner `install/task/run` controller UX + task interview + advisory AI review artifacts + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + managed-latest/xhigh external implementation gate + backlog-bound product push gate + controller release-history-preserving export + generated coverage artifact exclusion + on-demand export output.
+
+## What Changed In 1.8.15
+
+- Made bare `./harness task` open the beginner interview path instead of dropping users into a raw draft-only flow.
+- Added `./harness task interview` flags for goal, summary, acceptance, file scope, validation commands, notes, images, and per-image captions while keeping all task artifacts in controller sidecar drafts.
+- Added advisory `./harness task review latest --ai` artifacts after deterministic review: packet-local prompt, schema, optional sanitized response, and parsed advisory JSON.
+- Kept deterministic `review.json` as the only queue gate. AI review output is never used to satisfy `queue --auto`, `task review --ai` does not rewrite a fresh deterministic review, and no Codex or other model process is launched by that command.
+- Preserved product repo safety: `install`, `task`, `review`, and `queue` do not write harness files or runtime state into the product repository.
 
 ## What Changed In 1.8.14
 

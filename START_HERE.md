@@ -4,7 +4,7 @@
 
 현재 starter baseline 은 `docs/harness/VERSION.md` 의 Current Version 을 따른다. 이 문서는 기능 목록이 아니라 “새 프로젝트에 하네스를 어떻게 설치하고 시작하는지”만 설명한다. 긴 기능 목록은 `VERSION.md`, `CHANGELOG.md`, `FRAMEWORK_EXPORT.md` 를 본다.
 
-`v1.8.14` 기준 external controller 의 초보자 경로는 `./harness install -> ./harness task -> ./harness run` 이다. `install` 은 product repo 에 하네스 파일을 쓰지 않고 controller 에 대상만 등록한다. `task` 는 요구사항 draft 를 만들고 review/queue 를 거쳐 실행 가능한 backlog 로 바꾼다. `run` 은 기본 대상의 queued auto task 하나를 구현 lane 에 넘기며, 결과는 local product diff 로만 남긴다. backlog 완료, commit, push 는 자동으로 하지 않는다. 고급 전환/commit/push 명령은 아래 “고급 명령”에서만 다룬다.
+`v1.8.15` 기준 external controller 의 초보자 경로는 `./harness install -> ./harness task -> ./harness run` 이다. `install` 은 product repo 에 하네스 파일을 쓰지 않고 controller 에 대상만 등록한다. `task` 는 질문형 interview 로 요구사항 draft 를 만들고 review/queue 를 거쳐 실행 가능한 backlog 로 바꾼다. `task review --ai` 는 모델을 직접 실행하지 않고 packet-local prompt/schema 와 선택적 advisory response artifact 만 만든다. `run` 은 기본 대상의 queued auto task 하나를 구현 lane 에 넘기며, 결과는 local product diff 로만 남긴다. backlog 완료, commit, push 는 자동으로 하지 않는다. 고급 전환/commit/push 명령은 아래 “고급 명령”에서만 다룬다.
 
 ## 초간단 사용법
 
@@ -49,13 +49,19 @@ cd /path/to/harness-controller
 ./harness controller export /path/to/controller-bundle
 ./harness install --repo /path/to/my-app --id my-app --branch main --default
 ./harness task
-# 출력된 request.md 를 외부 에디터로 수정
+# 인터뷰에 답하거나 출력된 request.md 를 외부 에디터로 수정
 ./harness task review latest
+# 선택: AI에게 물어볼 prompt/schema artifact 생성
+./harness task review latest --ai
 ./harness task queue latest --auto
 ./harness run
 ```
 
-이 preview 는 product repo 를 검사하고 controller 기록 디렉토리에 대상 설정, dashboard, 작업 draft 를 만든다. product repo 에 `HARNESS.md`, `scripts/harness*`, `runs/**`, `reports/**`, `backlog/**`, `targets/**`, `.env*` 를 쓰지 않는다. `./harness task draft|from|review|queue` 는 요구사항을 draft 로 보존하고, `queue` 할 때만 실행 가능한 작업으로 만든다. `--auto` 는 acceptance, file scope, validation command 가 명확할 때만 통과한다. 고급 명령이 필요하면 `./harness target add`, `./harness target alias add`, `./harness target set-default`, `./harness target verify`, `./harness target dashboard`, `./harness target run my-app --once|--plan-once|--implement-backlog-once` 를 직접 쓴다. report 는 `targets/<target_id>/reports/target-run-latest.md`, implementation rollback 은 report 의 changed path guidance 를 따른다. Push smoke/backlog push 는 deployment 가 아니고 자동 remote rollback 을 하지 않는다. Detached HEAD, dirty target, branch mismatch 는 run blocker 다.
+이 preview 는 product repo 를 검사하고 controller 기록 디렉토리에 대상 설정, dashboard, 작업 draft 를 만든다. product repo 에 `HARNESS.md`, `scripts/harness*`, `runs/**`, `reports/**`, `backlog/**`, `targets/**`, `.env*` 를 쓰지 않는다.
+
+`./harness task` 는 guided interview 를 시작한다. 이미지 첨부는 파일 경로/크기/sha256/caption 으로 기록하고 base64 본문을 backlog 에 넣지 않는다. 먼저 `task review` 로 자동 실행 가능 여부를 deterministic 하게 점검한다. 그 뒤 `task review --ai` 를 쓰면 참고용 prompt/schema 와 선택적 response artifact 만 만들며, 기존 review/queue 판단을 바꾸지 않는다. `task queue --auto` 는 acceptance, file scope, validation command 가 명확할 때만 통과한다.
+
+고급 명령이 필요하면 `./harness target ...` 명령을 직접 쓴다. report 는 `targets/<target_id>/reports/target-run-latest.md`, implementation rollback 은 report 의 changed path guidance 를 따른다. Push smoke/backlog push 는 deployment 가 아니고 자동 remote rollback 을 하지 않는다. Detached HEAD, dirty target, branch mismatch 는 run blocker 다.
 
 ### B. controller repo 없이 설치 도구만 따로 들고 간다
 

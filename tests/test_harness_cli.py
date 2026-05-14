@@ -410,6 +410,85 @@ def test_beginner_install_task_review_queue_auto(monkeypatch, tmp_path: Path, ca
     _assert_no_product_harness_pollution(product)
 
 
+def test_beginner_task_interview_and_ai_review_are_advisory(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    image = tmp_path / "mock.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    ai_response = tmp_path / "ai-response.json"
+    ai_response.write_text(
+        json.dumps({"summary": "ready", "open_questions": ["확인 질문"], "risk_notes": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.15")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    capsys.readouterr()
+    assert (
+        module.main(
+            [
+                "task",
+                "interview",
+                "--packet-id",
+                "task-interview",
+                "--title",
+                "Improve README",
+                "--goal",
+                "Improve README copy.",
+                "--summary",
+                "Use the attached mock as reference.",
+                "--acceptance",
+                "README.md includes the improved copy.",
+                "--file-scope",
+                "README.md",
+                "--validation",
+                "git diff -- README.md",
+                "--image",
+                str(image),
+                "--caption",
+                "Mock headline reference",
+            ]
+        )
+        == 0
+    )
+    assert module.main(["task", "review", "latest"]) == 0
+    packet_dir = controller / "targets" / "demo" / "backlog" / "drafts" / "task-interview"
+    before_review = (packet_dir / "review.json").read_text(encoding="utf-8")
+    assert module.main(["task", "review", "latest", "--ai", "--ai-response", str(ai_response)]) == 0
+    output = capsys.readouterr().out
+    assert "AI 검토 프롬프트" in output
+    assert "AI 검토는 참고용" in output
+    assert (packet_dir / "ai-review-prompt.md").exists()
+    assert (packet_dir / "ai-review.json").exists()
+    assert (packet_dir / "review.json").read_text(encoding="utf-8") == before_review
+    assert not tuple((controller / "targets" / "demo" / "backlog" / "queued").glob("*.md"))
+    assert module.main(["task", "queue", "latest", "--auto"]) == 0
+    _assert_no_product_harness_pollution(product)
+
+
+def test_bare_task_routes_to_interview(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.15")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    capsys.readouterr()
+    assert module.main(["task", "--title", "Quick request"]) == 0
+    output = capsys.readouterr().out
+
+    assert "작업 요청 interview 생성 완료" in output
+    assert (controller / "targets" / "demo" / "backlog" / "drafts").exists()
+    assert not tuple((controller / "targets" / "demo" / "backlog" / "queued").glob("*.md"))
+
+
 def test_task_parent_target_option_is_preserved_for_subcommands(monkeypatch, tmp_path: Path) -> None:
     module = _load_module()
     controller = tmp_path / "controller"

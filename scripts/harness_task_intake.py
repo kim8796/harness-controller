@@ -19,6 +19,8 @@ TASK_PACKET_SCHEMA_VERSION = 1
 DRAFTS_DIR = Path("backlog/drafts")
 MAX_REQUIREMENT_BYTES = 512_000
 MAX_ATTACHMENT_BYTES = 10_000_000
+MAX_CAPTION_CHARS = 500
+MAX_AI_RESPONSE_BYTES = 256_000
 PACKET_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 BLANKISH = {"", "-", "- n/a", "- none", "- todo", "- tbd"}
 SECRET_SUFFIXES = {".key", ".pem", ".p12", ".pfx", ".kdbx"}
@@ -32,13 +34,38 @@ SECRET_NAMES = {
     "id_ed25519",
     "known_hosts",
 }
-SECRET_PART_HINTS = ("secret", "token", "password", "credential", "credentials")
+SECRET_PART_HINTS = (
+    "secret",
+    "token",
+    "password",
+    "credential",
+    "credentials",
+    "api_key",
+    "apikey",
+    "api-key",
+    "access_token",
+    "access-token",
+    "refresh_token",
+    "refresh-token",
+    "client_secret",
+    "client-secret",
+    "signing_key",
+    "signing-key",
+    "private_key",
+    "private-key",
+)
 SECRET_TEXT_PATTERNS = (
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{20,}"),
-    re.compile(r"(?i)\b(api[_-]?key|token|secret|password)\s*[:=]\s*['\"]?[A-Za-z0-9._~+/=-]{12,}"),
+    re.compile(
+        r"(?i)(?:\b|['\"])[A-Za-z0-9_.-]*"
+        r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|signing[_-]?key|"
+        r"token|secret|password)"
+        r"['\"]?\s*[:=]\s*['\"]?[A-Za-z0-9._~+/=-]{12,}"
+    ),
 )
 MANDATORY_FORBIDDEN_SCOPE = (".env*", "runs/**", "reports/**", "targets/**")
+AI_REVIEW_SCHEMA_VERSION = 1
 
 
 class TaskIntakeError(RuntimeError):
@@ -64,6 +91,18 @@ class QueueResult:
     backlog_path: Path
     backlog_id: str
     autonomy_execute: str
+
+
+@dataclass(frozen=True)
+class AiReviewResult:
+    packet_id: str
+    target_id: str
+    prompt_path: Path
+    schema_path: Path
+    result_path: Path | None
+    response_path: Path | None
+    open_questions: tuple[str, ...]
+    risk_notes: tuple[str, ...]
 
 
 def utc_timestamp() -> str:
@@ -161,6 +200,54 @@ def _reject_secretish_text(text: str) -> None:
             raise TaskIntakeError("refusing to ingest secret-like request content")
 
 
+def _reject_secretish_bytes(data: bytes) -> None:
+    # Secrets are expected to be ASCII-ish even when embedded in binary payloads.
+    candidates = [
+        data.decode("utf-8", errors="ignore"),
+        data.decode("latin-1", errors="ignore"),
+        data.replace(b"\x00", b"").decode("utf-8", errors="ignore"),
+    ]
+    for encoding in ("utf-16-le", "utf-16-be"):
+        with contextlib.suppress(UnicodeDecodeError):
+            candidates.append(data.decode(encoding, errors="strict"))
+    for text in candidates:
+        _reject_secretish_text(text)
+
+
+def _reject_unsafe_basename(name: str) -> None:
+    if not name or name in {".", ".."}:
+        raise TaskIntakeError("task input file name is reserved")
+    if any(ord(char) < 32 or ord(char) == 127 for char in name):
+        raise TaskIntakeError("task input file name must not contain control characters or newlines")
+    if "/" in name or "\\" in name:
+        raise TaskIntakeError("task input file name must be a basename")
+
+
+def _validate_caption(caption: str) -> str:
+    text = _validate_inline_text(caption, field_name="image caption", max_chars=MAX_CAPTION_CHARS)
+    return text
+
+
+def _validate_inline_text(value: str | None, *, field_name: str, max_chars: int = 2000) -> str:
+    text = str(value or "").strip()
+    if len(text) > max_chars:
+        raise TaskIntakeError(f"{field_name} is too long: {len(text)} chars")
+    if any(ord(char) < 32 or ord(char) == 127 for char in text):
+        raise TaskIntakeError(f"{field_name} must not contain control characters or newlines")
+    _reject_secretish_text(text)
+    return text
+
+
+def _validate_inline_items(values: Sequence[str], *, field_name: str) -> tuple[str, ...]:
+    return tuple(_validate_inline_text(value, field_name=field_name) for value in values)
+
+
+def _normalize_image_captions(images: Sequence[Path], captions: Sequence[str]) -> tuple[str, ...]:
+    if captions and len(captions) != len(images):
+        raise TaskIntakeError("image caption count must match image count")
+    return tuple(_validate_caption(caption) for caption in captions)
+
+
 def _validate_input_file(path: Path, *, max_bytes: int) -> Path:
     expanded = path.expanduser()
     if expanded.is_symlink():
@@ -168,10 +255,12 @@ def _validate_input_file(path: Path, *, max_bytes: int) -> Path:
     resolved = expanded.resolve(strict=True)
     if not resolved.is_file():
         raise TaskIntakeError(f"task input must be a file: {path.as_posix()}")
+    _reject_unsafe_basename(resolved.name)
     _reject_secretish_path(resolved)
     size = resolved.stat().st_size
     if size > max_bytes:
         raise TaskIntakeError(f"task input is too large: {path.as_posix()} ({size} bytes)")
+    _reject_secretish_bytes(resolved.read_bytes())
     return resolved
 
 
@@ -188,6 +277,27 @@ def _copy_input_file(source: Path, destination: Path, *, relative_to: Path) -> d
         "size": destination.stat().st_size,
         "sha256": sha256_file(destination),
     }
+
+
+def _copy_image_attachments(
+    *,
+    images: Sequence[Path],
+    captions: Sequence[str],
+    attachments_dir: Path,
+    state_root: Path,
+) -> list[dict[str, object]]:
+    normalized_captions = _normalize_image_captions(images, captions)
+    attachment_meta: list[dict[str, object]] = []
+    for index, image in enumerate(images):
+        image_file = _validate_input_file(image, max_bytes=MAX_ATTACHMENT_BYTES)
+        media_type = mimetypes.guess_type(image_file.name)[0] or ""
+        if not media_type.startswith("image/"):
+            raise TaskIntakeError(f"attachment is not an image: {image.as_posix()}")
+        metadata = _copy_input_file(image_file, attachments_dir / image_file.name, relative_to=state_root.resolve())
+        if normalized_captions:
+            metadata["caption"] = normalized_captions[index]
+        attachment_meta.append(metadata)
+    return attachment_meta
 
 
 def _template(title: str | None = None) -> str:
@@ -259,11 +369,12 @@ def create_draft(
     title: str | None = None,
     packet_id: str | None = None,
 ) -> Path:
-    resolved_packet_id = validate_packet_id(packet_id) if packet_id else make_packet_id(title)
+    safe_title = _validate_inline_text(title, field_name="title") if title else None
+    resolved_packet_id = validate_packet_id(packet_id) if packet_id else make_packet_id(safe_title)
     packet_dir = _packet_dir(state_root, resolved_packet_id)
     _ensure_new_packet_dir(packet_dir)
     request_path = _request_path(state_root, resolved_packet_id)
-    _write_text(request_path, _template(title))
+    _write_text(request_path, _template(safe_title))
     now = utc_timestamp()
     _write_json(
         _packet_json_path(state_root, resolved_packet_id),
@@ -288,11 +399,13 @@ def create_from_file(
     target_id: str,
     source: Path,
     images: Sequence[Path] = (),
+    image_captions: Sequence[str] = (),
     title: str | None = None,
     packet_id: str | None = None,
 ) -> Path:
     source_file = _validate_input_file(source, max_bytes=MAX_REQUIREMENT_BYTES)
-    resolved_packet_id = validate_packet_id(packet_id) if packet_id else make_packet_id(title or source_file.stem)
+    safe_title = _validate_inline_text(title, field_name="title") if title else None
+    resolved_packet_id = validate_packet_id(packet_id) if packet_id else make_packet_id(safe_title or source_file.stem)
     packet_dir = _packet_dir(state_root, resolved_packet_id)
     _ensure_new_packet_dir(packet_dir)
     inputs_dir = packet_dir / "inputs"
@@ -301,21 +414,18 @@ def create_from_file(
         try:
             source_text = source_file.read_text(encoding="utf-8")
         except UnicodeDecodeError:
-            source_text = f"# {title or source_file.stem}\n\n## Summary\n\n- 요구사항 원본 파일: inputs/{source_file.name}\n"
+            source_text = "# Imported requirement file\n\n## Summary\n\n- 요구사항 원본 파일: inputs/" + source_file.name + "\n"
         _reject_secretish_text(source_text)
         source_copy = inputs_dir / source_file.name
         source_meta = _copy_input_file(source_file, source_copy, relative_to=state_root.resolve())
         request_path = _request_path(state_root, resolved_packet_id)
         _write_text(request_path, source_text)
-        attachment_meta: list[dict[str, object]] = []
-        for image in images:
-            image_file = _validate_input_file(image, max_bytes=MAX_ATTACHMENT_BYTES)
-            media_type = mimetypes.guess_type(image_file.name)[0] or ""
-            if not media_type.startswith("image/"):
-                raise TaskIntakeError(f"attachment is not an image: {image.as_posix()}")
-            attachment_meta.append(
-                _copy_input_file(image_file, attachments_dir / image_file.name, relative_to=state_root.resolve())
-            )
+        attachment_meta = _copy_image_attachments(
+            images=images,
+            captions=image_captions,
+            attachments_dir=attachments_dir,
+            state_root=state_root,
+        )
     except Exception:
         shutil.rmtree(packet_dir, ignore_errors=True)
         raise
@@ -331,6 +441,129 @@ def create_from_file(
             "request_path": request_path.relative_to(packet_dir).as_posix(),
             "source": "file",
             "source_file": source_meta,
+            "attachments": attachment_meta,
+            "queued_backlog_path": "",
+        },
+    )
+    return request_path
+
+
+def _interview_request_text(
+    *,
+    title: str | None,
+    goal: str | None,
+    summary: str | None,
+    acceptance: Sequence[str],
+    file_scope: Sequence[str],
+    forbidden_scope: Sequence[str],
+    validation: Sequence[str],
+    notes: Sequence[str],
+) -> str:
+    resolved_title = title or goal or "새 작업 요청"
+    forbidden = tuple(dict.fromkeys((*MANDATORY_FORBIDDEN_SCOPE, *tuple(forbidden_scope))))
+    return "\n".join(
+        [
+            f"# {resolved_title}",
+            "",
+            "## Goal",
+            "",
+            _render_list((goal,) if goal else ()),
+            "",
+            "## Summary",
+            "",
+            _render_list((summary,) if summary else ()),
+            "",
+            "## Acceptance",
+            "",
+            _render_list(tuple(acceptance)),
+            "",
+            "## File Scope",
+            "",
+            _render_list(tuple(file_scope)),
+            "",
+            "## Forbidden Scope",
+            "",
+            _render_list(forbidden),
+            "",
+            "## Validation",
+            "",
+            _render_list(tuple(validation)),
+            "",
+            "## Manual Checks",
+            "",
+            "- n/a",
+            "",
+            "## Notes",
+            "",
+            _render_list(tuple(notes)),
+            "",
+        ]
+    )
+
+
+def create_interview_draft(
+    *,
+    state_root: Path,
+    target_id: str,
+    title: str | None = None,
+    goal: str | None = None,
+    summary: str | None = None,
+    acceptance: Sequence[str] = (),
+    file_scope: Sequence[str] = (),
+    forbidden_scope: Sequence[str] = (),
+    validation: Sequence[str] = (),
+    notes: Sequence[str] = (),
+    images: Sequence[Path] = (),
+    image_captions: Sequence[str] = (),
+    packet_id: str | None = None,
+) -> Path:
+    safe_title = _validate_inline_text(title, field_name="title") if title else None
+    safe_goal = _validate_inline_text(goal, field_name="goal") if goal else None
+    safe_summary = _validate_inline_text(summary, field_name="summary") if summary else None
+    safe_acceptance = _validate_inline_items(acceptance, field_name="acceptance")
+    safe_file_scope = _validate_inline_items(file_scope, field_name="file scope")
+    safe_forbidden_scope = _validate_inline_items(forbidden_scope, field_name="forbidden scope")
+    safe_validation = _validate_inline_items(validation, field_name="validation")
+    safe_notes = _validate_inline_items(notes, field_name="notes")
+    resolved_packet_id = validate_packet_id(packet_id) if packet_id else make_packet_id(safe_title or safe_goal)
+    packet_dir = _packet_dir(state_root, resolved_packet_id)
+    _ensure_new_packet_dir(packet_dir)
+    request_path = _request_path(state_root, resolved_packet_id)
+    attachments_dir = packet_dir / "attachments"
+    try:
+        attachment_meta = _copy_image_attachments(
+            images=images,
+            captions=image_captions,
+            attachments_dir=attachments_dir,
+            state_root=state_root,
+        )
+        _write_text(
+            request_path,
+            _interview_request_text(
+                title=safe_title,
+                goal=safe_goal,
+                summary=safe_summary,
+                acceptance=safe_acceptance,
+                file_scope=safe_file_scope,
+                forbidden_scope=safe_forbidden_scope,
+                validation=safe_validation,
+                notes=safe_notes,
+            ),
+        )
+    except Exception:
+        shutil.rmtree(packet_dir, ignore_errors=True)
+        raise
+    now = utc_timestamp()
+    _write_json(
+        _packet_json_path(state_root, resolved_packet_id),
+        {
+            "schema_version": TASK_PACKET_SCHEMA_VERSION,
+            "packet_id": resolved_packet_id,
+            "target_id": target_id,
+            "created_at": now,
+            "updated_at": now,
+            "request_path": request_path.relative_to(packet_dir).as_posix(),
+            "source": "interview",
             "attachments": attachment_meta,
             "queued_backlog_path": "",
         },
@@ -562,11 +795,285 @@ def _attachment_lines(packet: object) -> tuple[str, ...]:
     for attachment in attachments:
         if not isinstance(attachment, Mapping):
             continue
-        lines.append(
+        base = (
             f"{attachment.get('path')} ({attachment.get('media_type')}, "
             f"{attachment.get('size')} bytes, sha256={str(attachment.get('sha256'))[:16]}...)"
         )
+        caption = str(attachment.get("caption") or "").strip()
+        lines.append(f"{base} - caption: {caption}" if caption else base)
     return tuple(lines)
+
+
+def _ai_review_schema() -> dict[str, object]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "summary": {"type": "string"},
+            "open_questions": {"type": "array", "items": {"type": "string"}},
+            "risk_notes": {"type": "array", "items": {"type": "string"}},
+            "suggested_acceptance": {"type": "array", "items": {"type": "string"}},
+            "suggested_validation": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["summary", "open_questions", "risk_notes"],
+    }
+
+
+def _ai_review_prompt(
+    *,
+    model: Mapping[str, object],
+    deterministic_review: ReviewResult,
+    preview_text: str,
+) -> str:
+    return "\n".join(
+        [
+            "# Harness Task Intake AI Review",
+            "",
+            "You are reviewing a product task request before it is queued for an external harness target.",
+            "Do not approve execution. Identify missing details, ambiguous acceptance criteria, unsafe scope, and manual checks.",
+            "Return JSON matching `ai-review-schema.json`. Do not include secrets or raw tokens.",
+            "",
+            "## Deterministic Review",
+            "",
+            f"- Target: `{deterministic_review.target_id}`",
+            f"- Packet: `{deterministic_review.packet_id}`",
+            f"- Auto eligible: `{deterministic_review.auto_eligible}`",
+            "- Open questions: " + (", ".join(deterministic_review.open_questions) or "none"),
+            "- Risk flags: " + (", ".join(deterministic_review.risk_flags) or "none"),
+            "",
+            "## Request",
+            "",
+            str(model["text"]),
+            "",
+            "## Backlog Preview",
+            "",
+            preview_text,
+        ]
+    )
+
+
+def _string_list(value: object, *, field_name: str, required: bool = False) -> tuple[str, ...]:
+    if value is None:
+        if required:
+            raise TaskIntakeError(f"AI review field is required: {field_name}")
+        return ()
+    if not isinstance(value, list):
+        raise TaskIntakeError(f"AI review field must be a list: {field_name}")
+    items: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise TaskIntakeError(f"AI review field items must be strings: {field_name}")
+        text = str(item or "").strip()
+        if not text:
+            continue
+        if len(text) > 1000:
+            raise TaskIntakeError(f"AI review field item is too long: {field_name}")
+        if any(ord(char) < 32 or ord(char) == 127 for char in text):
+            raise TaskIntakeError(f"AI review field contains control characters: {field_name}")
+        _reject_secretish_text(text)
+        items.append(text)
+    return tuple(items)
+
+
+def _load_existing_review(
+    *,
+    state_root: Path,
+    packet_id: str,
+    expected_target_id: str | None,
+) -> ReviewResult:
+    model = _request_model(state_root, packet_id)
+    packet = model["packet"]
+    target_id = _assert_expected_target(packet, expected_target_id)
+    review_path = _sidecar_path(state_root, DRAFTS_DIR, packet_id, "review.json")
+    if not review_path.exists():
+        raise TaskIntakeError("task review is required before AI review")
+    try:
+        payload = json.loads(_read_text(review_path))
+    except json.JSONDecodeError as exc:
+        raise TaskIntakeError("task review is invalid") from exc
+    if payload.get("request_sha256") != sha256_text(str(model["text"])):
+        raise TaskIntakeError("task review is stale; run `./harness task review` again")
+    if payload.get("target_id") != target_id:
+        raise TaskIntakeError("task review target mismatch")
+    preview_name = str(payload.get("preview_path") or "backlog-preview.md")
+    if Path(preview_name).name != preview_name:
+        raise TaskIntakeError("task review preview path is invalid")
+    preview_path = _sidecar_path(state_root, DRAFTS_DIR, packet_id, preview_name)
+    if not preview_path.exists():
+        raise TaskIntakeError("task review preview is missing")
+    return ReviewResult(
+        packet_id=packet_id,
+        target_id=target_id,
+        preview_path=preview_path,
+        review_path=review_path,
+        auto_eligible=bool(payload.get("auto_eligible")),
+        open_questions=tuple(str(item) for item in payload.get("open_questions") or ()),
+        risk_flags=tuple(str(item) for item in payload.get("risk_flags") or ()),
+        title=str(model["title"]),
+    )
+
+
+def _write_ai_review_error(
+    *,
+    state_root: Path,
+    packet_id: str,
+    target_id: str,
+    model: Mapping[str, object],
+    error: str,
+    response_text: str | None = None,
+) -> Path:
+    error_path = _sidecar_path(state_root, DRAFTS_DIR, packet_id, "ai-review-error.json")
+    payload: dict[str, object] = {
+        "schema_version": AI_REVIEW_SCHEMA_VERSION,
+        "packet_id": packet_id,
+        "target_id": target_id,
+        "status": "invalid",
+        "error": error,
+        "request_sha256": sha256_text(str(model["text"])),
+        "created_at": utc_timestamp(),
+    }
+    if response_text is not None:
+        payload["response_sha256"] = sha256_text(response_text)
+    _write_json(error_path, payload)
+    return error_path
+
+
+def _clear_ai_review_success_artifacts(state_root: Path, packet_id: str) -> None:
+    for filename in ("ai-review.json", "ai-review-response.json"):
+        path = _sidecar_path(state_root, DRAFTS_DIR, packet_id, filename)
+        if path.exists():
+            path.unlink()
+
+
+def _parse_ai_review_payload(payload: object) -> tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    if not isinstance(payload, Mapping):
+        raise TaskIntakeError("AI review response must be a JSON object")
+    allowed = set(_ai_review_schema()["properties"])
+    extra = sorted(set(str(key) for key in payload) - allowed)
+    if extra:
+        raise TaskIntakeError("AI review response has unsupported fields: " + ", ".join(extra))
+    missing = [field for field in _ai_review_schema()["required"] if field not in payload]
+    if missing:
+        raise TaskIntakeError("AI review response missing required fields: " + ", ".join(missing))
+    summary_value = payload.get("summary")
+    if not isinstance(summary_value, str):
+        raise TaskIntakeError("AI review field must be a string: summary")
+    summary = summary_value.strip()
+    if len(summary) > 2000:
+        raise TaskIntakeError("AI review summary is too long")
+    _reject_secretish_text(summary)
+    open_questions = _string_list(payload.get("open_questions"), field_name="open_questions", required=True)
+    risk_notes = _string_list(payload.get("risk_notes"), field_name="risk_notes", required=True)
+    suggested_acceptance = _string_list(payload.get("suggested_acceptance"), field_name="suggested_acceptance")
+    suggested_validation = _string_list(payload.get("suggested_validation"), field_name="suggested_validation")
+    return summary, open_questions, risk_notes, suggested_acceptance, suggested_validation
+
+
+def prepare_ai_review(
+    *,
+    state_root: Path,
+    packet_id: str,
+    expected_target_id: str | None = None,
+    response: Path | None = None,
+) -> AiReviewResult:
+    resolved_packet_id = validate_packet_id(packet_id)
+    deterministic_review = _load_existing_review(
+        state_root=state_root,
+        packet_id=resolved_packet_id,
+        expected_target_id=expected_target_id,
+    )
+    model = _request_model(state_root, resolved_packet_id)
+    preview_text = _read_text(deterministic_review.preview_path)
+    prompt_text = _ai_review_prompt(model=model, deterministic_review=deterministic_review, preview_text=preview_text)
+    _reject_secretish_text(prompt_text)
+    prompt_path = _sidecar_path(state_root, DRAFTS_DIR, resolved_packet_id, "ai-review-prompt.md")
+    schema_path = _sidecar_path(state_root, DRAFTS_DIR, resolved_packet_id, "ai-review-schema.json")
+    _write_text(prompt_path, prompt_text)
+    _write_json(schema_path, _ai_review_schema())
+
+    result_path: Path | None = None
+    response_path: Path | None = None
+    open_questions: tuple[str, ...] = ()
+    risk_notes: tuple[str, ...] = ()
+    if response is not None:
+        _clear_ai_review_success_artifacts(state_root, resolved_packet_id)
+        try:
+            response_file = _validate_input_file(response, max_bytes=MAX_AI_RESPONSE_BYTES)
+        except TaskIntakeError as exc:
+            _write_ai_review_error(
+                state_root=state_root,
+                packet_id=resolved_packet_id,
+                target_id=deterministic_review.target_id,
+                model=model,
+                error=str(exc),
+            )
+            raise
+        try:
+            raw_response = response_file.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            _write_ai_review_error(
+                state_root=state_root,
+                packet_id=resolved_packet_id,
+                target_id=deterministic_review.target_id,
+                model=model,
+                error="AI review response must be UTF-8 JSON",
+            )
+            raise TaskIntakeError("AI review response must be UTF-8 JSON") from exc
+        _reject_secretish_text(raw_response)
+        try:
+            payload = json.loads(raw_response)
+        except json.JSONDecodeError as exc:
+            _write_ai_review_error(
+                state_root=state_root,
+                packet_id=resolved_packet_id,
+                target_id=deterministic_review.target_id,
+                model=model,
+                error="AI review response is not valid JSON",
+                response_text=raw_response,
+            )
+            raise TaskIntakeError("AI review response is not valid JSON") from exc
+        try:
+            summary, open_questions, risk_notes, suggested_acceptance, suggested_validation = _parse_ai_review_payload(payload)
+        except TaskIntakeError as exc:
+            _write_ai_review_error(
+                state_root=state_root,
+                packet_id=resolved_packet_id,
+                target_id=deterministic_review.target_id,
+                model=model,
+                error=str(exc),
+                response_text=raw_response,
+            )
+            raise
+        response_path = _sidecar_path(state_root, DRAFTS_DIR, resolved_packet_id, "ai-review-response.json")
+        _write_text(response_path, raw_response)
+        result_path = _sidecar_path(state_root, DRAFTS_DIR, resolved_packet_id, "ai-review.json")
+        _write_json(
+            result_path,
+            {
+                "schema_version": AI_REVIEW_SCHEMA_VERSION,
+                "packet_id": resolved_packet_id,
+                "target_id": deterministic_review.target_id,
+                "status": "advisory",
+                "summary": summary,
+                "open_questions": list(open_questions),
+                "risk_notes": list(risk_notes),
+                "suggested_acceptance": list(suggested_acceptance),
+                "suggested_validation": list(suggested_validation),
+                "request_sha256": sha256_text(str(model["text"])),
+                "created_at": utc_timestamp(),
+                "queue_gate": "ignored-by-queue",
+            },
+        )
+    return AiReviewResult(
+        packet_id=resolved_packet_id,
+        target_id=deterministic_review.target_id,
+        prompt_path=prompt_path,
+        schema_path=schema_path,
+        result_path=result_path,
+        response_path=response_path,
+        open_questions=open_questions,
+        risk_notes=risk_notes,
+    )
 
 
 def review_packet(*, state_root: Path, packet_id: str, expected_target_id: str | None = None) -> ReviewResult:

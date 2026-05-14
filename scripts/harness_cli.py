@@ -798,10 +798,81 @@ def _task_packet_id(record: harness_controller.TargetRecord, raw: str | None) ->
 
 
 def command_task(args: argparse.Namespace) -> int:
-    if getattr(args, "task_command", None) in (None, "draft"):
+    if getattr(args, "task_command", None) is None:
+        return command_task_interview(args)
+    if getattr(args, "task_command", None) == "interview":
+        return command_task_interview(args)
+    if getattr(args, "task_command", None) == "draft":
         return command_task_draft(args)
     print("error: unknown task command")
     return 2
+
+
+def _prompt_value(label: str) -> str:
+    try:
+        return input(f"{label}: ").strip()
+    except EOFError:
+        return ""
+
+
+def _prompt_list(label: str) -> list[str]:
+    value = _prompt_value(label + " (쉼표로 여러 개 입력 가능)")
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _interview_values(args: argparse.Namespace) -> dict[str, object]:
+    goal = getattr(args, "goal", None)
+    summary = getattr(args, "summary", None)
+    acceptance = list(getattr(args, "acceptance", []) or [])
+    file_scope = list(getattr(args, "file_scope", []) or [])
+    forbidden_scope = list(getattr(args, "forbidden_scope", []) or [])
+    validation = list(getattr(args, "validation", []) or [])
+    notes = list(getattr(args, "note", []) or [])
+    if not any((goal, summary, acceptance, file_scope, validation, notes)) and sys.stdin.isatty():
+        print("작업 요청 인터뷰를 시작합니다. 모르면 비워두고 나중에 request.md를 수정해도 됩니다.")
+        goal = _prompt_value("목표")
+        summary = _prompt_value("요약/배경")
+        acceptance = _prompt_list("완료 조건")
+        file_scope = _prompt_list("변경 허용 파일 범위 예: README.md 또는 src/**")
+        validation = _prompt_list("검증 명령 예: `python3 -m pytest -q`")
+        notes = _prompt_list("참고 메모")
+    if validation:
+        validation = [item if item.startswith("`") and item.endswith("`") else f"`{item}`" for item in validation]
+    return {
+        "goal": goal,
+        "summary": summary,
+        "acceptance": acceptance,
+        "file_scope": file_scope,
+        "forbidden_scope": forbidden_scope,
+        "validation": validation,
+        "notes": notes,
+    }
+
+
+def command_task_interview(args: argparse.Namespace) -> int:
+    try:
+        record = _resolve_task_target(getattr(args, "target", None))
+        values = _interview_values(args)
+        request_path = harness_task_intake.create_interview_draft(
+            state_root=record.state_root,
+            target_id=record.target_id,
+            title=getattr(args, "title", None),
+            packet_id=getattr(args, "packet_id", None),
+            images=tuple(_target_path(path) for path in getattr(args, "image", []) or []),
+            image_captions=tuple(getattr(args, "caption", []) or []),
+            **values,
+        )
+        print("작업 요청 interview 생성 완료")
+        print(f"- 대상: `{record.target_id}`")
+        print(f"- request: `{request_path.as_posix()}`")
+        print("- 이 파일은 외부 에디터로 자유롭게 보강해도 됩니다.")
+        print("다음 명령: `./harness task review latest`")
+        print("선택 명령: review가 끝난 뒤 `./harness task review latest --ai`")
+        return 0
+    except (HarnessCliError, harness_task_intake.TaskIntakeError) as exc:
+        print(f"error: {exc}")
+        print("다음 명령: `./harness install --repo /path/to/product --id my-app --default`")
+        return 2
 
 
 def command_task_draft(args: argparse.Namespace) -> int:
@@ -833,6 +904,7 @@ def command_task_from(args: argparse.Namespace) -> int:
             target_id=record.target_id,
             source=_target_path(args.source),
             images=tuple(_target_path(path) for path in args.image),
+            image_captions=tuple(getattr(args, "caption", []) or []),
             title=args.title,
             packet_id=args.packet_id,
         )
@@ -851,6 +923,27 @@ def command_task_review(args: argparse.Namespace) -> int:
     try:
         record = _resolve_task_target(args.target)
         packet_id = _task_packet_id(record, args.packet)
+        if getattr(args, "ai", False) or getattr(args, "ai_response", None) is not None:
+            ai_review = harness_task_intake.prepare_ai_review(
+                state_root=record.state_root,
+                packet_id=packet_id,
+                expected_target_id=record.target_id,
+                response=_target_path(args.ai_response) if getattr(args, "ai_response", None) is not None else None,
+            )
+            print("작업 요청 AI 검토 준비 완료")
+            print(f"- 대상: `{ai_review.target_id}`")
+            print(f"- 요청 묶음: `{ai_review.packet_id}`")
+            print("- AI 검토 프롬프트: `" + ai_review.prompt_path.as_posix() + "`")
+            print("- AI 응답 스키마: `" + ai_review.schema_path.as_posix() + "`")
+            if ai_review.result_path is not None:
+                print("- AI 검토 결과: `" + ai_review.result_path.as_posix() + "`")
+            if ai_review.open_questions:
+                print("- AI 확인 질문: " + ", ".join(ai_review.open_questions))
+            if ai_review.risk_notes:
+                print("- AI 위험 메모: " + ", ".join(ai_review.risk_notes))
+            print("- AI 검토는 참고용이며 자동 실행 판단에는 사용되지 않습니다.")
+            print("다음 명령: `./harness task queue latest` 또는 `./harness task queue latest --auto`")
+            return 0
         review = harness_task_intake.review_packet(
             state_root=record.state_root,
             packet_id=packet_id,
@@ -858,9 +951,9 @@ def command_task_review(args: argparse.Namespace) -> int:
         )
         print("작업 요청 review 완료")
         print(f"- 대상: `{review.target_id}`")
-        print(f"- packet: `{review.packet_id}`")
-        print(f"- preview: `{review.preview_path.as_posix()}`")
-        print(f"- auto queue 가능: {'yes' if review.auto_eligible else 'no'}")
+        print(f"- 요청 묶음: `{review.packet_id}`")
+        print(f"- 미리보기: `{review.preview_path.as_posix()}`")
+        print(f"- 자동 실행 가능: {'yes' if review.auto_eligible else 'no'}")
         if review.open_questions:
             print(f"- 확인 질문: {', '.join(review.open_questions)}")
         if review.risk_flags:
@@ -2347,10 +2440,24 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--json", action="store_true")
     install.set_defaults(func=command_install)
 
-    task = subparsers.add_parser("task", help="Beginner task intake: draft, review, and queue a product request.")
+    task = subparsers.add_parser("task", help="Beginner task intake: interview, review, and queue a product request.")
     task.add_argument("--target", default="@default", help="Target selector for `./harness task`; default is @default.")
     task.add_argument("--title", help="Title for the default draft command.")
     task_subparsers = task.add_subparsers(dest="task_command")
+    task_interview = task_subparsers.add_parser("interview", help="Create a guided task request packet.")
+    task_interview.add_argument("--target", default=argparse.SUPPRESS, help="Target selector; default is @default.")
+    task_interview.add_argument("--title", default=argparse.SUPPRESS)
+    task_interview.add_argument("--packet-id")
+    task_interview.add_argument("--goal")
+    task_interview.add_argument("--summary")
+    task_interview.add_argument("--acceptance", action="append", default=[])
+    task_interview.add_argument("--file-scope", action="append", default=[])
+    task_interview.add_argument("--forbidden-scope", action="append", default=[])
+    task_interview.add_argument("--validation", action="append", default=[])
+    task_interview.add_argument("--note", action="append", default=[])
+    task_interview.add_argument("--image", type=Path, action="append", default=[])
+    task_interview.add_argument("--caption", action="append", default=[])
+    task_interview.set_defaults(func=command_task_interview)
     task_draft = task_subparsers.add_parser("draft", help="Create an editable task request draft.")
     task_draft.add_argument("--target", default=argparse.SUPPRESS, help="Target selector; default is @default.")
     task_draft.add_argument("--title", default=argparse.SUPPRESS)
@@ -2362,10 +2469,13 @@ def build_parser() -> argparse.ArgumentParser:
     task_from.add_argument("--title", default=argparse.SUPPRESS)
     task_from.add_argument("--packet-id")
     task_from.add_argument("--image", type=Path, action="append", default=[])
+    task_from.add_argument("--caption", action="append", default=[])
     task_from.set_defaults(func=command_task_from)
     task_review = task_subparsers.add_parser("review", help="Build a backlog preview without queueing it.")
     task_review.add_argument("packet", nargs="?", default="latest")
     task_review.add_argument("--target", default=argparse.SUPPRESS, help="Target selector; default is @default.")
+    task_review.add_argument("--ai", action="store_true", help="Write AI review prompt/schema artifacts without queueing.")
+    task_review.add_argument("--ai-response", type=Path, help="Ingest a JSON AI review response file as advisory metadata.")
     task_review.set_defaults(func=command_task_review)
     task_queue = task_subparsers.add_parser("queue", help="Queue a reviewed task as sidecar backlog.")
     task_queue.add_argument("packet", nargs="?", default="latest")

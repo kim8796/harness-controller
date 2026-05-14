@@ -105,7 +105,7 @@ autonomy-generated corrective follow-up 은 worktree 안에서도 `Goal: META`, 
 autonomy CLI 예시가 바뀌면 `docs/harness/AUTONOMY.md`, `docs/harness/START_HERE.md`, `harness_guide.md` 와 함께 이 문서의 운영 baseline 도 같이 점검한다.
 Phase E 기준 operator command surface 는 얇은 shim 으로 유지한다. `/loop status`, `/loop pause`, `/loop send` 같은 command 문서는 결국 `python3 scripts/harness_autonomy.py <subcommand>` 만 호출해야 하며, worktree/branch 판단이나 lane routing 로직을 문서 wrapper 안에 중복 구현하지 않는다.
 
-starter 문서의 quick start 예시도 위 기본 명령을 기준으로 유지한다.
+starter 문서의 quick start 예시도 위 기본 명령을 기준으로 유지한다. v1.8.15 이후 external controller beginner task flow 는 `./harness task` -> `./harness task review latest` -> optional `./harness task review latest --ai` -> `./harness task queue latest --auto` -> `./harness run` 순서이며, review/AI review 단계는 controller sidecar artifact 만 쓰고 product worktree 를 변경하지 않는다.
 
 ## 권장 lane 매핑
 

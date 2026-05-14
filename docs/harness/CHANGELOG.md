@@ -1,5 +1,13 @@
 # Harness Changelog
 
+## 1.8.15 - 2026-05-14
+
+- Made beginner task intake start with a guided interview from bare `./harness task`, while keeping `task draft|from|review|queue` available for advanced/manual flows.
+- Added captioned image intake and validation for task packets without embedding image bytes in backlog markdown.
+- Added `task review --ai` as an advisory-only artifact generator: it writes prompt/schema files and can ingest a sanitized JSON response, but it does not launch a model or mutate deterministic `review.json`.
+- Kept `queue --auto` tied only to deterministic review metadata, required scope, and validation commands.
+- Updated controller export docs and smoke coverage so starter users see `install -> task -> review --ai -> queue -> run` without exposing advanced target internals first.
+
 ## 1.8.14 - 2026-05-14
 
 - Added beginner external controller wrappers: `./harness install`, `./harness task`, bare `./harness run`, and `./harness smoke implementation`.

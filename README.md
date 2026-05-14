@@ -1,4 +1,4 @@
-# Harness Controller Bundle v1.8.14
+# Harness Controller Bundle v1.8.15
 
 이 디렉토리는 product repo 밖에서 실행하는 external harness controller 배포 번들이다.
 product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는다.
@@ -9,18 +9,22 @@ product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는�
 ./harness controller doctor
 ./harness install --repo /path/to/product-repo --id my-app --branch main --default
 ./harness task
-# Edit the printed request.md, then:
+# 프롬프트에 답하거나 출력된 request.md 를 수정한 뒤:
 ./harness task review latest
+# 선택: AI에게 물어볼 prompt/schema artifact 생성
+./harness task review latest --ai
 ./harness task queue latest --auto
 ./harness run
 ```
 
-Beginner path:
+초보자 경로:
 
-- `./harness install` means controller registration, not global wrapper install and not product repo file installation.
-- `./harness task draft|from|review|queue` stores drafts in controller records and creates an executable task only on `queue`.
-- `./harness run` runs one queued auto task for the default target and leaves local product diffs only; no completion, commit, or push is automatic.
-- `./harness smoke implementation` creates a temporary product repo and sidecar target to verify the implementation gate without touching real targets.
+- `./harness install` 은 전역 설치가 아니라 product repo 를 controller 대상에 등록하는 명령이다.
+- `./harness task` 는 guided interview 를 시작한다. 실행 가능한 작업은 `queue` 에서만 만들어진다.
+- `./harness task review` 는 자동 실행 가능 여부를 deterministic 하게 점검한다.
+- `./harness task review --ai` 는 packet-local AI prompt/schema artifact 만 만든다. AI를 직접 실행하지 않고 queue 판단에도 쓰지 않는다.
+- `./harness run` 은 default target 의 queued auto task 하나만 실행하고 local product diff 만 남긴다. 완료 처리, commit, push 는 자동이 아니다.
+- `./harness smoke implementation` 은 임시 product repo/target 으로 구현 gate 를 검증한다.
 
 Advanced mapping:
 
@@ -152,13 +156,14 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `tests/test_harness_task_intake.py`
 - `tests/test_harness_telegram_bridge.py`
 - `tests/test_redis_relay.py`
-- `docs/harness/releases/v1.8.14.md`
+- `docs/harness/releases/v1.8.15.md`
 - `docs/harness/releases/v1.8.0.md`
 - `docs/harness/releases/v1.8.1.md`
 - `docs/harness/releases/v1.8.10.md`
 - `docs/harness/releases/v1.8.11.md`
 - `docs/harness/releases/v1.8.12.md`
 - `docs/harness/releases/v1.8.13.md`
+- `docs/harness/releases/v1.8.14.md`
 - `docs/harness/releases/v1.8.2.md`
 - `docs/harness/releases/v1.8.3.md`
 - `docs/harness/releases/v1.8.4.md`

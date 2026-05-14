@@ -343,6 +343,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "docs" / "harness" / "releases" / "v1.8.12.md").exists()
     assert (bundle / "docs" / "harness" / "releases" / "v1.8.13.md").exists()
     assert (bundle / "docs" / "harness" / "releases" / "v1.8.14.md").exists()
+    assert (bundle / "docs" / "harness" / "releases" / "v1.8.15.md").exists()
     assert not (bundle / "coverage-summary.txt").exists()
     assert not (bundle / "targets").exists()
     assert not (bundle / ".env").exists()
@@ -355,8 +356,12 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "Harness Controller Bundle" in readme
     assert "./harness controller doctor" in readme
     assert "./harness install --repo /path/to/product-repo --id my-app --branch main --default" in readme
+    assert "./harness task review latest" in readme
+    assert "./harness task review latest --ai" in readme
     assert "./harness task queue latest --auto" in readme
-    assert "`./harness run` runs one queued auto task" in readme
+    assert "`./harness run` 은 default target" in readme
+    assert "`./harness task` 는 guided interview" in readme
+    assert "`./harness task review --ai` 는 packet-local AI prompt/schema artifact" in readme
     assert "Bare `./harness run` maps to `target run @default --implement-backlog-once`" in readme
     assert "./harness smoke implementation" in readme
     assert "HARNESS_RELAY_TARGET_IDS=my-app" in readme
@@ -394,37 +399,8 @@ def test_exported_controller_beginner_flow_runs_from_bundle(tmp_path: Path) -> N
     bundle = tmp_path / "controller-bundle"
     product = tmp_path / "product"
     head_before = _init_product_repo(product)
-    request = tmp_path / "request.md"
-    request.write_text(
-        "\n".join(
-            [
-                "# Add smoke note",
-                "",
-                "## Goal",
-                "- Add a small smoke note to README.md.",
-                "",
-                "## Summary",
-                "- Verify exported controller beginner commands work from the bundle.",
-                "",
-                "## Acceptance",
-                "- README.md contains the smoke note.",
-                "",
-                "## File Scope",
-                "- README.md",
-                "",
-                "## Forbidden Scope",
-                "- .env*",
-                "- runs/**",
-                "- reports/**",
-                "- targets/**",
-                "",
-                "## Validation",
-                "- `git diff -- README.md`",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
+    image = tmp_path / "mock.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nfake")
     module.export_controller_bundle(source, bundle)
     harness = bundle / "harness"
 
@@ -436,14 +412,36 @@ def test_exported_controller_beginner_flow_runs_from_bundle(tmp_path: Path) -> N
         capture_output=True,
         env=_git_env(),
     )
-    subprocess.run(
-        [str(harness), "task", "from", str(request), "--packet-id", "task-demo"],
+    assert subprocess.run(
+        [
+            str(harness),
+            "task",
+            "interview",
+            "--packet-id",
+            "task-demo",
+            "--title",
+            "Add smoke note",
+            "--goal",
+            "Add a small smoke note to README.md.",
+            "--summary",
+            "Verify exported controller beginner commands work from the bundle.",
+            "--acceptance",
+            "README.md contains the smoke note.",
+            "--file-scope",
+            "README.md",
+            "--validation",
+            "git diff -- README.md",
+            "--image",
+            str(image),
+            "--caption",
+            "Smoke reference image",
+        ],
         cwd=bundle,
         check=True,
         text=True,
         capture_output=True,
         env=_git_env(),
-    )
+    ).returncode == 0
     subprocess.run(
         [str(harness), "task", "review", "latest"],
         cwd=bundle,
@@ -452,6 +450,26 @@ def test_exported_controller_beginner_flow_runs_from_bundle(tmp_path: Path) -> N
         capture_output=True,
         env=_git_env(),
     )
+    subprocess.run(
+        [str(harness), "task", "review", "latest", "--ai"],
+        cwd=bundle,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    )
+    assert (bundle / "targets" / "demo" / "backlog" / "drafts" / "task-demo" / "ai-review-prompt.md").exists()
+    assert not tuple((bundle / "targets" / "demo" / "backlog" / "queued").glob("*.md"))
+    no_backlog_run = subprocess.run(
+        [str(harness), "run"],
+        cwd=bundle,
+        check=False,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    )
+    assert no_backlog_run.returncode == 2
+    assert "실행 가능한 sidecar backlog" in no_backlog_run.stdout
     subprocess.run(
         [str(harness), "task", "queue", "latest", "--auto"],
         cwd=bundle,
@@ -499,6 +517,8 @@ def test_exported_controller_beginner_flow_runs_from_bundle(tmp_path: Path) -> N
     assert head_after == head_before
     assert status_after == [" M README.md"]
     assert (bundle / "targets" / "demo" / "backlog" / "queued").exists()
+    preview = bundle / "targets" / "demo" / "backlog" / "drafts" / "task-demo" / "backlog-preview.md"
+    assert "caption: Smoke reference image" in preview.read_text(encoding="utf-8")
     assert (bundle / "targets" / "demo" / "runs" / "harness").exists()
     _assert_no_product_harness_pollution(product)
 
