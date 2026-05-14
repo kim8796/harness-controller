@@ -379,6 +379,8 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "Harness Controller Bundle" in readme
     assert "`./harness` 와 `./harness help` 는 한국어 시작 화면" in readme
     assert "./harness controller doctor" in readme
+    assert "./harness controller release-check --run-lint --run-pytest" in readme
+    assert "private controller repo release 전용 검증" in readme
     assert "./harness install /path/to/product-repo --id my-app --branch main --default" in readme
     assert "./harness task list" in readme
     assert "./harness task review <packet-id>" in readme
@@ -422,6 +424,26 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     sanitization = module.build_controller_sanitization_report(bundle)
     assert sanitization["ok"] is True
     assert sanitization["blockers"] == []
+
+
+def test_controller_tracked_path_classifier_is_source_aware(tmp_path: Path) -> None:
+    module = _load_module()
+
+    assert module.is_controller_forbidden_tracked_path(".env") is True
+    assert module.is_controller_forbidden_tracked_path(".env.example") is False
+    assert module.is_controller_forbidden_tracked_path("exports/harness/README.md") is False
+    assert module.is_controller_forbidden_tracked_path("targets/demo/target.json") is True
+    assert module.is_controller_forbidden_tracked_path("exports/harness/v1/file.txt") is True
+    assert module.is_controller_forbidden_tracked_path("runs/harness/run/generated-evidence.json") is True
+    assert module.is_controller_forbidden_tracked_path("reports/harness-autonomy/run/report.md") is True
+    assert module.is_controller_forbidden_tracked_path("tests/__pycache__/x.pyc") is True
+    assert module.is_controller_forbidden_tracked_path("nested/.pytest_cache/x") is True
+    assert module.is_controller_forbidden_tracked_path("scripts/.ruff_cache/x") is True
+    assert module.is_controller_forbidden_tracked_path("runs/harness/README.md") is False
+    assert module.is_controller_forbidden_tracked_path(
+        "runs/harness/run/generated-evidence.json",
+        source_checkout=True,
+    ) is False
 
 
 def test_exported_controller_beginner_flow_runs_from_bundle(tmp_path: Path) -> None:

@@ -1,4 +1,4 @@
-# Harness Controller Bundle v1.8.19
+# Harness Controller Bundle v1.8.20
 
 이 디렉토리는 product repo 밖에서 실행하는 external harness controller 배포 번들이다.
 product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는다.
@@ -9,6 +9,7 @@ product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는�
 ./harness
 ./harness help
 ./harness controller doctor
+./harness controller release-check --run-lint --run-pytest
 ./harness install /path/to/product-repo --id my-app --branch main --default
 ./harness task
 # 프롬프트에 답하거나 출력된 request.md 를 수정한 뒤:
@@ -24,6 +25,7 @@ product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는�
 초보자 경로:
 
 - `./harness` 와 `./harness help` 는 한국어 시작 화면을 보여준다. 전체 명령 참조는 `./harness --help` 를 쓴다.
+- `./harness controller release-check --run-lint --run-pytest` 는 private controller repo release 전용 검증이다. source repo pre-push guard 와 달리 controller 배포에 필요한 금지 추적 파일, export source, focused lint/test 만 확인한다.
 - `./harness install /path/to/product-repo --id my-app --default` 는 전역 설치가 아니라 제품 저장소를 하네스 관리 대상으로 등록하는 명령이다.
 - 터미널에서 인자 없이 `./harness install` 을 실행하면 필요한 값을 질문한다. 스크립트/CI에서는 `./harness install /path/to/product-repo ...` 또는 기존 `--repo` 형식으로 경로를 명시한다. 질문에 답할 수 없는 환경에서 인자 없이 실행하면 상태만 보여준다.
 - `./harness task` 는 요구사항 초안을 만든다. 출력된 `request.md` 는 외부 에디터로 수정해도 된다.
@@ -169,7 +171,7 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `tests/test_harness_task_intake.py`
 - `tests/test_harness_telegram_bridge.py`
 - `tests/test_redis_relay.py`
-- `docs/harness/releases/v1.8.19.md`
+- `docs/harness/releases/v1.8.20.md`
 - `docs/harness/releases/v1.8.0.md`
 - `docs/harness/releases/v1.8.1.md`
 - `docs/harness/releases/v1.8.10.md`
@@ -181,6 +183,7 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `docs/harness/releases/v1.8.16.md`
 - `docs/harness/releases/v1.8.17.md`
 - `docs/harness/releases/v1.8.18.md`
+- `docs/harness/releases/v1.8.19.md`
 - `docs/harness/releases/v1.8.2.md`
 - `docs/harness/releases/v1.8.3.md`
 - `docs/harness/releases/v1.8.4.md`

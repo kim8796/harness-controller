@@ -1577,6 +1577,231 @@ def test_controller_doctor_fails_when_targets_not_ignored(monkeypatch, tmp_path:
     assert payload["targets_ignored_by_git"] is False
 
 
+def test_controller_release_check_passes_with_controller_safe_tracking(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    controller.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=controller, check=True, text=True, capture_output=True, env=_git_env())
+    (controller / ".gitignore").write_text("targets/\nexports/\n.env*\n", encoding="utf-8")
+    (controller / "runs" / "harness").mkdir(parents=True)
+    (controller / "runs" / "harness" / "README.md").write_text("# runs\n", encoding="utf-8")
+    (controller / "reports" / "harness-autonomy").mkdir(parents=True)
+    (controller / "reports" / "harness-autonomy" / "README.md").write_text("# reports\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", ".gitignore", "runs/harness/README.md", "reports/harness-autonomy/README.md"],
+        cwd=controller,
+        check=True,
+        env=_git_env(),
+    )
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.20")
+    monkeypatch.setattr(module.harness_export, "missing_controller_source_paths", lambda root, version: ())
+
+    assert module.main(["controller", "release-check", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["mode"] == "controller-release-check"
+    assert payload["checks"]["checkout_kind"] == "controller-distribution"
+    assert payload["checks"]["tracked_forbidden_paths"]["paths"] == []
+    assert payload["values_redacted"] is True
+    assert "HARNESS_RELAY_SIGNING_KEY" not in json.dumps(payload)
+
+
+def test_controller_release_check_blocks_tracked_sidecar_state(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    controller.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=controller, check=True, text=True, capture_output=True, env=_git_env())
+    (controller / ".gitignore").write_text("targets/\n.env*\n", encoding="utf-8")
+    target_json = controller / "targets" / "demo" / "target.json"
+    target_json.parent.mkdir(parents=True)
+    target_json.write_text('{"target_id":"demo"}\n', encoding="utf-8")
+    live_run = controller / "runs" / "harness" / "run-1" / "generated-evidence.json"
+    live_run.parent.mkdir(parents=True)
+    live_run.write_text("{}\n", encoding="utf-8")
+    live_report = controller / "reports" / "harness-autonomy" / "run-1" / "report.md"
+    live_report.parent.mkdir(parents=True)
+    live_report.write_text("# report\n", encoding="utf-8")
+    env_file = controller / ".env"
+    env_file.write_text("HARNESS_RELAY_SIGNING_KEY=secret\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore"], cwd=controller, check=True, env=_git_env())
+    subprocess.run(
+        ["git", "add", "-f", "targets/demo/target.json", ".env", str(live_run), str(live_report)],
+        cwd=controller,
+        check=True,
+        env=_git_env(),
+    )
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.20")
+    monkeypatch.setattr(module.harness_export, "missing_controller_source_paths", lambda root, version: ())
+
+    assert module.main(["controller", "release-check", "--json"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert "tracked-controller-forbidden-paths" in payload["blockers"]
+    assert payload["checks"]["tracked_forbidden_paths"]["paths"] == [
+        ".env[redacted]",
+        "reports/harness-autonomy/run-1/report.md",
+        "runs/harness/run-1/generated-evidence.json",
+        "targets/demo/target.json",
+    ]
+    rendered = json.dumps(payload, ensure_ascii=False)
+    assert "secret" not in rendered
+
+
+def test_controller_release_check_redacts_secret_like_paths_and_command_output(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    controller.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=controller, check=True, text=True, capture_output=True, env=_git_env())
+    (controller / ".gitignore").write_text("targets/\n.env*\n", encoding="utf-8")
+    secret_path = controller / "targets" / "HARNESS_RELAY_SIGNING_KEY=supersecretvalue" / "target.json"
+    secret_path.parent.mkdir(parents=True)
+    secret_path.write_text("{}\n", encoding="utf-8")
+    env_path = controller / ".env.OPENAI_API_KEY=sk-testsecret"
+    env_path.write_text("placeholder\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore"], cwd=controller, check=True, env=_git_env())
+    subprocess.run(["git", "add", "-f", str(secret_path), str(env_path)], cwd=controller, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.20")
+    monkeypatch.setattr(module.harness_export, "missing_controller_source_paths", lambda root, version: ())
+
+    assert module.main(["controller", "release-check", "--json"]) == 2
+    rendered = capsys.readouterr().out
+    assert "supersecretvalue" not in rendered
+    assert "sk-testsecret" not in rendered
+    assert "[redacted-secret-segment]" in rendered
+    assert ".env[redacted]" in rendered
+
+    class FakeResult:
+        returncode = 1
+        stdout = '{"api_key": "sk-output-secret", "client_secret": "json-secret"}\n'
+        stderr = 'access_token="stderr-secret"\nHARNESS_RELAY_SIGNING_KEY=other-secret\n'
+
+    monkeypatch.setattr(module.subprocess, "run", lambda *_args, **_kwargs: FakeResult())
+    payload = module._run_controller_release_subprocess(controller, ["fake"])
+    payload_rendered = json.dumps(payload, ensure_ascii=False)
+    assert "sk-output-secret" not in payload_rendered
+    assert "json-secret" not in payload_rendered
+    assert "stderr-secret" not in payload_rendered
+    assert "other-secret" not in payload_rendered
+    assert "[redacted-output]" in payload_rendered
+
+
+def test_controller_release_check_source_checkout_allows_historical_run_evidence(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    source = tmp_path / "source"
+    source.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=source, check=True, text=True, capture_output=True, env=_git_env())
+    (source / ".gitignore").write_text("targets/\n", encoding="utf-8")
+    marker = source / ".codex" / "skills" / "harness-local" / "SKILL.md"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("# local skill\n", encoding="utf-8")
+    run_file = source / "runs" / "harness" / "historical" / "plan.md"
+    run_file.parent.mkdir(parents=True)
+    run_file.write_text("# plan\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore", str(marker), str(run_file)], cwd=source, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: source)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.20")
+    monkeypatch.setattr(module.harness_export, "missing_controller_source_paths", lambda root, version: ())
+
+    assert module.main(["controller", "release-check", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["checks"]["checkout_kind"] == "source"
+    assert payload["checks"]["tracked_forbidden_paths"]["paths"] == []
+    assert payload["warnings"]
+
+
+def test_controller_release_check_runs_optional_focused_checks(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    controller.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=controller, check=True, text=True, capture_output=True, env=_git_env())
+    (controller / ".gitignore").write_text("targets/\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore"], cwd=controller, check=True, env=_git_env())
+    calls: list[list[str]] = []
+
+    def fake_run(root: Path, command: list[str]):
+        calls.append(command)
+        return {"ok": True, "returncode": 0, "command": command, "stdout_tail": "", "stderr_tail": ""}
+
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.20")
+    monkeypatch.setattr(module.harness_export, "missing_controller_source_paths", lambda root, version: ())
+    monkeypatch.setattr(module, "_run_controller_release_subprocess", fake_run)
+
+    assert module.main(["controller", "release-check", "--run-lint", "--run-pytest", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["checks"]["ruff"]["ok"] is True
+    assert payload["checks"]["pytest"]["ok"] is True
+    assert len(calls) == 2
+    assert calls[0][1:4] == ["-m", "ruff", "check"]
+    assert calls[1][1:4] == ["-m", "pytest", "tests/test_harness_autonomy.py"]
+    assert "tests/test_harness_task_intake.py" in calls[1]
+
+
+def test_controller_release_check_reports_skipped_and_failed_optional_checks(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    controller.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=controller, check=True, text=True, capture_output=True, env=_git_env())
+    (controller / ".gitignore").write_text("targets/\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore"], cwd=controller, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.20")
+    monkeypatch.setattr(module.harness_export, "missing_controller_source_paths", lambda root, version: ())
+
+    assert module.main(["controller", "release-check"]) == 0
+    output = capsys.readouterr().out
+    assert "검사 결과: 통과" in output
+    assert "ruff: 건너뜀" in output
+    assert "pytest: 건너뜀" in output
+    assert "./harness controller release-check --run-lint --run-pytest" in output
+
+    def fake_run(root: Path, command: list[str]):
+        return {"ok": False, "returncode": 1, "command": command, "stdout_tail": "bad", "stderr_tail": ""}
+
+    monkeypatch.setattr(module, "_run_controller_release_subprocess", fake_run)
+    assert module.main(["controller", "release-check", "--run-lint", "--json"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert "ruff-failed" in payload["blockers"]
+    assert payload["checks"]["ruff"]["returncode"] == 1
+    assert payload["checks"]["pytest"]["status"] == "skipped"
+
+
+def test_controller_release_check_fails_closed_for_missing_source_and_ignore(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    controller.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=controller, check=True, text=True, capture_output=True, env=_git_env())
+    (controller / ".gitignore").write_text("targets/\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore"], cwd=controller, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.20")
+    monkeypatch.setattr(
+        module.harness_export,
+        "missing_controller_source_paths",
+        lambda root, version: (Path("scripts/harness_cli.py"),),
+    )
+
+    assert module.main(["controller", "release-check", "--json"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert "controller-export-source-missing" in payload["blockers"]
+    assert payload["checks"]["controller_export_source"]["missing"] == ["scripts/harness_cli.py"]
+
+    monkeypatch.setattr(module.harness_export, "missing_controller_source_paths", lambda root, version: ())
+    monkeypatch.setattr(module, "_targets_ignored_by_git", lambda root: False)
+    assert module.main(["controller", "release-check", "--json"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert "targets-not-gitignored" in payload["blockers"]
+    assert payload["checks"]["targets_ignored_by_git"]["ok"] is False
+
+
 def test_external_target_add_verify_dashboard_and_run_preflight(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_module()
     controller = tmp_path / "controller"

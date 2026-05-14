@@ -1,8 +1,15 @@
 # Harness Framework Version
 
-- Current Version: 1.8.19
+- Current Version: 1.8.20
 - Release Date: 2026-05-14
-- Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + beginner install prompt + beginner help home + beginner `install/task/list/run/finish` controller UX + task interview + task packet status visibility + advisory AI review artifacts + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + managed-latest/xhigh external implementation gate + backlog-bound product push gate + controller release-history-preserving export + generated coverage artifact exclusion + on-demand export output.
+- Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + beginner install prompt + beginner help home + beginner `install/task/list/run/finish` controller UX + task interview + task packet status visibility + controller release-check gate + advisory AI review artifacts + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + managed-latest/xhigh external implementation gate + backlog-bound product push gate + controller release-history-preserving export + generated coverage artifact exclusion + on-demand export output.
+
+## What Changed In 1.8.20
+
+- Added `./harness controller release-check` as a private controller repo release gate.
+- The gate is read-only and checks controller export source readiness, `targets/` git-ignore behavior, tracked forbidden state/secrets, and optional focused `ruff`/`pytest`.
+- Source checkouts are reported separately from controller distribution checkouts so embedded/source run evidence does not create a false controller release failure.
+- Controller bundle README now shows `./harness controller release-check --run-lint --run-pytest` as the pre-release command.
 
 ## What Changed In 1.8.19
 

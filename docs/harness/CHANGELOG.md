@@ -1,5 +1,12 @@
 # Harness Changelog
 
+## 1.8.20 - 2026-05-14
+
+- Added `./harness controller release-check` for private controller repo release gating.
+- The command checks controller export source readiness, `targets/` git-ignore behavior, tracked forbidden controller state/secrets, and optional focused `ruff`/`pytest`.
+- Kept the gate read-only and separate from source `harness_guard` so controller distribution checks do not require embedded/source run evidence.
+- Updated controller bundle README to show the release-check command before tag/release.
+
 ## 1.8.19 - 2026-05-14
 
 - Added read-only `./harness task list` for beginner task intake packets.

@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -23,6 +24,7 @@ import harness_loop
 import harness_profiles
 import harness_starter_install
 import harness_task_intake
+from harness_autonomy.control import sanitize_for_outbox
 from harness_autonomy.relay import normalize_relay_repo_id
 
 
@@ -39,6 +41,35 @@ UNSAFE_GLOBAL_SHIM_DIRS = (
     Path("/opt/homebrew/bin"),
 )
 FINISH_PUSH_CAUTION_KO = "remote push는 배포나 외부 자동화를 트리거할 수 있고 자동 remote rollback은 없습니다."
+CONTROLLER_RELEASE_CHECK_RUFF_PATHS = (
+    "scripts/harness_autonomy.py",
+    "scripts/harness_autonomy/core.py",
+    "scripts/harness_cli.py",
+    "scripts/harness_controller.py",
+    "scripts/harness_env.py",
+    "scripts/harness_export.py",
+    "scripts/harness_starter_install.py",
+    "scripts/harness_task_intake.py",
+    "scripts/harness_telegram_bridge.py",
+    "scripts/harness_autonomy/relay.py",
+    "tests/test_harness_autonomy.py",
+    "tests/test_harness_cli.py",
+    "tests/test_harness_controller.py",
+    "tests/test_harness_export.py",
+    "tests/test_harness_task_intake.py",
+    "tests/test_harness_telegram_bridge.py",
+    "tests/test_redis_relay.py",
+)
+CONTROLLER_RELEASE_CHECK_PYTEST_PATHS = (
+    "tests/test_harness_autonomy.py",
+    "tests/test_harness_cli.py",
+    "tests/test_harness_controller.py",
+    "tests/test_harness_export.py",
+    "tests/test_harness_task_intake.py",
+    "tests/test_harness_telegram_bridge.py",
+    "tests/test_redis_relay.py",
+)
+SOURCE_CHECKOUT_MARKER = Path(".codex/skills/harness-local/SKILL.md")
 
 
 class HarnessCliError(RuntimeError):
@@ -1825,6 +1856,178 @@ def command_controller_doctor(args: argparse.Namespace) -> int:
     return 0 if not missing and targets_ignored else 2
 
 
+def _git_tracked_paths(root: Path) -> tuple[str, ...]:
+    result = _git(["ls-files"], cwd=root)
+    if result.returncode != 0:
+        raise HarnessCliError("controller release-check requires a git checkout")
+    return tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
+
+
+def _redact_release_check_text(text: str) -> str:
+    sanitized = sanitize_for_outbox(text)
+    return re.sub(
+        r"(?i)\b(HARNESS_RELAY_SIGNING_KEY|SIGNING_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|API_KEY|SECRET|TOKEN)\s*=\s*[^/\s]+",
+        r"\1=[redacted]",
+        sanitized,
+    )
+
+
+def _redact_release_check_path(path: str) -> str:
+    redacted_parts: list[str] = []
+    sensitive_segment = re.compile(
+        r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|secret|token|signing[_-]?key)"
+    )
+    for part in Path(path).parts:
+        if part != ".env.example" and part.startswith(".env"):
+            redacted_parts.append(".env[redacted]")
+        elif sensitive_segment.search(part):
+            redacted_parts.append("[redacted-secret-segment]")
+        else:
+            redacted_parts.append(_redact_release_check_text(part))
+    return "/".join(redacted_parts)
+
+
+def _redacted_tail(value: str) -> str:
+    return "[redacted-output]" if value else ""
+
+
+def _run_controller_release_subprocess(root: Path, command: Sequence[str]) -> dict[str, object]:
+    result = subprocess.run(
+        list(command),
+        cwd=root,
+        check=False,
+        text=True,
+        capture_output=True,
+        env=_clean_git_env(),
+    )
+    return {
+        "ok": result.returncode == 0,
+        "returncode": result.returncode,
+        "command": list(command),
+        "stdout_tail": _redacted_tail(result.stdout),
+        "stderr_tail": _redacted_tail(result.stderr),
+        "output_redacted": True,
+    }
+
+
+def _build_controller_release_check_payload(
+    root: Path,
+    *,
+    run_lint: bool,
+    run_pytest: bool,
+) -> dict[str, object]:
+    version = _controller_version()
+    source_checkout = (root / SOURCE_CHECKOUT_MARKER).exists()
+    blockers: list[str] = []
+    warnings: list[str] = []
+    try:
+        tracked_paths = _git_tracked_paths(root)
+    except HarnessCliError as exc:
+        tracked_paths = ()
+        blockers.append(str(exc))
+    controller_missing = [path.as_posix() for path in harness_export.missing_controller_source_paths(root, version)]
+    if controller_missing:
+        blockers.append("controller-export-source-missing")
+    targets_ignored = _targets_ignored_by_git(root)
+    if not targets_ignored:
+        blockers.append("targets-not-gitignored")
+    forbidden_tracked = [
+        path
+        for path in tracked_paths
+        if harness_export.is_controller_forbidden_tracked_path(path, source_checkout=source_checkout)
+    ]
+    if forbidden_tracked:
+        blockers.append("tracked-controller-forbidden-paths")
+    redacted_forbidden_tracked = [_redact_release_check_path(path) for path in forbidden_tracked]
+    if source_checkout:
+        warnings.append("source-checkout: source repo입니다. 실제 release 전에는 exported/private controller repo에서 다시 실행하세요.")
+    checks: dict[str, object] = {
+        "controller_export_source": {"ok": not controller_missing, "missing": controller_missing},
+        "targets_ignored_by_git": {"ok": targets_ignored},
+        "tracked_forbidden_paths": {
+            "ok": not forbidden_tracked,
+            "paths": redacted_forbidden_tracked,
+            "count": len(forbidden_tracked),
+        },
+        "tracked_files": {"count": len(tracked_paths)},
+        "checkout_kind": "source" if source_checkout else "controller-distribution",
+        "ruff": {"ok": None, "status": "skipped"},
+        "pytest": {"ok": None, "status": "skipped"},
+    }
+    if run_lint:
+        lint_command = [sys.executable, "-m", "ruff", "check", *CONTROLLER_RELEASE_CHECK_RUFF_PATHS]
+        checks["ruff"] = _run_controller_release_subprocess(root, lint_command)
+        if not checks["ruff"]["ok"]:
+            blockers.append("ruff-failed")
+    if run_pytest:
+        pytest_command = [sys.executable, "-m", "pytest", *CONTROLLER_RELEASE_CHECK_PYTEST_PATHS, "-q"]
+        checks["pytest"] = _run_controller_release_subprocess(root, pytest_command)
+        if not checks["pytest"]["ok"]:
+            blockers.append("pytest-failed")
+    return {
+        "schema_version": 1,
+        "controller_root": root.as_posix(),
+        "version": version,
+        "mode": "controller-release-check",
+        "ok": not blockers,
+        "blockers": blockers,
+        "warnings": warnings,
+        "checks": checks,
+        "values_redacted": True,
+        "run_lint": run_lint,
+        "run_pytest": run_pytest,
+    }
+
+
+def _render_controller_release_check_text(payload: Mapping[str, object]) -> None:
+    checks = payload["checks"]
+    export_check = checks["controller_export_source"]
+    tracked_check = checks["tracked_forbidden_paths"]
+    print("하네스 controller release-check")
+    print(f"- controller root: `{payload['controller_root']}`")
+    print(f"- version: `{payload['version']}`")
+    print(f"- 검사 결과: {'통과' if payload['ok'] else '차단'}")
+    print(f"- checkout: `{checks['checkout_kind']}`")
+    print(f"- controller export source: {'ok' if export_check['ok'] else 'missing ' + ', '.join(export_check['missing'])}")
+    print(f"- targets ignored by git: {'yes' if checks['targets_ignored_by_git']['ok'] else 'no'}")
+    print(
+        "- tracked forbidden paths: "
+        + ("none" if tracked_check["ok"] else ", ".join(str(path) for path in tracked_check["paths"]))
+    )
+    print(f"- ruff: {_release_check_status_label(checks['ruff'])}")
+    print(f"- pytest: {_release_check_status_label(checks['pytest'])}")
+    warnings = payload.get("warnings") or []
+    for warning in warnings:
+        print(f"- 주의: {warning}")
+    if payload["ok"]:
+        if checks["ruff"].get("status") == "skipped" or checks["pytest"].get("status") == "skipped":
+            print("다음 명령: `./harness controller release-check --run-lint --run-pytest`")
+        else:
+            print("다음 명령: `./harness controller export /path/to/controller-bundle --sanitize-report /tmp/controller-sanitize.json`")
+    else:
+        print(f"- 차단: {', '.join(str(item) for item in payload['blockers'])}")
+        print("다음 조치: blocker 경로를 추적 해제하거나 focused lint/test 실패를 먼저 고치세요.")
+
+
+def _release_check_status_label(check: Mapping[str, object]) -> str:
+    if check.get("status") == "skipped":
+        return "건너뜀"
+    return "통과" if check.get("ok") else "실패"
+
+
+def command_controller_release_check(args: argparse.Namespace) -> int:
+    payload = _build_controller_release_check_payload(
+        repo_root(),
+        run_lint=args.run_lint,
+        run_pytest=args.run_pytest,
+    )
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        _render_controller_release_check_text(payload)
+    return 0 if payload["ok"] else 2
+
+
 def _load_controller_target(target_id: str) -> harness_controller.TargetRecord:
     return harness_controller.load_target(repo_root(), target_id)
 
@@ -3014,6 +3217,14 @@ def build_parser() -> argparse.ArgumentParser:
     controller_doctor = controller_subparsers.add_parser("doctor", help="Check this checkout as a harness controller.")
     controller_doctor.add_argument("--json", action="store_true")
     controller_doctor.set_defaults(func=command_controller_doctor)
+    controller_release_check = controller_subparsers.add_parser(
+        "release-check",
+        help="Run the controller-distribution release gate without mutating targets or GitHub.",
+    )
+    controller_release_check.add_argument("--json", action="store_true")
+    controller_release_check.add_argument("--run-lint", action="store_true", help="Run focused controller ruff checks.")
+    controller_release_check.add_argument("--run-pytest", action="store_true", help="Run focused controller pytest checks.")
+    controller_release_check.set_defaults(func=command_controller_release_check)
 
     target = subparsers.add_parser("target", help="Manage product repositories from an external harness controller.")
     target_subparsers = target.add_subparsers(dest="target_command", required=True)
