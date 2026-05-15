@@ -219,6 +219,67 @@ def test_product_paths_match_expected_allows_directory_coverage() -> None:
         ["README.md", "client"],
     )
     assert not module.product_paths_match_expected(["README.md"], ["README.md", "client"])
+    assert not module.product_paths_match_expected([], ["README.md"])
+    assert not module.product_paths_match_expected(["README.md"], [])
+
+
+def test_product_diff_policy_scans_directory_contents_and_rejects_pathspec_magic(tmp_path: Path) -> None:
+    module = _load_module()
+    product = tmp_path / "product"
+    _init_git_repo(product)
+    (product / "client").mkdir()
+    (product / "client" / ".env.local").write_text("TOKEN=example-secret-value-12345\n", encoding="utf-8")
+    (product / "client" / "api_token.txt").write_text("api_key=example-secret-value-12345\n", encoding="utf-8")
+
+    blockers = module.product_diff_policy_blockers(product, ["client"])
+    assert "product-diff-env-file" in blockers
+    assert "product-diff-secret-like-path" in blockers
+    assert "product-diff-secret-like-content" in blockers
+
+    with pytest.raises(module.ControllerError, match="literal"):
+        module.product_diff_policy_blockers(product, [":(glob)client/*"])
+
+
+def test_commit_product_backlog_diff_stages_expected_deletion(tmp_path: Path) -> None:
+    module = _load_module()
+    product = tmp_path / "product"
+    _init_git_repo(product)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "config", "user.email", "harness-test@example.invalid"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+
+    (product / "README.md").unlink()
+    commit_sha = module.commit_product_backlog_diff(product, paths=["README.md"], message="fix: remove readme")
+
+    assert commit_sha
+    assert module.target_git_status_lines(product) == []
+    assert module.product_diff_smoke_commit_diff_lines(product) == ["D\tREADME.md"]
+
+
+def test_commit_product_backlog_diff_uses_literal_pathspecs_for_bracket_paths(tmp_path: Path) -> None:
+    module = _load_module()
+    product = tmp_path / "product"
+    _init_git_repo(product)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "config", "user.email", "harness-test@example.invalid"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+
+    route = product / "app" / "users" / "[id]" / "page.tsx"
+    route.parent.mkdir(parents=True)
+    route.write_text("export default function Page() { return null; }\n", encoding="utf-8")
+
+    assert module.product_diff_policy_blockers(product, ["app/users/[id]/page.tsx"]) == []
+    commit_sha = module.commit_product_backlog_diff(
+        product,
+        paths=["app/users/[id]/page.tsx"],
+        message="feat: add dynamic route",
+    )
+
+    assert commit_sha
+    assert module.target_git_status_lines(product) == []
+    assert module.product_diff_smoke_commit_diff_lines(product) == ["A\tapp/users/[id]/page.tsx"]
 
 
 def test_target_alias_and_default_resolve_to_canonical_id(tmp_path: Path) -> None:

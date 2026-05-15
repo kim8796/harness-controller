@@ -439,12 +439,47 @@ def test_beginner_run_autopilot_blocks_secret_like_product_diff_before_completio
     )
     output = capsys.readouterr().out
     assert "product-diff-env-file" in output
+    assert "제품 변경에 `.env` 계열 파일이 포함" in output
     assert "- 완료 처리:" not in output
     assert "product commit:" not in output
     assert _product_head(product) == before_head
     assert (product / ".env.local").exists()
     assert (controller / "targets" / "demo" / "backlog" / "queued" / "BL-demo.md").exists()
     assert not (controller / "targets" / "demo" / "backlog" / "completed" / "BL-demo.md").exists()
+
+
+def test_beginner_run_formats_staging_mismatch_error_in_korean(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    record = module.harness_controller.TargetRecord(
+        target_id="demo",
+        repo=product,
+        branch="main",
+        state_root=controller / "targets" / "demo",
+        controller_version="test",
+        created_at="",
+        updated_at="",
+        is_default=True,
+    )
+    record.state_root.mkdir(parents=True)
+
+    def fail_transaction(_record, _args):
+        raise module.harness_controller.ControllerError("staged product paths do not match implementation evidence")
+
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_controller, "default_target", lambda root: record)
+    monkeypatch.setattr(module.harness_controller, "pending_backlog_product_pushes", lambda **kwargs: [])
+    monkeypatch.setattr(module, "_target_next_auto_backlog_item", lambda _record: type("Item", (), {"item_id": "BL-demo"})())
+    monkeypatch.setattr(module, "_run_autopilot_transaction", fail_transaction)
+
+    assert module.main(["run", "--once"]) == 2
+    output = capsys.readouterr().out
+    assert "제품 변경 파일을 stage했지만 구현 증거와 일치하지 않아 commit을 중단" in output
+    assert "git status --short" in output
+    assert "staged product paths do not match implementation evidence" not in output
 
 
 def test_beginner_run_autopilot_stops_before_repeating_threshold_incident(

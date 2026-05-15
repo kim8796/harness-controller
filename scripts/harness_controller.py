@@ -862,7 +862,7 @@ def _normalize_aliases(value: object) -> tuple[str, ...]:
 
 
 def _tracked_files(target_root: Path, paths: Sequence[Path]) -> list[str]:
-    result = git(["ls-files", "--", *[path.as_posix() for path in paths]], cwd=target_root)
+    result = git(["ls-files", "--", *_literal_git_pathspecs(path.as_posix() for path in paths)], cwd=target_root)
     if result.returncode != 0:
         return []
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
@@ -1062,10 +1062,10 @@ def target_status_paths(status_lines: Sequence[str]) -> list[str]:
 
 
 def product_paths_match_expected(actual_paths: Sequence[str], expected_paths: Sequence[str]) -> bool:
+    if not actual_paths or not expected_paths:
+        return False
     actual = _safe_product_diff_paths(actual_paths)
     expected = _safe_product_diff_paths(expected_paths)
-    if not actual or not expected:
-        return actual == expected
 
     def covered_by_expected(path: str) -> bool:
         return any(path == expected_path or path.startswith(f"{expected_path}/") for expected_path in expected)
@@ -1705,6 +1705,8 @@ def _safe_product_diff_paths(paths: Sequence[str]) -> list[str]:
         if path.is_absolute() or ".." in path.parts or path.parts[0] == ".git":
             raise ControllerError("product diff path must be a safe repository-relative path")
         normalized = path.as_posix()
+        if normalized.startswith(":"):
+            raise ControllerError("product diff path must be a literal repository-relative path")
         if normalized in cleaned:
             raise ControllerError("product diff paths must not contain duplicates")
         cleaned.append(normalized)
@@ -1713,18 +1715,39 @@ def _safe_product_diff_paths(paths: Sequence[str]) -> list[str]:
     return cleaned
 
 
+def _literal_git_pathspecs(paths: Sequence[str]) -> list[str]:
+    return [f":(literal){path}" for path in paths]
+
+
 def product_diff_policy_blockers(target_root: Path, paths: Sequence[str]) -> list[str]:
     blockers: list[str] = []
+    scan_paths: list[Path] = []
     for rel in _safe_product_diff_paths(paths):
-        normalized = rel.rstrip("/")
-        path = Path(normalized)
+        path = Path(rel.rstrip("/"))
+        scan_paths.append(path)
+        candidate = target_root / path
+        if candidate.is_dir() and not candidate.is_symlink():
+            try:
+                children = sorted(candidate.rglob("*"))
+            except OSError:
+                children = []
+            for child in children:
+                try:
+                    scan_paths.append(child.relative_to(target_root))
+                except ValueError:
+                    if "product-diff-path-escape" not in blockers:
+                        blockers.append("product-diff-path-escape")
+    for path in dict.fromkeys(scan_paths):
+        normalized = path.as_posix().rstrip("/")
         if _is_harness_marker_path(path) and "product-diff-harness-state" not in blockers:
             blockers.append("product-diff-harness-state")
-        if path.parts and path.parts[0].startswith(".env") and "product-diff-env-file" not in blockers:
+        if any(part.startswith(".env") for part in path.parts) and "product-diff-env-file" not in blockers:
             blockers.append("product-diff-env-file")
         if SECRET_LIKE_PRODUCT_PATH.search(normalized) and "product-diff-secret-like-path" not in blockers:
             blockers.append("product-diff-secret-like-path")
-        candidate = target_root / normalized
+        candidate = target_root / path
+        if candidate.is_symlink() and "product-diff-symlink" not in blockers:
+            blockers.append("product-diff-symlink")
         if candidate.is_file() and not candidate.is_symlink():
             try:
                 if candidate.stat().st_size <= 1024 * 1024:
@@ -1746,7 +1769,7 @@ def product_diff_fingerprint(target_root: Path, paths: Sequence[str]) -> str:
     safe_paths = _safe_product_diff_paths(paths)
     entries: list[dict[str, str | int | list[str]]] = []
     for rel in safe_paths:
-        status_result = git(["status", "--porcelain=v1", "--", rel], cwd=target_root)
+        status_result = git(["status", "--porcelain=v1", "--", *_literal_git_pathspecs([rel])], cwd=target_root)
         if status_result.returncode != 0:
             detail = (status_result.stderr or status_result.stdout).strip()
             raise ControllerError(f"target product diff status read failed: {detail}")
@@ -1814,17 +1837,18 @@ def commit_product_backlog_diff(target_root: Path, *, paths: Sequence[str], mess
         raise ControllerError("product commit message is required")
     if not target_git_identity_ready(target_root):
         raise ControllerError("target git identity is not configured for backlog product commit")
-    add_result = git(["add", "--", *safe_paths], cwd=target_root)
+    literal_pathspecs = _literal_git_pathspecs(safe_paths)
+    add_result = git(["add", "-A", "--", *literal_pathspecs], cwd=target_root)
     if add_result.returncode != 0:
         detail = (add_result.stderr or add_result.stdout).strip()
         raise ControllerError(f"target backlog product staging failed: {detail}")
-    staged_result = git(["diff", "--cached", "--name-only", "--", *safe_paths], cwd=target_root)
+    staged_result = git(["diff", "--cached", "--name-only", "--", *literal_pathspecs], cwd=target_root)
     if staged_result.returncode != 0:
         detail = (staged_result.stderr or staged_result.stdout).strip()
         raise ControllerError(f"target backlog product staged diff read failed: {detail}")
     staged_paths = [line.strip() for line in staged_result.stdout.splitlines() if line.strip()]
     if not product_paths_match_expected(staged_paths, safe_paths):
-        git(["reset", "-q", "--", *safe_paths], cwd=target_root)
+        git(["reset", "-q", "--", *literal_pathspecs], cwd=target_root)
         raise ControllerError("staged product paths do not match implementation evidence")
     commit_result = git(
         [
@@ -1838,7 +1862,7 @@ def commit_product_backlog_diff(target_root: Path, *, paths: Sequence[str], mess
             "-m",
             message_text,
             "--",
-            *safe_paths,
+            *literal_pathspecs,
         ],
         cwd=target_root,
     )

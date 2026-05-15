@@ -7,6 +7,7 @@
 - Kept `run --once` as a single-backlog transaction mode and stopped on first failure or push preflight blocker.
 - Added compact incident signatures for repeated autopilot failures.
 - Made implementation smoke sidecars disposable by default and added controller `audit-size` / `cleanup` for delete-safe smoke/temp targets.
+- Hardened autopilot product commit staging with literal Git pathspecs, nested directory policy scans, deletion staging, and Korean blocker explanations.
 
 ## 1.8.23 - 2026-05-15
 

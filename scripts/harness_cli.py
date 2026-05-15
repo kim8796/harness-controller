@@ -45,6 +45,17 @@ UNSAFE_GLOBAL_SHIM_DIRS = (
 )
 FINISH_PUSH_CAUTION_KO = "remote push는 배포나 외부 자동화를 트리거할 수 있고 자동 remote rollback은 없습니다."
 AUTOPILOT_INCIDENT_THRESHOLD = 2
+RUN_BLOCKER_EXPLANATIONS_KO = {
+    "product-diff-env-file": "제품 변경에 `.env` 계열 파일이 포함되어 자동 commit을 막았습니다.",
+    "product-diff-secret-like-path": "파일명에 token/secret/key 같은 비밀값 단서가 있어 자동 commit을 막았습니다.",
+    "product-diff-secret-like-content": "파일 내용에 비밀값처럼 보이는 값이 있어 자동 commit을 막았습니다.",
+    "product-diff-harness-state": "제품 저장소에 하네스 코드나 상태 파일이 들어가 자동 commit을 막았습니다.",
+    "product-diff-symlink": "제품 변경에 symlink가 있어 자동 commit을 막았습니다.",
+    "product-diff-path-escape": "제품 변경 경로가 저장소 밖으로 벗어나 자동 commit을 막았습니다.",
+    "target-git-dirty": "제품 저장소에 예상된 변경 외 dirty 상태가 있습니다.",
+    "target-head-changed": "구현 중 제품 저장소 HEAD가 바뀌었습니다.",
+    "target-no-product-diff": "구현 lane이 끝났지만 제품 변경이 없습니다.",
+}
 CONTROLLER_RELEASE_CHECK_RUFF_PATHS = (
     "scripts/harness_autonomy.py",
     "scripts/harness_autonomy/core.py",
@@ -1393,6 +1404,36 @@ def _target_open_incident_blocker(
     return None
 
 
+def _print_run_blockers(blockers: Sequence[str]) -> None:
+    print(f"- run blockers: {', '.join(blockers)}")
+    for blocker in blockers:
+        explanation = RUN_BLOCKER_EXPLANATIONS_KO.get(str(blocker))
+        if explanation:
+            print(f"  - {blocker}: {explanation}")
+
+
+def _print_beginner_transaction_error(error: Exception) -> None:
+    detail = str(error)
+    if "staged product paths do not match implementation evidence" in detail:
+        print("run 중단: 제품 변경 파일을 stage했지만 구현 증거와 일치하지 않아 commit을 중단했습니다.")
+        print("- 확인할 것: 제품 저장소에서 `git status --short`로 실제 변경 파일을 확인하세요.")
+        print("- 다음 명령: `./harness target dashboard @default`")
+        return
+    if "target product diff no longer matches implementation evidence" in detail:
+        print("run 중단: 제품 변경이 구현 증거와 달라져 상태 전환/commit을 중단했습니다.")
+        print("- 확인할 것: 구현 후 수동 수정이나 파일 이동이 있었는지 확인하세요.")
+        print("- 다음 명령: `./harness target dashboard @default`")
+        return
+    if "target product diff violates autopilot policy:" in detail:
+        _, _, blocker_text = detail.partition(":")
+        blockers = [part.strip() for part in blocker_text.split(",") if part.strip()]
+        print("run 중단: 제품 변경이 autopilot 안전 정책에 걸려 자동 commit을 중단했습니다.")
+        _print_run_blockers(blockers)
+        print("- 다음 조치: 비밀값/하네스 파일/위험 파일을 제거한 뒤 다시 실행하세요.")
+        return
+    print(f"run 중단: {detail}")
+
+
 def _run_autopilot_transaction(record: harness_controller.TargetRecord, args: argparse.Namespace) -> AutopilotTransaction:
     before_evidence = _target_evidence_paths(record)
     buffer = io.StringIO()
@@ -1635,7 +1676,7 @@ def command_run(args: argparse.Namespace) -> int:
             outcome = _run_autopilot_transaction(record, args)
         except (HarnessCliError, harness_controller.ControllerError, harness_loop.LoopError) as exc:
             incident = _record_autopilot_incident(record=record, stage="transaction", error=exc, backlog_id=backlog_id)
-            print(f"run 중단: {exc}")
+            _print_beginner_transaction_error(exc)
             print(f"- incident: `{incident['signature']}` count={incident['count']}")
             if int(incident["count"]) >= AUTOPILOT_INCIDENT_THRESHOLD:
                 print("- 반복 실패: 같은 문제를 다시 시도하지 않습니다. controller maintenance가 필요합니다.")
@@ -3265,7 +3306,7 @@ def command_target_run(args: argparse.Namespace) -> int:
             raise
         if post_blockers:
             print("target run 중단: product repo 상태가 예상과 다릅니다.")
-            print(f"- run blockers: {', '.join(post_blockers)}")
+            _print_run_blockers(post_blockers)
             if product_push and product_push_sha and push_target is not None:
                 print(f"- product push: {push_target.remote}/{record.branch} -> {product_push_sha}")
                 print(f"- remote ref: {push_target.ref}")
