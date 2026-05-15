@@ -413,12 +413,14 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "./harness task review <packet-id>" in readme
     assert "./harness task review <packet-id> --ai" in readme
     assert "./harness task queue <packet-id> --auto" in readme
+    assert "./harness task fix-scope <packet-id> --apply" in readme
     assert "./harness finish" in readme
     assert "`./harness run` 은 자동 실행 가능한 요청 1개" in readme
     assert "`./harness finish` 는 실행 이후 남은 완료 처리와 커밋/푸시 단계" in readme
     assert "finish 순서: `./harness finish --apply`" in readme
     assert "자동 원격 롤백은 없다" in readme
     assert "`./harness task` 는 요구사항 초안을 만든다" in readme
+    assert "`./harness task fix-scope` 는 scope 문법 때문에 잘못 manual-review로 들어간" in readme
     assert "`./harness task review --ai` 는 AI가 읽기 좋은 검토용 파일만 만들며" in readme
     assert "Bare `./harness run` maps to `target run @default --implement-backlog-once`" in readme
     assert "Bare `./harness finish` maps to a read-only summary" in readme

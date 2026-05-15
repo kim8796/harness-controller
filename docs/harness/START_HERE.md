@@ -2,7 +2,7 @@
 
 하네스를 처음 쓰는 사람이 보는 입구 문서다. 이 파일은 짧게 유지하고, 자세한 운영/설정/문제 해결은 아래 문서로 연결한다.
 
-현재 기준은 `v1.8.22` 이다. 전체 변경 이력은 [VERSION.md](VERSION.md), export 계약은 [FRAMEWORK_EXPORT.md](FRAMEWORK_EXPORT.md), starter 파일 구조는 [STARTER_SCAFFOLD.md](STARTER_SCAFFOLD.md)를 본다.
+현재 기준은 `v1.8.23` 이다. 전체 변경 이력은 [VERSION.md](VERSION.md), export 계약은 [FRAMEWORK_EXPORT.md](FRAMEWORK_EXPORT.md), starter 파일 구조는 [STARTER_SCAFFOLD.md](STARTER_SCAFFOLD.md)를 본다.
 
 ## 어디부터 보면 되나
 
@@ -72,7 +72,13 @@ cd /path/to/harness-controller
 ./harness task queue <packet-id> --auto
 ```
 
-`queue --auto`는 acceptance, file scope, validation command가 명확할 때만 통과한다. 모호하면 `manual-review`로 남기는 것이 정상이다.
+`queue --auto`는 acceptance, file scope, validation command가 명확할 때만 통과한다. `task review`가 `vite.config.*` 같은 안전한 config scope를 자동 보정하면 그대로 `queue --auto`를 쓰면 된다. 이미 `manual-review`로 queue한 뒤 보정 가능하다고 나오면:
+
+```bash
+./harness task fix-scope <packet-id> --apply
+```
+
+모호한 broad glob, `.env*` File Scope, secret path, 수동 smoke가 필요한 작업은 `manual-review`로 남기는 것이 정상이다.
 
 5. 한 작업을 실행한다.
 

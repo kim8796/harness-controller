@@ -1083,7 +1083,8 @@ def command_task_review(args: argparse.Namespace) -> int:
                 print("- AI 위험 메모: " + ", ".join(ai_review.risk_notes))
             print("- AI 검토는 참고용이며 자동 실행 판단에는 사용되지 않습니다.")
             task_prefix = _task_target_prefix(record)
-            print(f"다음 명령: `{task_prefix} queue {packet_id}` 또는 `{task_prefix} queue {packet_id} --auto`")
+            print(f"다음 명령: `{task_prefix} list`")
+            print("- queue 여부는 deterministic review/list의 다음 명령을 따르세요.")
             return 0
         review = harness_task_intake.review_packet(
             state_root=record.state_root,
@@ -1095,13 +1096,45 @@ def command_task_review(args: argparse.Namespace) -> int:
         print(f"- 요청 묶음: `{review.packet_id}`")
         print(f"- 미리보기: `{review.preview_path.as_posix()}`")
         print(f"- 자동 실행 가능: {'예' if review.auto_eligible else '아니오'}")
+        if review.scope_adjustments:
+            print("- 자동 보정됨:")
+            for adjustment in review.scope_adjustments:
+                print(
+                    "  - "
+                    f"{adjustment.field}: `{adjustment.original}` -> "
+                    + ", ".join(f"`{item}`" for item in adjustment.replacement)
+                )
         if review.open_questions:
             print(f"- 확인 질문: {', '.join(review.open_questions)}")
         if review.risk_flags:
             print(f"- 안전 경고: {', '.join(review.risk_flags)}")
         task_prefix = _task_target_prefix(record)
         print(f"다음 명령: `{task_prefix} list`")
-        print(f"바로 queue: `{task_prefix} queue {packet_id}` 또는 `{task_prefix} queue {packet_id} --auto`")
+        summary = next(
+            (
+                item
+                for item in harness_task_intake.summarize_packets(record.state_root, target_id=record.target_id)
+                if item.packet_id == packet_id
+            ),
+            None,
+        )
+        if (
+            summary is not None
+            and summary.queued_backlog_path is not None
+            and summary.autonomy_execute == "manual-review"
+            and review.auto_eligible
+            and review.scope_adjustments
+        ):
+            print(f"scope 복구 적용: `{task_prefix} fix-scope {packet_id} --apply`")
+        elif summary is not None and summary.queued_backlog_path is not None:
+            print("- 이미 실행 대기열에 들어간 요청입니다. 위 상태와 `task list`의 다음 명령을 확인하세요.")
+        elif review.auto_eligible:
+            print(f"바로 queue: `{task_prefix} queue {packet_id} --auto`")
+        elif review.scope_adjustments:
+            print("- scope 자동 보정은 적용됐지만 auto 조건이 아직 부족합니다.")
+            print(f"다음 조치: request.md를 보강한 뒤 `{task_prefix} review {packet_id}`")
+        else:
+            print(f"다음 조치: request.md를 보강한 뒤 `{task_prefix} review {packet_id}`")
         return 0
     except (HarnessCliError, harness_task_intake.TaskIntakeError) as exc:
         print(f"error: {exc}")
@@ -1132,6 +1165,54 @@ def command_task_queue(args: argparse.Namespace) -> int:
                 print(f"다음 명령: `./harness target run {queued.target_id} --implement-backlog-once`")
         else:
             print("다음 조치: 사람 확인 상태로 남겼습니다. 자동 실행하려면 새 요청 초안에서 안전 조건을 채운 뒤 다시 등록하세요.")
+        return 0
+    except (HarnessCliError, harness_task_intake.TaskIntakeError) as exc:
+        print(f"error: {exc}")
+        return 2
+
+
+def command_task_fix_scope(args: argparse.Namespace) -> int:
+    try:
+        record = _resolve_task_target(args.target)
+        packet_id = _task_packet_id(record, args.packet)
+        result = harness_task_intake.fix_scope_packet(
+            state_root=record.state_root,
+            packet_id=packet_id,
+            apply=args.apply,
+            expected_target_id=record.target_id,
+        )
+        print("작업 scope 복구 점검 완료" if not result.applied else "작업 scope 복구 적용 완료")
+        print(f"- 대상: `{result.target_id}`")
+        print(f"- 요청 묶음: `{result.packet_id}`")
+        print(f"- 실행 대기열 항목: `{result.backlog_path.as_posix() if result.backlog_path else 'none'}`")
+        print(f"- 자동 실행 가능: {'예' if result.auto_eligible else '아니오'}")
+        if result.scope_adjustments:
+            print("- 자동 보정됨:")
+            for adjustment in result.scope_adjustments:
+                print(
+                    "  - "
+                    f"{adjustment.field}: `{adjustment.original}` -> "
+                    + ", ".join(f"`{item}`" for item in adjustment.replacement)
+                )
+        print("- 제품 저장소 변경: 없음")
+        task_prefix = _task_target_prefix(record)
+        if result.message == "already-auto":
+            if result.auto_eligible:
+                print(
+                    "다음 명령: `./harness run`"
+                    if task_prefix == "./harness task"
+                    else f"다음 명령: `./harness target run {result.target_id} --implement-backlog-once`"
+                )
+            else:
+                print("- 이미 auto 대기열에 있지만 현재 review는 auto 조건을 만족하지 않습니다. `task list`를 확인하세요.")
+        elif result.applied:
+            print(
+                "다음 명령: `./harness run`"
+                if task_prefix == "./harness task"
+                else f"다음 명령: `./harness target run {result.target_id} --implement-backlog-once`"
+            )
+        else:
+            print(f"적용 명령: `{task_prefix} fix-scope {packet_id} --apply`")
         return 0
     except (HarnessCliError, harness_task_intake.TaskIntakeError) as exc:
         print(f"error: {exc}")
@@ -1182,13 +1263,16 @@ def _task_next_command(record: harness_controller.TargetRecord, summary: harness
     if summary.review_status in {"not-reviewed", "stale", "invalid"}:
         return f"`{task_prefix} review {summary.packet_id}`"
     if summary.queued_backlog_path is None:
-        auto_suffix = " --auto" if summary.auto_eligible else ""
-        return f"`{task_prefix} queue {summary.packet_id}{auto_suffix}`"
+        if summary.auto_eligible:
+            return f"`{task_prefix} queue {summary.packet_id} --auto`"
+        return f"request.md를 보강한 뒤 `{task_prefix} review {summary.packet_id}`"
     if summary.autonomy_execute == "auto":
         if _task_target_prefix(record) == "./harness task":
             return "`./harness run`"
         return f"`./harness target run {record.target_id} --implement-backlog-once`"
-    return "사람 확인 항목입니다. 요청을 보강하려면 새 요청 초안을 만들거나 사람 확인 상태를 확인하세요."
+    if summary.scope_adjustment_count:
+        return f"`{task_prefix} fix-scope {summary.packet_id} --apply`"
+    return "사람 확인 항목입니다. request.md를 보강한 뒤 다시 review/queue 하세요."
 
 
 def _task_summary_json(
@@ -1217,6 +1301,7 @@ def _task_summary_json(
         "auto_eligible": summary.auto_eligible,
         "open_question_count": summary.open_question_count,
         "risk_flag_count": summary.risk_flag_count,
+        "scope_adjustment_count": summary.scope_adjustment_count,
         "attachment_count": summary.attachment_count,
         "backlog_path": backlog_relative,
         "backlog_status": summary.backlog_status,
@@ -1279,6 +1364,8 @@ def command_task_list(args: argparse.Namespace) -> int:
                         "   - 확인 필요: "
                         f"질문 {summary.open_question_count}개, 안전 경고 {summary.risk_flag_count}개"
                     )
+                if summary.scope_adjustment_count:
+                    print(f"   - 자동 보정: {summary.scope_adjustment_count}개")
             print(f"   - 첨부: {summary.attachment_count}개")
             print(f"   - 실행 대기열: `{queued_relative}`")
             if backlog_relative and summary.queued_backlog_path is None:
@@ -3122,6 +3209,11 @@ def build_parser() -> argparse.ArgumentParser:
     task_queue.add_argument("--target", default=argparse.SUPPRESS, help="Target selector; default is @default.")
     task_queue.add_argument("--auto", action="store_true", help="Queue as Autonomy-Execute auto only when safety checks pass.")
     task_queue.set_defaults(func=command_task_queue)
+    task_fix_scope = task_subparsers.add_parser("fix-scope", help="Repair a queued manual-review task blocked only by scope syntax.")
+    task_fix_scope.add_argument("packet", nargs="?", default="latest")
+    task_fix_scope.add_argument("--target", default=argparse.SUPPRESS, help="Target selector; default is @default.")
+    task_fix_scope.add_argument("--apply", action="store_true", help="Rewrite the linked queued backlog as Autonomy-Execute auto.")
+    task_fix_scope.set_defaults(func=command_task_fix_scope)
     task.set_defaults(func=command_task)
 
     complete_setup = subparsers.add_parser("complete-setup", help="Render/apply the bootstrap wizard through ./harness.")

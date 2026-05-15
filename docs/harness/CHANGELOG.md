@@ -1,5 +1,12 @@
 # Harness Changelog
 
+## 1.8.23 - 2026-05-15
+
+- Normalized safe beginner config scope aliases during `task review` without broadening the canonical backlog parser.
+- Added `task fix-scope` to dry-run/apply a safe promotion from queued `manual-review` to queued `auto` when the linked packet is now auto eligible.
+- Kept broad globs, env/secret File Scope, and product harness paths fail-closed for auto queue.
+- Improved Korean `task review` / `task list` next actions so beginners do not get stuck in manual-review for safe config-file requests.
+
 ## 1.8.22 - 2026-05-15
 
 - Fixed root `START_HERE.md` generation for export/controller bundles so links point to `docs/harness/...` from the bundle root.

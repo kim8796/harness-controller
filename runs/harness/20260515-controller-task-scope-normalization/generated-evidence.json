@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "task_slug": "controller-task-scope-normalization",
+  "change_class": "starter-export",
+  "status": "pass",
+  "summary": "Beginner task scope normalization and fix-scope repair path for v1.8.23.",
+  "safety_claims": [
+    "canonical backlog parser unchanged",
+    "normalization is intake-only",
+    "broad globs and env/secret/product harness scopes remain fail-closed",
+    "fix-scope mutates controller sidecar queued backlog only"
+  ],
+  "verification": [
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider tests/test_harness_task_intake.py tests/test_harness_cli.py tests/test_harness_export.py",
+      "result": "passed",
+      "summary": "188 passed in 44.74s"
+    },
+    {
+      "command": "python3 -m ruff check scripts/harness_task_intake.py scripts/harness_cli.py scripts/harness_export.py tests/test_harness_task_intake.py tests/test_harness_cli.py tests/test_harness_export.py",
+      "result": "passed",
+      "summary": "All checks passed!"
+    },
+    {
+      "command": "python3 scripts/harness_export.py --check",
+      "result": "passed",
+      "summary": "exit code 0"
+    },
+    {
+      "command": "python3 scripts/harness_orchestrator.py validate runs/harness/20260515-controller-task-scope-normalization",
+      "result": "passed",
+      "summary": "run artifacts complete and generated evidence status pass"
+    },
+    {
+      "command": "./harness controller release-check --run-lint --run-pytest",
+      "result": "passed",
+      "summary": "controller distribution release-check passed"
+    },
+    {
+      "command": "python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest",
+      "result": "passed",
+      "summary": "changed-files ruff passed; 188 focused pytest tests passed"
+    }
+  ],
+  "residual_risk": [
+    "post-release live racegame sidecar repair is intentionally not committed"
+  ],
+  "diet_exception": "Net LOC grew to close P0/P1 safety and UX gaps around exact task/backlog linkage, implementation-evidence detection, rollback behavior, and focused tests. Candidate follow-up is fixture/helper reduction in task intake CLI tests after v1.8.23 release."
+}

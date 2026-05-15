@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
+import harness_controller
 import harness_loop
 
 
@@ -64,12 +65,34 @@ SECRET_TEXT_PATTERNS = (
         r"['\"]?\s*[:=]\s*['\"]?[A-Za-z0-9._~+/=-]{12,}"
     ),
 )
-MANDATORY_FORBIDDEN_SCOPE = (".env*", "runs/**", "reports/**", "targets/**")
+ENV_FORBIDDEN_SCOPE = (".env", ".env.local", ".env.production", ".env.development", ".envrc")
+PRODUCT_FORBIDDEN_SCOPE = ("runs/**", "reports/**", "targets/**", "backlog/**", "HARNESS.md", "harness", "scripts/harness")
+MANDATORY_FORBIDDEN_SCOPE = (".env*", *ENV_FORBIDDEN_SCOPE, *PRODUCT_FORBIDDEN_SCOPE)
+CONFIG_ALIAS_EXTENSIONS = ("js", "mjs", "cjs", "ts", "mts", "cts")
+SAFE_CONFIG_SCOPE_ALIASES = {
+    f"{prefix}.*": tuple(f"{prefix}.{suffix}" for suffix in CONFIG_ALIAS_EXTENSIONS)
+    for prefix in (
+        "vite.config",
+        "eslint.config",
+        "vitest.config",
+        "playwright.config",
+        "tailwind.config",
+        "postcss.config",
+    )
+}
 AI_REVIEW_SCHEMA_VERSION = 1
 
 
 class TaskIntakeError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class ScopeAdjustment:
+    field: str
+    original: str
+    replacement: tuple[str, ...]
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -82,6 +105,7 @@ class ReviewResult:
     open_questions: tuple[str, ...]
     risk_flags: tuple[str, ...]
     title: str
+    scope_adjustments: tuple[ScopeAdjustment, ...]
 
 
 @dataclass(frozen=True)
@@ -91,6 +115,17 @@ class QueueResult:
     backlog_path: Path
     backlog_id: str
     autonomy_execute: str
+
+
+@dataclass(frozen=True)
+class ScopeFixResult:
+    packet_id: str
+    target_id: str
+    backlog_path: Path | None
+    applied: bool
+    auto_eligible: bool
+    message: str
+    scope_adjustments: tuple[ScopeAdjustment, ...]
 
 
 @dataclass(frozen=True)
@@ -118,6 +153,7 @@ class TaskPacketSummary:
     auto_eligible: bool | None
     open_question_count: int
     risk_flag_count: int
+    scope_adjustment_count: int
     attachment_count: int
     backlog_path: Path | None
     backlog_status: str
@@ -709,6 +745,8 @@ def _request_model(state_root: Path, packet_id: str) -> dict[str, object]:
     acceptance = _bullets(_section(text, ("Acceptance", "완료 조건", "수용 기준")))
     file_scope = _bullets(_section(text, ("File Scope", "변경 범위")))
     forbidden_scope = _bullets(_section(text, ("Forbidden Scope", "금지 범위")))
+    file_scope, file_adjustments = _normalize_scope_items(file_scope, field="file_scope")
+    forbidden_scope, forbidden_adjustments = _normalize_scope_items(forbidden_scope, field="forbidden_scope")
     validation = _bullets(_section(text, ("Validation", "검증")))
     manual_checks = _bullets(_section(text, ("Manual Checks", "수동 확인")))
     notes = _bullets(_section(text, ("Notes", "메모")))
@@ -723,6 +761,7 @@ def _request_model(state_root: Path, packet_id: str) -> dict[str, object]:
         "acceptance": acceptance,
         "file_scope": file_scope,
         "forbidden_scope": forbidden_scope,
+        "scope_adjustments": (*file_adjustments, *forbidden_adjustments),
         "validation": validation,
         "manual_checks": manual_checks,
         "notes": notes,
@@ -744,12 +783,25 @@ def _review_findings(model: Mapping[str, object]) -> tuple[tuple[str, ...], tupl
     if isinstance(packet, Mapping) and packet.get("attachments") and not model["summary"]:
         open_questions.append("첨부 설명이 없어 이미지/파일 의도를 확인해야 합니다.")
     for item in tuple(model["file_scope"]):
-        if item in {"*", "**", "**/*", ".", "./", "/"}:
+        text = _scope_item_text(item)
+        if text in {"*", "**", "**/*", ".", "./", "/"}:
             risk_flags.append("파일 범위가 너무 넓습니다.")
-        if item.startswith("/") or ".." in Path(item).parts:
+        if _is_path_boundary_unsafe(text):
             risk_flags.append("파일 범위에 절대경로 또는 상위 경로가 포함되어 있습니다.")
-        if item.startswith(".env") or ".env" in item:
+        if _scope_contains_unsafe_wildcard(text):
+            risk_flags.append(f"파일 범위에 안전하지 않은 wildcard가 포함되어 있습니다: {text}")
+        if text.startswith(".env") or ".env" in text:
             risk_flags.append("파일 범위에 env/secret 경로가 포함되어 있습니다.")
+        text_lower = text.lower()
+        path_name_lower = Path(text).name.lower()
+        if (
+            any(hint in text_lower for hint in SECRET_PART_HINTS)
+            or Path(text).suffix.lower() in SECRET_SUFFIXES
+            or path_name_lower in SECRET_NAMES
+        ):
+            risk_flags.append("파일 범위에 secret/token/key 경로가 포함되어 있습니다.")
+        if _is_product_pollution_scope(text):
+            risk_flags.append("파일 범위에 하네스/controller runtime 경로가 포함되어 있습니다.")
     for item in tuple(model["validation"]):
         if not (item.startswith("`") and item.endswith("`") and item[1:-1].strip()):
             open_questions.append("검증 명령은 backtick으로 감싼 실행 명령이어야 합니다.")
@@ -762,6 +814,91 @@ def _render_list(items: Sequence[str], *, fallback: str = "- n/a") -> str:
     if not items:
         return fallback
     return "\n".join(f"- {item}" for item in items)
+
+
+def _scope_item_text(item: str) -> str:
+    return str(item or "").strip().strip("`").strip()
+
+
+def _scope_adjustment_payload(adjustment: ScopeAdjustment) -> dict[str, object]:
+    return {
+        "field": adjustment.field,
+        "original": adjustment.original,
+        "replacement": list(adjustment.replacement),
+        "reason": adjustment.reason,
+    }
+
+
+def _normalize_scope_items(
+    items: Sequence[str],
+    *,
+    field: str,
+) -> tuple[tuple[str, ...], tuple[ScopeAdjustment, ...]]:
+    normalized: list[str] = []
+    adjustments: list[ScopeAdjustment] = []
+    for item in items:
+        text = _scope_item_text(item)
+        if not text:
+            continue
+        if field == "file_scope" and text in SAFE_CONFIG_SCOPE_ALIASES:
+            replacement = SAFE_CONFIG_SCOPE_ALIASES[text]
+            normalized.extend(replacement)
+            adjustments.append(
+                ScopeAdjustment(
+                    field="File Scope",
+                    original=text,
+                    replacement=replacement,
+                    reason="safe-config-alias",
+                )
+            )
+            continue
+        if field == "forbidden_scope" and text == ".env*":
+            normalized.extend(ENV_FORBIDDEN_SCOPE)
+            adjustments.append(
+                ScopeAdjustment(
+                    field="Forbidden Scope",
+                    original=text,
+                    replacement=ENV_FORBIDDEN_SCOPE,
+                    reason="env-secret-preset",
+                )
+            )
+            continue
+        normalized.append(text)
+    return tuple(dict.fromkeys(normalized)), tuple(adjustments)
+
+
+def _scope_contains_unsafe_wildcard(text: str) -> bool:
+    if not any(char in text for char in "*?[]"):
+        return False
+    if text.endswith("/**"):
+        base = text[:-3].rstrip("/")
+        return not base or any(char in base for char in "*?[]")
+    return True
+
+
+def _is_path_boundary_unsafe(text: str) -> bool:
+    return (
+        text.startswith("/")
+        or "\\" in text
+        or re.match(r"^[A-Za-z]:", text) is not None
+        or ".." in Path(text).parts
+    )
+
+
+def _is_product_pollution_scope(text: str) -> bool:
+    normalized = text.rstrip("/")
+    if text.endswith("/**"):
+        normalized = text[:-3].rstrip("/")
+    candidate = Path(normalized)
+    if candidate in harness_controller.PRODUCT_HARNESS_MARKERS:
+        return True
+    candidate_text = candidate.as_posix()
+    if any(
+        candidate_text == prefix.rstrip("/") or candidate_text.startswith(prefix)
+        for prefix in harness_controller.HARNESS_MARKER_PREFIXES
+    ):
+        return True
+    return False
 
 
 def _backlog_markdown(
@@ -959,6 +1096,7 @@ def _load_existing_review(
         open_questions=tuple(str(item) for item in payload.get("open_questions") or ()),
         risk_flags=tuple(str(item) for item in payload.get("risk_flags") or ()),
         title=str(model["title"]),
+        scope_adjustments=tuple(model["scope_adjustments"]),
     )
 
 
@@ -1145,6 +1283,22 @@ def review_packet(*, state_root: Path, packet_id: str, expected_target_id: str |
     from harness_autonomy.manifest import parse_backlog_validation_commands
 
     machine_scope, forbidden_scope, scope_failures = parse_backlog_machine_scope(preview)
+    for item in tuple(model["file_scope"]):
+        item_model = dict(model)
+        item_model["file_scope"] = (item,)
+        item_preview = _backlog_markdown(
+            backlog_id=backlog_id,
+            title=str(model["title"]),
+            target_id=target_id,
+            packet_id=resolved_packet_id,
+            autonomy_execute="auto",
+            model=item_model,
+        )
+        item_machine_scope, _item_forbidden_scope, item_scope_failures = parse_backlog_machine_scope(item_preview)
+        if not item_machine_scope:
+            open_questions = (*open_questions, f"파일 범위 항목이 machine-readable scope로 해석되지 않습니다: {item}")
+        if item_scope_failures:
+            risk_flags = (*risk_flags, *item_scope_failures)
     if not machine_scope:
         open_questions = (*open_questions, "파일 범위가 machine-readable scope로 해석되지 않습니다.")
     if scope_failures:
@@ -1182,6 +1336,9 @@ def review_packet(*, state_root: Path, packet_id: str, expected_target_id: str |
             "auto_eligible": auto_eligible,
             "open_questions": list(open_questions),
             "risk_flags": list(risk_flags),
+            "scope_adjustments": [
+                _scope_adjustment_payload(adjustment) for adjustment in tuple(model["scope_adjustments"])
+            ],
             "validation_commands": list(validation_commands),
             "preview_path": preview_path.name,
             "request_sha256": sha256_text(request_text),
@@ -1197,6 +1354,7 @@ def review_packet(*, state_root: Path, packet_id: str, expected_target_id: str |
         open_questions=open_questions,
         risk_flags=risk_flags,
         title=str(model["title"]),
+        scope_adjustments=tuple(model["scope_adjustments"]),
     )
 
 
@@ -1207,8 +1365,13 @@ def _make_backlog_id(packet_id: str) -> str:
 
 
 def _existing_backlog_for_packet(state_root: Path, packet_id: str) -> Path | None:
-    from harness_autonomy.core import parse_backlog_metadata_text
+    for item in _discover_backlog_items_strict(state_root):
+        if item.intake_packet == packet_id:
+            return _sidecar_path(state_root, item.path)
+    return None
 
+
+def _assert_no_backlog_symlink_files(state_root: Path) -> None:
     for state in harness_loop.BACKLOG_STATES:
         state_dir = _sidecar_path(state_root, "backlog", state)
         if not state_dir.exists():
@@ -1216,17 +1379,29 @@ def _existing_backlog_for_packet(state_root: Path, packet_id: str) -> Path | Non
         for path in sorted(state_dir.glob("*.md")):
             if path.is_symlink():
                 raise TaskIntakeError(f"refusing sidecar symlink file: {path.as_posix()}")
-            if parse_backlog_metadata_text(_read_text(path)).get("intake_packet") == packet_id:
-                return path
-    return None
+
+
+def _discover_backlog_items_strict(state_root: Path) -> tuple[harness_loop.BacklogItem, ...]:
+    _assert_no_backlog_symlink_files(state_root)
+    return harness_loop.discover_backlog_items(state_root)
+
+
+def _backlog_metadata(path: Path) -> Mapping[str, str]:
+    if path.is_symlink():
+        raise TaskIntakeError(f"refusing sidecar symlink file: {path.as_posix()}")
+    from harness_autonomy.core import parse_backlog_metadata_text
+
+    return parse_backlog_metadata_text(_read_text(path))
 
 
 def _backlog_for_packet(
     state_root: Path,
     packet: Mapping[str, object],
     packet_id: str,
+    *,
+    target_id: str,
 ) -> tuple[Path | None, Path | None, str, str]:
-    discovered_items = {item.path: item for item in harness_loop.discover_backlog_items(state_root)}
+    discovered_items = {item.path: item for item in _discover_backlog_items_strict(state_root)}
     queued_backlog_path = str(packet.get("queued_backlog_path") or "").strip()
     if queued_backlog_path:
         candidate = Path(queued_backlog_path)
@@ -1237,8 +1412,13 @@ def _backlog_for_packet(
             item = discovered_items.get(candidate)
             if item is None:
                 raise TaskIntakeError("task backlog is not visible to canonical backlog discovery")
-            if item.intake_packet and item.intake_packet != packet_id:
+            metadata = _backlog_metadata(path)
+            if item.source != "task-intake":
+                raise TaskIntakeError("task backlog source is not task-intake")
+            if item.intake_packet != packet_id:
                 raise TaskIntakeError("task backlog intake packet mismatch")
+            if str(metadata.get("target_id") or "").strip() != target_id:
+                raise TaskIntakeError("task backlog target mismatch")
             if item.status == "queued":
                 return path, path, item.status, item.autonomy_execute
             return None, path, item.status, item.autonomy_execute
@@ -1257,24 +1437,33 @@ def _read_review_summary(
     packet_id: str,
     target_id: str,
     request_sha256: str,
-) -> tuple[str, bool | None, int, int]:
+) -> tuple[str, bool | None, int, int, int]:
     review_path = _sidecar_path(state_root, DRAFTS_DIR, packet_id, "review.json")
     if not review_path.exists():
-        return "not-reviewed", None, 0, 0
+        return "not-reviewed", None, 0, 0, 0
     try:
         payload = json.loads(_read_text(review_path))
     except json.JSONDecodeError:
-        return "invalid", None, 0, 0
+        return "invalid", None, 0, 0, 0
     if payload.get("target_id") != target_id:
-        return "invalid", None, 0, 0
+        return "invalid", None, 0, 0, 0
     if payload.get("request_sha256") != request_sha256:
-        return "stale", None, 0, 0
+        return "stale", None, 0, 0, 0
     return (
         "reviewed",
         bool(payload.get("auto_eligible")),
         len(payload.get("open_questions") or ()),
         len(payload.get("risk_flags") or ()),
+        len(payload.get("scope_adjustments") or ()),
     )
+
+
+def _current_scope_adjustment_count(state_root: Path, packet_id: str) -> int:
+    try:
+        model = _request_model(state_root, packet_id)
+    except TaskIntakeError:
+        return 0
+    return len(model.get("scope_adjustments") or ())
 
 
 def summarize_packets(state_root: Path, *, target_id: str | None = None) -> tuple[TaskPacketSummary, ...]:
@@ -1284,13 +1473,20 @@ def summarize_packets(state_root: Path, *, target_id: str | None = None) -> tupl
         resolved_target_id = _assert_expected_target(packet, target_id)
         request_path = _request_path(state_root, packet_id)
         title, request_sha256, request_issue = _safe_title_and_hash(request_path)
-        review_status, auto_eligible, open_question_count, risk_flag_count = _read_review_summary(
+        review_status, auto_eligible, open_question_count, risk_flag_count, scope_adjustment_count = _read_review_summary(
             state_root=state_root,
             packet_id=packet_id,
             target_id=resolved_target_id,
             request_sha256=request_sha256,
         )
-        queued_path, backlog_path, backlog_status, autonomy_execute = _backlog_for_packet(state_root, packet, packet_id)
+        if not scope_adjustment_count:
+            scope_adjustment_count = _current_scope_adjustment_count(state_root, packet_id)
+        queued_path, backlog_path, backlog_status, autonomy_execute = _backlog_for_packet(
+            state_root,
+            packet,
+            packet_id,
+            target_id=resolved_target_id,
+        )
         attachments = packet.get("attachments") if isinstance(packet, Mapping) else None
         summaries.append(
             TaskPacketSummary(
@@ -1305,6 +1501,7 @@ def summarize_packets(state_root: Path, *, target_id: str | None = None) -> tupl
                 auto_eligible=auto_eligible,
                 open_question_count=open_question_count,
                 risk_flag_count=risk_flag_count,
+                scope_adjustment_count=scope_adjustment_count,
                 attachment_count=len(attachments) if isinstance(attachments, list) else 0,
                 backlog_path=backlog_path,
                 backlog_status=backlog_status,
@@ -1347,7 +1544,7 @@ def queue_packet(
     )
     if auto and not review.auto_eligible:
         detail = ", ".join((*review.open_questions, *review.risk_flags))
-        raise TaskIntakeError("task is not safe for auto queue: " + detail)
+        raise TaskIntakeError("auto queue 불가: " + detail)
     model = _request_model(state_root, resolved_packet_id)
     autonomy_execute = "auto" if auto else "manual-review"
     backlog_id = _make_backlog_id(resolved_packet_id)
@@ -1386,4 +1583,141 @@ def queue_packet(
         backlog_path=backlog_path,
         backlog_id=backlog_path.stem,
         autonomy_execute=autonomy_execute,
+    )
+
+
+def _implementation_evidence_exists_for_backlog(state_root: Path, backlog_id: str, backlog_path: Path) -> bool:
+    runs_root = _sidecar_path(state_root, "runs", "harness")
+    if not runs_root.exists():
+        return False
+    relative_backlog = backlog_path.relative_to(state_root.resolve()).as_posix()
+    for evidence_path in sorted(runs_root.glob("*/generated-evidence.json")):
+        if evidence_path.is_symlink():
+            raise TaskIntakeError(f"refusing sidecar symlink file: {evidence_path.as_posix()}")
+        try:
+            payload = json.loads(_read_text(evidence_path))
+        except json.JSONDecodeError:
+            continue
+        external_backlog = payload.get("external_backlog")
+        if isinstance(external_backlog, Mapping):
+            if str(external_backlog.get("id") or "") == backlog_id:
+                return True
+            if str(external_backlog.get("path") or "") == relative_backlog:
+                return True
+        if str(payload.get("external_backlog_id") or "") == backlog_id:
+            return True
+        if str(payload.get("external_backlog_path") or "") == relative_backlog:
+            return True
+    return False
+
+
+def fix_scope_packet(
+    *,
+    state_root: Path,
+    packet_id: str,
+    apply: bool = False,
+    expected_target_id: str | None = None,
+) -> ScopeFixResult:
+    resolved_packet_id = validate_packet_id(packet_id)
+    packet = load_packet(state_root, resolved_packet_id)
+    target_id = _assert_expected_target(packet, expected_target_id)
+    review_json = _sidecar_path(state_root, DRAFTS_DIR, resolved_packet_id, "review.json")
+    if not review_json.exists():
+        raise TaskIntakeError("fix-scope 대상이 아닙니다: 먼저 `task review`를 실행해야 합니다.")
+    try:
+        review_payload = json.loads(_read_text(review_json))
+    except json.JSONDecodeError as exc:
+        raise TaskIntakeError("fix-scope 대상이 아닙니다: 기존 review.json을 읽을 수 없습니다.") from exc
+    current_request_hash = sha256_file(_request_path(state_root, resolved_packet_id))
+    if review_payload.get("request_sha256") != current_request_hash:
+        raise TaskIntakeError("fix-scope 대상이 아닙니다: request.md가 review 뒤 변경됐습니다. 다시 review 하세요.")
+    preview_path = _sidecar_path(state_root, DRAFTS_DIR, resolved_packet_id, "backlog-preview.md")
+    previous_review = _read_text(review_json)
+    previous_preview_exists = preview_path.exists()
+    previous_preview = _read_text(preview_path) if previous_preview_exists else ""
+    try:
+        review = review_packet(state_root=state_root, packet_id=resolved_packet_id, expected_target_id=target_id)
+        queued_path, _backlog_path, backlog_status, autonomy_execute = _backlog_for_packet(
+            state_root,
+            packet,
+            resolved_packet_id,
+            target_id=target_id,
+        )
+    finally:
+        if not apply:
+            _write_text(review_json, previous_review)
+            if previous_preview_exists:
+                _write_text(preview_path, previous_preview)
+            elif preview_path.exists():
+                preview_path.unlink()
+    if queued_path is None:
+        raise TaskIntakeError("fix-scope 대상이 아닙니다: 먼저 이 요청이 manual-review 실행 대기열에 있어야 합니다.")
+    if backlog_status != "queued":
+        raise TaskIntakeError("fix-scope 대상이 아닙니다: queued 상태의 task backlog만 지원합니다.")
+    if autonomy_execute == "auto":
+        return ScopeFixResult(
+            packet_id=resolved_packet_id,
+            target_id=target_id,
+            backlog_path=queued_path,
+            applied=False,
+            auto_eligible=review.auto_eligible,
+            message="already-auto",
+            scope_adjustments=review.scope_adjustments,
+        )
+    if autonomy_execute != "manual-review":
+        raise TaskIntakeError("fix-scope 대상이 아닙니다: manual-review task backlog만 auto로 복구할 수 있습니다.")
+    if not review.auto_eligible:
+        detail = ", ".join((*review.open_questions, *review.risk_flags))
+        raise TaskIntakeError("fix-scope 적용 불가: 아직 auto queue 조건을 만족하지 않습니다. " + detail)
+    if not review.scope_adjustments:
+        raise TaskIntakeError("fix-scope found no normalizable scope adjustments")
+    if _implementation_evidence_exists_for_backlog(state_root, queued_path.stem, queued_path):
+        raise TaskIntakeError("fix-scope refuses backlog with existing implementation evidence")
+    if not apply:
+        return ScopeFixResult(
+            packet_id=resolved_packet_id,
+            target_id=target_id,
+            backlog_path=queued_path,
+            applied=False,
+            auto_eligible=True,
+            message="dry-run",
+            scope_adjustments=review.scope_adjustments,
+        )
+    model = _request_model(state_root, resolved_packet_id)
+    body = _backlog_markdown(
+        backlog_id=queued_path.stem,
+        title=review.title,
+        target_id=target_id,
+        packet_id=resolved_packet_id,
+        autonomy_execute="auto",
+        model=model,
+    )
+    previous_body = _read_text(queued_path)
+    _write_text(queued_path, body)
+    relative_backlog_path = queued_path.relative_to(state_root.resolve())
+    try:
+        discovered = _discover_backlog_items_strict(state_root)
+        if not any(
+            item.path == relative_backlog_path
+            and item.status == "queued"
+            and item.autonomy_execute == "auto"
+            and item.intake_packet == resolved_packet_id
+            and item.source == "task-intake"
+            for item in discovered
+        ):
+            raise TaskIntakeError("fixed backlog is not visible as queued auto to canonical backlog discovery")
+    except Exception:
+        _write_text(queued_path, previous_body)
+        raise
+    packet["queued_backlog_path"] = relative_backlog_path.as_posix()
+    packet["updated_at"] = utc_timestamp()
+    _write_json(_packet_json_path(state_root, resolved_packet_id), packet)
+    return ScopeFixResult(
+        packet_id=resolved_packet_id,
+        target_id=target_id,
+        backlog_path=queued_path,
+        applied=True,
+        auto_eligible=True,
+        message="promoted-to-auto",
+        scope_adjustments=review.scope_adjustments,
     )

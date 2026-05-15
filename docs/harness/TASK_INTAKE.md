@@ -56,16 +56,16 @@
 
 ## Queue
 
-manual-review로 queue:
-
-```bash
-./harness task queue <packet-id>
-```
-
-auto 실행 후보로 queue:
+보통은 `task review`가 안내하는 다음 명령을 그대로 따른다. 자동 실행 가능하면:
 
 ```bash
 ./harness task queue <packet-id> --auto
+```
+
+사람 확인으로 일부러 남기려면:
+
+```bash
+./harness task queue <packet-id>
 ```
 
 `--auto`는 아래가 명확해야 통과한다.
@@ -77,6 +77,39 @@ auto 실행 후보로 queue:
 - secret이나 credential 직접 입력 없음
 
 모호한 요구사항, 이미지 단독 요구사항, credential/manual smoke가 필요한 작업은 `manual-review`로 남기는 것이 정상이다.
+
+## Scope 자동 보정
+
+`task review`는 초보자가 자주 쓰는 일부 config scope만 deterministic하게 보정한다.
+
+- `vite.config.*`
+- `eslint.config.*`
+- `vitest.config.*`
+- `playwright.config.*`
+- `tailwind.config.*`
+- `postcss.config.*`
+
+이 alias들은 `*.js`, `*.mjs`, `*.cjs`, `*.ts`, `*.mts`, `*.cts` 후보 파일명으로 바뀐다. 일반 glob 지원은 아니다. `src/*.ts`, `**/*.py`, `*.*`, `*/README.md` 같은 broad glob은 계속 auto 실행을 막는다.
+
+`Forbidden Scope`의 `.env*`는 parser가 이해할 수 있는 exact env preset으로 보정된다. 하지만 `File Scope`에 `.env`, `.env.*`, `.env*`, secret/token/key 경로가 있으면 절대 auto eligible이 되지 않는다.
+
+## 잘못 manual-review로 들어간 경우
+
+scope 문법만 문제였던 요청을 이미 manual-review로 queue했다면 먼저 dry-run으로 확인한다.
+
+```bash
+./harness task fix-scope <packet-id>
+```
+
+문제가 없으면 적용한다.
+
+```bash
+./harness task fix-scope <packet-id> --apply
+```
+
+이 명령은 controller sidecar의 연결된 queued backlog만 다시 렌더링한다. product repo, commit, push, implementation run은 건드리지 않는다.
+
+`fix-scope`는 일반적인 manual-review 탈출구가 아니다. broad glob, `.env*` File Scope, secret/token/key 경로, 빠진 validation command, 수동 smoke가 필요한 요구사항은 request.md를 고쳐 다시 review하거나 manual-review로 유지해야 한다.
 
 ## 실행 단위
 

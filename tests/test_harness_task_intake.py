@@ -71,6 +71,226 @@ def test_task_intake_draft_review_and_queue_auto(tmp_path: Path) -> None:
     assert [item.item_id for item in discovered] == [queued.backlog_id]
 
 
+def test_task_intake_normalizes_safe_config_aliases_for_auto_queue(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-config")
+    request.write_text(
+        _safe_request()
+        .replace(
+            "## File Scope\n- README.md",
+            "\n".join(
+                [
+                    "## File Scope",
+                    "- README.md",
+                    "- `vite.config.*`",
+                    "- `eslint.config.*`",
+                    "- `vitest.config.*`",
+                    "- `playwright.config.*`",
+                    "- `tailwind.config.*`",
+                    "- `postcss.config.*`",
+                ]
+            ),
+        )
+        .replace("## Forbidden Scope\n- .env*", "## Forbidden Scope\n- `.env*`"),
+        encoding="utf-8",
+    )
+
+    review = module.review_packet(state_root=state_root, packet_id="task-config")
+    preview = review.preview_path.read_text(encoding="utf-8")
+
+    assert review.auto_eligible is True
+    assert {item.original for item in review.scope_adjustments} == {
+        "vite.config.*",
+        "eslint.config.*",
+        "vitest.config.*",
+        "playwright.config.*",
+        "tailwind.config.*",
+        "postcss.config.*",
+        ".env*",
+    }
+    assert "vite.config.*" not in preview
+    assert "eslint.config.*" not in preview
+    assert "- vite.config.ts" in preview
+    assert "- eslint.config.mjs" in preview
+    assert "- vitest.config.cts" in preview
+    assert "- playwright.config.ts" in preview
+    assert "- tailwind.config.mts" in preview
+    assert "- postcss.config.cjs" in preview
+    assert "- .env.local" in preview
+    payload = module.json.loads(review.review_path.read_text(encoding="utf-8"))
+    assert len(payload["scope_adjustments"]) == 7
+
+    queued = module.queue_packet(state_root=state_root, packet_id="task-config", auto=True)
+    body = queued.backlog_path.read_text(encoding="utf-8")
+
+    assert queued.autonomy_execute == "auto"
+    assert "Autonomy-Execute: auto" in body
+    assert "vite.config.*" not in body
+    assert "- vite.config.cts" in body
+
+
+def test_task_intake_keeps_unsafe_wildcards_manual_review(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-unsafe-glob")
+    request.write_text(
+        _safe_request().replace("## File Scope\n- README.md", "## File Scope\n- README.md\n- `src/*.ts`"),
+        encoding="utf-8",
+    )
+
+    review = module.review_packet(state_root=state_root, packet_id="task-unsafe-glob")
+
+    assert review.auto_eligible is False
+    assert "안전하지 않은 wildcard" in " ".join(review.risk_flags)
+    assert "Autonomy-Execute: manual-review" in review.preview_path.read_text(encoding="utf-8")
+    with pytest.raises(module.TaskIntakeError, match="auto queue 불가"):
+        module.queue_packet(state_root=state_root, packet_id="task-unsafe-glob", auto=True)
+
+    queued = module.queue_packet(state_root=state_root, packet_id="task-unsafe-glob")
+    assert queued.autonomy_execute == "manual-review"
+
+
+@pytest.mark.parametrize(
+    "unsafe_scope",
+    [".env*", ".env.test", "HARNESS.md", "docs/harness/**", "scripts/harness_cli.py", "server.PEM", "id_rsa"],
+)
+def test_task_intake_rejects_secret_and_harness_file_scope(tmp_path: Path, unsafe_scope: str) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-pollution")
+    request.write_text(
+        _safe_request().replace("## File Scope\n- README.md", f"## File Scope\n- {unsafe_scope}"),
+        encoding="utf-8",
+    )
+
+    review = module.review_packet(state_root=state_root, packet_id="task-pollution")
+
+    assert review.auto_eligible is False
+    assert review.risk_flags
+    with pytest.raises(module.TaskIntakeError, match="auto queue 불가"):
+        module.queue_packet(state_root=state_root, packet_id="task-pollution", auto=True)
+
+
+def test_task_intake_rejects_mixed_valid_and_unreadable_file_scope(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-mixed-scope")
+    request.write_text(
+        _safe_request().replace("## File Scope\n- README.md", "## File Scope\n- README.md\n- README and docs"),
+        encoding="utf-8",
+    )
+
+    review = module.review_packet(state_root=state_root, packet_id="task-mixed-scope")
+
+    assert review.auto_eligible is False
+    assert "README and docs" in " ".join(review.open_questions)
+    with pytest.raises(module.TaskIntakeError, match="auto queue 불가"):
+        module.queue_packet(state_root=state_root, packet_id="task-mixed-scope", auto=True)
+
+
+def test_task_fix_scope_promotes_linked_manual_review_backlog(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-fix")
+    request.write_text(
+        _safe_request().replace("## File Scope\n- README.md", "## File Scope\n- README.md\n- `vite.config.*`"),
+        encoding="utf-8",
+    )
+    module.review_packet(state_root=state_root, packet_id="task-fix")
+    queued = module.queue_packet(state_root=state_root, packet_id="task-fix")
+    before_body = queued.backlog_path.read_text(encoding="utf-8")
+
+    dry_run = module.fix_scope_packet(state_root=state_root, packet_id="task-fix")
+
+    assert dry_run.applied is False
+    assert dry_run.auto_eligible is True
+    assert queued.backlog_path.read_text(encoding="utf-8") == before_body
+
+    applied = module.fix_scope_packet(state_root=state_root, packet_id="task-fix", apply=True)
+    body = queued.backlog_path.read_text(encoding="utf-8")
+
+    assert applied.applied is True
+    assert applied.backlog_path == queued.backlog_path
+    assert "Autonomy-Execute: auto" in body
+    assert "vite.config.*" not in body
+    discovered = module.harness_loop.discover_backlog_items(state_root)
+    assert [(item.item_id, item.autonomy_execute) for item in discovered] == [(queued.backlog_id, "auto")]
+
+
+def test_task_fix_scope_refuses_existing_nested_implementation_evidence(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-evidence")
+    request.write_text(
+        _safe_request().replace("## File Scope\n- README.md", "## File Scope\n- README.md\n- `vite.config.*`"),
+        encoding="utf-8",
+    )
+    module.review_packet(state_root=state_root, packet_id="task-evidence")
+    queued = module.queue_packet(state_root=state_root, packet_id="task-evidence")
+    evidence = state_root / "runs" / "harness" / "external-demo" / "generated-evidence.json"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text(
+        module.json.dumps(
+            {
+                "external_backlog": {
+                    "id": queued.backlog_id,
+                    "path": queued.backlog_path.relative_to(state_root.resolve()).as_posix(),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(module.TaskIntakeError, match="existing implementation evidence"):
+        module.fix_scope_packet(state_root=state_root, packet_id="task-evidence", apply=True)
+
+
+def test_task_fix_scope_requires_exact_task_intake_linkage(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-linkage")
+    request.write_text(
+        _safe_request().replace("## File Scope\n- README.md", "## File Scope\n- README.md\n- `vite.config.*`"),
+        encoding="utf-8",
+    )
+    module.review_packet(state_root=state_root, packet_id="task-linkage")
+    queued = module.queue_packet(state_root=state_root, packet_id="task-linkage")
+    body = queued.backlog_path.read_text(encoding="utf-8").replace("Intake-Packet: task-linkage\n", "")
+    queued.backlog_path.write_text(body, encoding="utf-8")
+
+    with pytest.raises(module.TaskIntakeError, match="intake packet mismatch"):
+        module.fix_scope_packet(state_root=state_root, packet_id="task-linkage", apply=True)
+
+
+def test_task_fix_scope_rolls_back_when_canonical_discovery_fails(monkeypatch, tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-rollback")
+    request.write_text(
+        _safe_request().replace("## File Scope\n- README.md", "## File Scope\n- README.md\n- `vite.config.*`"),
+        encoding="utf-8",
+    )
+    module.review_packet(state_root=state_root, packet_id="task-rollback")
+    queued = module.queue_packet(state_root=state_root, packet_id="task-rollback")
+    before = queued.backlog_path.read_text(encoding="utf-8")
+
+    real_discover = module._discover_backlog_items_strict
+    calls = {"count": 0}
+
+    def fake_discover(discover_root: Path):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return real_discover(discover_root)
+        return ()
+
+    monkeypatch.setattr(module, "_discover_backlog_items_strict", fake_discover)
+
+    with pytest.raises(module.TaskIntakeError, match="fixed backlog is not visible"):
+        module.fix_scope_packet(state_root=state_root, packet_id="task-rollback", apply=True)
+    assert queued.backlog_path.read_text(encoding="utf-8") == before
+
+
 def _file_snapshot(root: Path) -> dict[str, bytes]:
     if not root.exists():
         return {}
@@ -437,7 +657,7 @@ def test_task_queue_auto_fails_without_safety_metadata(tmp_path: Path) -> None:
     request.write_text("# Vague task\n\n## Summary\n\n- Make it better.\n", encoding="utf-8")
     module.review_packet(state_root=state_root, packet_id="task-unsafe")
 
-    with pytest.raises(module.TaskIntakeError, match="not safe for auto"):
+    with pytest.raises(module.TaskIntakeError, match="auto queue 불가"):
         module.queue_packet(state_root=state_root, packet_id="task-unsafe", auto=True)
 
     assert not (state_root / "backlog" / "queued").exists()
@@ -533,7 +753,7 @@ def test_task_auto_rejects_file_scope_overlapping_mandatory_forbidden_scope(tmp_
 
     assert review.auto_eligible is False
     assert "금지 범위와 겹칩니다" in " ".join(review.risk_flags)
-    with pytest.raises(module.TaskIntakeError, match="not safe for auto"):
+    with pytest.raises(module.TaskIntakeError, match="auto queue 불가"):
         module.queue_packet(state_root=state_root, packet_id="task-forbidden-scope", auto=True)
 
 
@@ -645,7 +865,7 @@ def test_ai_review_writes_advisory_artifacts_without_changing_queue_gate(tmp_pat
     assert ai_review.result_path is not None and ai_review.result_path.exists()
     assert deterministic.review_path.read_text(encoding="utf-8") == before_review
     assert module.json.loads(deterministic.review_path.read_text(encoding="utf-8"))["auto_eligible"] is False
-    with pytest.raises(module.TaskIntakeError, match="not safe for auto"):
+    with pytest.raises(module.TaskIntakeError, match="auto queue 불가"):
         module.queue_packet(state_root=state_root, packet_id="task-unsafe", auto=True)
     assert not (state_root / "backlog" / "queued").exists()
 

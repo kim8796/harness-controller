@@ -916,6 +916,176 @@ def test_beginner_install_task_review_queue_auto(monkeypatch, tmp_path: Path, ca
     _assert_no_product_harness_pollution(product)
 
 
+def test_beginner_task_fix_scope_repairs_manual_review_dead_end(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    request = tmp_path / "request.md"
+    request.write_text(
+        "\n".join(
+            [
+                "# Add config",
+                "",
+                "## Goal",
+                "- Add a Vite config and README note.",
+                "",
+                "## Summary",
+                "- Update config and README.",
+                "",
+                "## Acceptance",
+                "- README.md contains the new note.",
+                "",
+                "## File Scope",
+                "- README.md",
+                "- `vite.config.*`",
+                "",
+                "## Forbidden Scope",
+                "- `.env*`",
+                "- runs/**",
+                "- reports/**",
+                "",
+                "## Validation",
+                "- `git diff -- README.md vite.config.ts`",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.23")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    assert module.main(["task", "from", str(request), "--packet-id", "task-config"]) == 0
+    assert module.main(["task", "review", "task-config"]) == 0
+    review_output = capsys.readouterr().out
+    assert "자동 실행 가능: 예" in review_output
+    assert "자동 보정됨" in review_output
+    assert "바로 queue: `./harness task queue task-config --auto`" in review_output
+
+    assert module.main(["task", "queue", "task-config"]) == 0
+    assert module.main(["task", "list"]) == 0
+    list_output = capsys.readouterr().out
+    assert "다음 명령: `./harness task fix-scope task-config --apply`" in list_output
+
+    assert module.main(["task", "fix-scope", "task-config"]) == 0
+    dry_output = capsys.readouterr().out
+    assert "적용 명령: `./harness task fix-scope task-config --apply`" in dry_output
+    assert module.main(["task", "fix-scope", "task-config", "--apply"]) == 0
+    apply_output = capsys.readouterr().out
+    assert "작업 scope 복구 적용 완료" in apply_output
+    assert "다음 명령: `./harness run`" in apply_output
+    queued = tuple((controller / "targets" / "demo" / "backlog" / "queued").glob("*.md"))
+    assert len(queued) == 1
+    body = queued[0].read_text(encoding="utf-8")
+    assert "Autonomy-Execute: auto" in body
+    assert "vite.config.*" not in body
+    _assert_no_product_harness_pollution(product)
+
+
+def test_beginner_task_review_does_not_suggest_fix_scope_for_unqueued_blocker(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    request = tmp_path / "request.md"
+    request.write_text(
+        "\n".join(
+            [
+                "# Add config",
+                "",
+                "## Goal",
+                "- Add a Vite config and README note.",
+                "",
+                "## Summary",
+                "- Update config and README.",
+                "",
+                "## Acceptance",
+                "- README.md contains the new note.",
+                "",
+                "## File Scope",
+                "- README.md",
+                "- `vite.config.*`",
+                "",
+                "## Forbidden Scope",
+                "- `.env*`",
+                "",
+                "## Validation",
+                "- Manual check only",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.23")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    assert module.main(["task", "from", str(request), "--packet-id", "task-needs-edit"]) == 0
+    assert module.main(["task", "review", "task-needs-edit"]) == 0
+    output = capsys.readouterr().out
+
+    assert "자동 실행 가능: 아니오" in output
+    assert "자동 보정됨" in output
+    assert "scope 복구" not in output
+    assert "scope 자동 보정은 적용됐지만 auto 조건이 아직 부족합니다" in output
+    assert "review task-needs-edit" in output
+
+
+def test_beginner_task_ai_review_defers_to_deterministic_next_action(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    request = tmp_path / "request.md"
+    request.write_text(
+        "\n".join(
+            [
+                "# Add copy",
+                "",
+                "## Goal",
+                "- Add concise welcome copy.",
+                "",
+                "## Summary",
+                "- Update README.",
+                "",
+                "## Acceptance",
+                "- README.md contains the new note.",
+                "",
+                "## File Scope",
+                "- README.md",
+                "",
+                "## Forbidden Scope",
+                "- .env*",
+                "",
+                "## Validation",
+                "- `git diff -- README.md`",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.23")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    assert module.main(["task", "from", str(request), "--packet-id", "task-ai"]) == 0
+    assert module.main(["task", "review", "task-ai"]) == 0
+    capsys.readouterr()
+    assert module.main(["task", "review", "task-ai", "--ai"]) == 0
+    output = capsys.readouterr().out
+
+    assert "AI 검토는 참고용이며 자동 실행 판단에는 사용되지 않습니다" in output
+    assert "다음 명령: `./harness task list`" in output
+    assert "queue task-ai` 또는" not in output
+    assert "deterministic review/list" in output
+
+
 def test_beginner_task_list_empty_and_target_bound_next_action(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_module()
     controller = tmp_path / "controller"

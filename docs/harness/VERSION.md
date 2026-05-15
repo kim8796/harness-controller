@@ -1,8 +1,15 @@
 # Harness Framework Version
 
-- Current Version: 1.8.22
+- Current Version: 1.8.23
 - Release Date: 2026-05-15
-- Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + routed Start Here docs + beginner install prompt + beginner help home + beginner `install/task/list/run/finish` controller UX + task interview + task packet status visibility + controller release-check gate + advisory AI review artifacts + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + managed-latest/xhigh external implementation gate + backlog-bound product push gate + controller release-history-preserving export + generated coverage artifact exclusion + on-demand export output.
+- Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + routed Start Here docs + beginner install prompt + beginner help home + beginner `install/task/list/run/finish` controller UX + task interview + task packet status visibility + task scope normalization + controller release-check gate + advisory AI review artifacts + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + managed-latest/xhigh external implementation gate + backlog-bound product push gate + controller release-history-preserving export + generated coverage artifact exclusion + on-demand export output.
+
+## What Changed In 1.8.23
+
+- Added intake-only scope normalization for safe beginner config aliases such as `vite.config.*`, `eslint.config.*`, `vitest.config.*`, `playwright.config.*`, `tailwind.config.*`, and `postcss.config.*`.
+- Kept the canonical backlog scope parser strict: broad globs and `.env*` in File Scope still fail closed before auto queue.
+- Added `./harness task fix-scope <packet-id> [--apply]` to repair queued manual-review packets that were blocked only by normalizable scope syntax.
+- Updated `task review` and `task list` so they show automatic scope adjustments and only suggest `queue --auto` when deterministic review allows it.
 
 ## What Changed In 1.8.22
 

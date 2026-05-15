@@ -62,9 +62,9 @@
 <!-- BEGIN AUTO -->
 - 스냅샷 종류: 저장소 로컬 부트스트랩 뷰
 - 갱신 명령: `python3 scripts/harness_loop.py sync-state`
-- 현재 active workspace key: repo-root
-- canonical goal_state snapshot: 없음
 - 현재 활성 run: 없음
+- 현재 active workspace key: 없음
+- canonical goal_state snapshot: 없음
 - 다음 backlog 후보: 없음
 
 ## 빠른 복구 안내

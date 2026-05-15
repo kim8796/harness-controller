@@ -8,6 +8,7 @@
 
 ## 자동 인덱스
 <!-- BEGIN AUTO -->
-- 현재 active workspace key: repo-root
-- 아직 기록된 harness run 이 없다.
+| Run | 상태 | 갱신 시각 | 제목 |
+| --- | --- | --- | --- |
+| `20260515-controller-task-scope-normalization` | `completed` | `2026-05-15 17:54` | Controller beginner task scope normalization |
 <!-- END AUTO -->
