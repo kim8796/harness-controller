@@ -1,4 +1,4 @@
-# Harness Controller Bundle v1.8.20
+# Harness Controller Bundle v1.8.21
 
 이 디렉토리는 product repo 밖에서 실행하는 external harness controller 배포 번들이다.
 product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는다.
@@ -150,6 +150,11 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `scripts/harness_telegram_bridge.py`
 - `scripts/harness_workspace.py`
 - `docs/harness/START_HERE.md`
+- `docs/harness/OPERATOR_GUIDE.md`
+- `docs/harness/TASK_INTAKE.md`
+- `docs/harness/TELEGRAM.md`
+- `docs/harness/TROUBLESHOOTING.md`
+- `docs/harness/STARTER_SCAFFOLD.md`
 - `docs/harness/POLICY.md`
 - `docs/harness/REFLECTION_LOG.md`
 - `docs/harness/LOGGING.md`
@@ -171,7 +176,7 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `tests/test_harness_task_intake.py`
 - `tests/test_harness_telegram_bridge.py`
 - `tests/test_redis_relay.py`
-- `docs/harness/releases/v1.8.20.md`
+- `docs/harness/releases/v1.8.21.md`
 - `docs/harness/releases/v1.8.0.md`
 - `docs/harness/releases/v1.8.1.md`
 - `docs/harness/releases/v1.8.10.md`
@@ -185,6 +190,7 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `docs/harness/releases/v1.8.18.md`
 - `docs/harness/releases/v1.8.19.md`
 - `docs/harness/releases/v1.8.2.md`
+- `docs/harness/releases/v1.8.20.md`
 - `docs/harness/releases/v1.8.3.md`
 - `docs/harness/releases/v1.8.4.md`
 - `docs/harness/releases/v1.8.5.md`

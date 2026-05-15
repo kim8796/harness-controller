@@ -224,6 +224,11 @@ def test_starter_bundle_excludes_live_state_and_can_create_project(tmp_path: Pat
     assert "./harness verify --loop-ready" in bundle_readme
     assert ".github/workflows/harness-controller-ci.yml" not in bundle_readme
     assert "짧은 한국어 operator cue" in (bundle / "docs" / "harness" / "START_HERE.md").read_text(encoding="utf-8")
+    assert (bundle / "docs" / "harness" / "OPERATOR_GUIDE.md").exists()
+    assert (bundle / "docs" / "harness" / "TASK_INTAKE.md").exists()
+    assert (bundle / "docs" / "harness" / "TELEGRAM.md").exists()
+    assert (bundle / "docs" / "harness" / "TROUBLESHOOTING.md").exists()
+    assert (bundle / "docs" / "harness" / "STARTER_SCAFFOLD.md").exists()
     assert "SUMMARY_TARGET_CHARS" in (bundle / "scripts" / "harness_telegram_bridge.py").read_text(encoding="utf-8")
     assert "Starter Goal" in (bundle / "docs" / "harness" / "GOALS.md").read_text(encoding="utf-8")
     source_title = "Chat" + "bot"

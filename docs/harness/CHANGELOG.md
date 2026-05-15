@@ -1,5 +1,12 @@
 # Harness Changelog
 
+## 1.8.21 - 2026-05-15
+
+- Shortened `START_HERE.md` into a routing-oriented quick start.
+- Moved daily commands, task intake, Telegram/Redis setup, troubleshooting, and starter scaffold reference into dedicated linked docs.
+- Included the new guide docs in starter/controller export source coverage.
+- Preserved contract-heavy reference docs while reducing the first-read document size.
+
 ## 1.8.20 - 2026-05-14
 
 - Added `./harness controller release-check` for private controller repo release gating.
