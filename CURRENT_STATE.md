@@ -19,7 +19,7 @@
 - 대표 goal proposal: 없음
 - 현재 활성 run: 없음
 - 현재 active workspace key: 없음
-- 최근 완료 run: 20260515-controller-task-scope-normalization
+- 최근 완료 run: 20260515-controller-finish-status-path-normalization
 - 대기열 backlog 개수: 0
 - 다음 backlog 후보: 없음
 <!-- END AUTO -->

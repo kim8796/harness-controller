@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "status": "pass",
+  "agent": "Evidence",
+  "run_id": "20260515-controller-finish-status-path-normalization",
+  "changed_files": [
+    "scripts/harness_controller.py",
+    "tests/test_harness_controller.py",
+    "tests/test_harness_cli.py"
+  ],
+  "verification": {
+    "focused_pytest": {
+      "status": "pass",
+      "command": "python3 -m pytest tests/test_harness_controller.py::test_target_status_paths_normalizes_untracked_directory_slashes tests/test_harness_controller.py::test_product_paths_match_expected_allows_directory_coverage tests/test_harness_cli.py::test_beginner_finish_apply_accepts_untracked_directory_diff tests/test_harness_cli.py::test_beginner_finish_commit_and_push_delegate_existing_gates -q"
+    },
+    "ruff": {
+      "status": "pass",
+      "command": "python3 -m ruff check scripts/harness_controller.py tests/test_harness_controller.py tests/test_harness_cli.py"
+    },
+    "racegame_finish_apply": "pass",
+    "racegame_product_commit": "918ebff552dbe090ae4c1d903726db6f18245c55",
+    "racegame_push_dry_run": "expected-fail-upstream-not-configured"
+  },
+  "residual_risk": [
+    "racegame has no configured upstream, so product push remains blocked until a remote/upstream is added."
+  ]
+}

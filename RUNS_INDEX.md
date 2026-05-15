@@ -10,5 +10,6 @@
 <!-- BEGIN AUTO -->
 | Run | 상태 | 갱신 시각 | 제목 |
 | --- | --- | --- | --- |
-| `20260515-controller-task-scope-normalization` | `completed` | `2026-05-15 17:54` | Controller beginner task scope normalization |
+| `20260515-controller-finish-status-path-normalization` | `completed` | `2026-05-15 19:52` | 20260515-controller-finish-status-path-normalization |
+| `20260515-controller-task-scope-normalization` | `completed` | `2026-05-15 17:59` | Controller beginner task scope normalization |
 <!-- END AUTO -->

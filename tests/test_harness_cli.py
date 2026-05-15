@@ -394,6 +394,53 @@ def test_beginner_finish_dry_run_and_apply_complete_sidecar_backlog(monkeypatch,
     _assert_no_product_harness_pollution(product)
 
 
+def test_beginner_finish_apply_accepts_untracked_directory_diff(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.24")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    _write_sidecar_backlog(controller)
+    capsys.readouterr()
+    assert (
+        module.main(
+            [
+                "target",
+                "run",
+                "demo",
+                "--implement-backlog-once",
+                "--runner",
+                "custom",
+                "--command-template",
+                "mkdir -p client && printf 'implemented\\n' > client/main.js && printf 'Implementation done\\n'",
+            ]
+        )
+        == 0
+    )
+    run_id = next((controller / "targets" / "demo" / "runs" / "harness").glob("*/generated-evidence.json")).parent.name
+    evidence = json.loads(
+        (controller / "targets" / "demo" / "runs" / "harness" / run_id / "generated-evidence.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    capsys.readouterr()
+
+    assert _product_git_status(product) == ["?? client/"]
+    assert evidence["product_diff_paths"] == ["client"]
+    assert module.main(["finish", "--apply"]) == 0
+    output = capsys.readouterr().out
+
+    assert "backlog 상태를 completed로 전환" in output
+    assert not (controller / "targets" / "demo" / "backlog" / "queued" / "BL-demo.md").exists()
+    assert (controller / "targets" / "demo" / "backlog" / "completed" / "BL-demo.md").exists()
+    assert _product_git_status(product) == ["?? client/"]
+    _assert_no_product_harness_pollution(product)
+
+
 def test_beginner_finish_complete_dry_run_does_not_mutate(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_module()
     controller = tmp_path / "controller"

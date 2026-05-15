@@ -1051,10 +1051,25 @@ def target_status_paths(status_lines: Sequence[str]) -> list[str]:
             path = line[3:] if len(line) >= 4 else line
         if " -> " in path:
             path = path.split(" -> ", 1)[1]
-        path = path.strip()
+        path = path.strip().rstrip("/")
         if path:
             paths.append(path)
     return list(dict.fromkeys(paths))
+
+
+def product_paths_match_expected(actual_paths: Sequence[str], expected_paths: Sequence[str]) -> bool:
+    actual = _safe_product_diff_paths(actual_paths)
+    expected = _safe_product_diff_paths(expected_paths)
+    if not actual or not expected:
+        return actual == expected
+
+    def covered_by_expected(path: str) -> bool:
+        return any(path == expected_path or path.startswith(f"{expected_path}/") for expected_path in expected)
+
+    def expected_has_actual(path: str) -> bool:
+        return any(actual_path == path or actual_path.startswith(f"{path}/") for actual_path in actual)
+
+    return all(covered_by_expected(path) for path in actual) and all(expected_has_actual(path) for path in expected)
 
 
 def _safe_evidence_run_id(run_id: str) -> str:
@@ -1729,7 +1744,8 @@ def commit_product_backlog_diff(target_root: Path, *, paths: Sequence[str], mess
         detail = (staged_result.stderr or staged_result.stdout).strip()
         raise ControllerError(f"target backlog product staged diff read failed: {detail}")
     staged_paths = [line.strip() for line in staged_result.stdout.splitlines() if line.strip()]
-    if staged_paths != safe_paths:
+    if not product_paths_match_expected(staged_paths, safe_paths):
+        git(["reset", "-q", "--", *safe_paths], cwd=target_root)
         raise ControllerError("staged product paths do not match implementation evidence")
     commit_result = git(
         [
@@ -1823,7 +1839,7 @@ def commit_sidecar_backlog_product_diff(
     if after_status:
         post_blockers.append("target-git-status-changed")
     commit_diff = product_diff_smoke_commit_diff_lines(record.repo)
-    if target_status_paths(commit_diff) != expected_paths:
+    if not product_paths_match_expected(target_status_paths(commit_diff), expected_paths):
         post_blockers.append("target-product-commit-diff-unexpected")
     post_verification = verify_target(record)
     for blocker in target_run_blockers(post_verification):
@@ -1956,7 +1972,7 @@ def _matching_backlog_commit_evidence(
     if str(payload.get("product_diff_fingerprint") or "") != expected_fingerprint:
         raise ControllerError("backlog product commit fingerprint does not match implementation evidence")
     commit_diff_paths = target_status_paths([str(line) for line in payload.get("product_commit_diff") or [] if str(line)])
-    if commit_diff_paths != list(expected_paths):
+    if not product_paths_match_expected(commit_diff_paths, expected_paths):
         raise ControllerError("backlog product commit diff does not match implementation evidence")
     if payload.get("product_status_after") not in ([], None):
         raise ControllerError("backlog product commit evidence did not finish with a clean product repo")

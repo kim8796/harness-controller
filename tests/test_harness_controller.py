@@ -197,6 +197,30 @@ def test_state_paths_keep_targets_isolated(tmp_path: Path) -> None:
     assert record_a.state_paths(controller).operator_inbox != record_b.state_paths(controller).operator_inbox
 
 
+def test_target_status_paths_normalizes_untracked_directory_slashes() -> None:
+    module = _load_module()
+
+    assert module.target_status_paths([" M README.md", "?? client/", "R  old/name.js -> public/"]) == [
+        "README.md",
+        "client",
+        "public",
+    ]
+
+
+def test_product_paths_match_expected_allows_directory_coverage() -> None:
+    module = _load_module()
+
+    assert module.product_paths_match_expected(
+        ["README.md", "client/main.js", "client/styles.css", "public/assets/track.png"],
+        ["README.md", "client", "public"],
+    )
+    assert not module.product_paths_match_expected(
+        ["README.md", "client/main.js", "server/index.js"],
+        ["README.md", "client"],
+    )
+    assert not module.product_paths_match_expected(["README.md"], ["README.md", "client"])
+
+
 def test_target_alias_and_default_resolve_to_canonical_id(tmp_path: Path) -> None:
     module = _load_module()
     controller = tmp_path / "controller"
