@@ -1,5 +1,11 @@
 # Harness Changelog
 
+## 1.8.22 - 2026-05-15
+
+- Fixed root `START_HERE.md` generation for export/controller bundles so links point to `docs/harness/...` from the bundle root.
+- Removed the exported `START_HERE.md` dependency on source-only `harness_guide.md`.
+- Added focused export tests for START_HERE link resolution in root and `docs/harness` locations.
+
 ## 1.8.21 - 2026-05-15
 
 - Shortened `START_HERE.md` into a routing-oriented quick start.

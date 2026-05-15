@@ -1,8 +1,14 @@
 # Harness Framework Version
 
-- Current Version: 1.8.21
+- Current Version: 1.8.22
 - Release Date: 2026-05-15
 - Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + routed Start Here docs + beginner install prompt + beginner help home + beginner `install/task/list/run/finish` controller UX + task interview + task packet status visibility + controller release-check gate + advisory AI review artifacts + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + managed-latest/xhigh external implementation gate + backlog-bound product push gate + controller release-history-preserving export + generated coverage artifact exclusion + on-demand export output.
+
+## What Changed In 1.8.22
+
+- Fixed exported root `START_HERE.md` so its links resolve from the bundle root instead of incorrectly using `docs/harness`-relative paths.
+- Removed the source-only `harness_guide.md` link from exported `docs/harness/START_HERE.md` and kept the entrypoint linked only to bundled docs.
+- Added export tests that validate both root and `docs/harness` START_HERE markdown file links resolve in starter/controller bundles.
 
 ## What Changed In 1.8.21
 

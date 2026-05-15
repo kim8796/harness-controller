@@ -734,6 +734,42 @@ def read_current_version(root: Path) -> str:
     return match.group("version")
 
 
+def root_start_here_content(version: str) -> str:
+    return (
+        "\n".join(
+            [
+                "# Harness Start Here",
+                "",
+                "이 파일은 bundle root 에서 열리는 짧은 입구 문서다.",
+                f"현재 기준은 `v{version}` 이다.",
+                "",
+                "## 먼저 볼 문서",
+                "",
+                "- 빠른 시작: [docs/harness/START_HERE.md](docs/harness/START_HERE.md)",
+                "- 평소 명령어: [docs/harness/OPERATOR_GUIDE.md](docs/harness/OPERATOR_GUIDE.md)",
+                "- 요구사항 작성: [docs/harness/TASK_INTAKE.md](docs/harness/TASK_INTAKE.md)",
+                "- Telegram/Redis 설정: [docs/harness/TELEGRAM.md](docs/harness/TELEGRAM.md)",
+                "- 문제 해결: [docs/harness/TROUBLESHOOTING.md](docs/harness/TROUBLESHOOTING.md)",
+                "- 이식/업그레이드: [docs/harness/PORTABILITY.md](docs/harness/PORTABILITY.md)",
+                "- starter 파일 구조: [docs/harness/STARTER_SCAFFOLD.md](docs/harness/STARTER_SCAFFOLD.md)",
+                "- 버전/변경 이력: [docs/harness/VERSION.md](docs/harness/VERSION.md)",
+                "",
+                "## 바로 시작",
+                "",
+                "```bash",
+                "./harness controller doctor",
+                "./harness install /path/to/product-repo --id my-app --branch main --default",
+                "./harness task",
+                "./harness run",
+                "```",
+                "",
+                "자세한 설명은 [docs/harness/START_HERE.md](docs/harness/START_HERE.md)를 본다.",
+            ]
+        )
+        + "\n"
+    )
+
+
 def export_bundle(root: Path, version: str | None = None) -> Path:
     resolved_version = version or read_current_version(root)
     bundle_dir = root / "exports" / "harness" / f"v{resolved_version}"
@@ -754,7 +790,7 @@ def export_bundle(root: Path, version: str | None = None) -> Path:
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         destination_path.write_text(content, encoding="utf-8")
 
-    shutil.copy2(root / "docs" / "harness" / "START_HERE.md", bundle_dir / "START_HERE.md")
+    (bundle_dir / "START_HERE.md").write_text(root_start_here_content(resolved_version), encoding="utf-8")
 
     (bundle_dir / "README.md").write_text(
         "\n".join(
@@ -889,7 +925,7 @@ def export_starter_bundle(root: Path, output_dir: Path, version: str | None = No
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         destination_path.write_text(content, encoding="utf-8")
 
-    shutil.copy2(root / "docs" / "harness" / "START_HERE.md", bundle_dir / "START_HERE.md")
+    (bundle_dir / "START_HERE.md").write_text(root_start_here_content(resolved_version), encoding="utf-8")
     (bundle_dir / "README.md").write_text(
         "\n".join(
             [
@@ -953,7 +989,7 @@ def export_controller_bundle(root: Path, output_dir: Path, version: str | None =
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         destination_path.write_text(content, encoding="utf-8")
 
-    shutil.copy2(root / "docs" / "harness" / "START_HERE.md", bundle_dir / "START_HERE.md")
+    (bundle_dir / "START_HERE.md").write_text(root_start_here_content(resolved_version), encoding="utf-8")
     (bundle_dir / "README.md").write_text(
         "\n".join(
             [

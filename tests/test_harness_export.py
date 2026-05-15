@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -60,6 +61,21 @@ def _assert_no_product_harness_pollution(product: Path) -> None:
         assert not any((product / "scripts").glob("harness*"))
 
 
+def _assert_markdown_file_links_resolve(doc: Path) -> None:
+    text = doc.read_text(encoding="utf-8")
+    for match in re.finditer(r"(?<!!)\[[^\]]+\]\(([^)]+)\)", text):
+        href = match.group(1).strip()
+        if not href or href.startswith("#") or "://" in href or href.startswith("mailto:"):
+            continue
+        relative = href.split("#", 1)[0].strip()
+        if not relative:
+            continue
+        if relative.startswith("<") and relative.endswith(">"):
+            relative = relative[1:-1]
+        target = (doc.parent / relative).resolve()
+        assert target.exists(), f"{doc.relative_to(doc.parents[1])}: broken link {href!r} -> {target}"
+
+
 def test_read_current_version_parses_version_file(tmp_path: Path) -> None:
     module = _load_module()
     (tmp_path / "docs" / "harness").mkdir(parents=True)
@@ -84,7 +100,9 @@ def test_export_bundle_copies_sources_and_writes_readme(tmp_path: Path) -> None:
     assert (bundle_dir / "harness").read_text(encoding="utf-8") == "harness\n"
     assert (bundle_dir / "HARNESS.md").read_text(encoding="utf-8") == "HARNESS.md\n"
     assert (bundle_dir / ".gitignore").read_text(encoding="utf-8") == ".gitignore\n"
-    assert (bundle_dir / "START_HERE.md").read_text(encoding="utf-8") == "docs/harness/START_HERE.md\n"
+    root_start = (bundle_dir / "START_HERE.md").read_text(encoding="utf-8")
+    assert "[docs/harness/START_HERE.md](docs/harness/START_HERE.md)" in root_start
+    assert "[docs/harness/VERSION.md](docs/harness/VERSION.md)" in root_start
     assert (bundle_dir / ".claude" / "commands" / "harness.md").read_text(encoding="utf-8") == (
         ".claude/commands/harness.md\n"
     )
@@ -187,6 +205,8 @@ def test_export_bundle_copies_sources_and_writes_readme(tmp_path: Path) -> None:
     assert "Harness Export Bundle v1.0.0" in readme
     assert "START_HERE.md" in readme
     assert "Generated Starter Files" in readme
+    _assert_markdown_file_links_resolve(bundle_dir / "START_HERE.md")
+    _assert_markdown_file_links_resolve(bundle_dir / "docs" / "harness" / "START_HERE.md")
 
 
 def test_missing_export_source_paths_reports_missing_current_release(tmp_path: Path) -> None:
@@ -224,6 +244,8 @@ def test_starter_bundle_excludes_live_state_and_can_create_project(tmp_path: Pat
     assert "./harness verify --loop-ready" in bundle_readme
     assert ".github/workflows/harness-controller-ci.yml" not in bundle_readme
     assert "짧은 한국어 operator cue" in (bundle / "docs" / "harness" / "START_HERE.md").read_text(encoding="utf-8")
+    _assert_markdown_file_links_resolve(bundle / "START_HERE.md")
+    _assert_markdown_file_links_resolve(bundle / "docs" / "harness" / "START_HERE.md")
     assert (bundle / "docs" / "harness" / "OPERATOR_GUIDE.md").exists()
     assert (bundle / "docs" / "harness" / "TASK_INTAKE.md").exists()
     assert (bundle / "docs" / "harness" / "TELEGRAM.md").exists()
@@ -424,6 +446,8 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "it is not deployment" in readme
     assert "does not perform automatic remote rollback" in readme
     assert "Harness Controller Adapter" in (bundle / "AGENTS.md").read_text(encoding="utf-8")
+    _assert_markdown_file_links_resolve(bundle / "START_HERE.md")
+    _assert_markdown_file_links_resolve(bundle / "docs" / "harness" / "START_HERE.md")
     product_marker = "MINI" + "APP"
     assert product_marker not in (bundle / "docs" / "harness" / "GOALS.md").read_text(encoding="utf-8")
     sanitization = module.build_controller_sanitization_report(bundle)
