@@ -2,7 +2,7 @@
 
 하네스를 처음 쓰는 사람이 보는 입구 문서다. 이 파일은 짧게 유지하고, 자세한 운영/설정/문제 해결은 아래 문서로 연결한다.
 
-현재 기준은 `v1.8.24` 이다. 전체 변경 이력은 [VERSION.md](VERSION.md), export 계약은 [FRAMEWORK_EXPORT.md](FRAMEWORK_EXPORT.md), starter 파일 구조는 [STARTER_SCAFFOLD.md](STARTER_SCAFFOLD.md)를 본다.
+현재 기준은 `v1.8.25` 이다. 전체 변경 이력은 [VERSION.md](VERSION.md), export 계약은 [FRAMEWORK_EXPORT.md](FRAMEWORK_EXPORT.md), starter 파일 구조는 [STARTER_SCAFFOLD.md](STARTER_SCAFFOLD.md)를 본다. Telegram/Redis relay drain 은 controller-owned Upstash adapter 를 사용하며 외부 app 내부 RedisStore 를 요구하지 않는다.
 
 ## 어디부터 보면 되나
 

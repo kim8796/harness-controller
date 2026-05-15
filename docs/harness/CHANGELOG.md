@@ -1,5 +1,12 @@
 # Harness Changelog
 
+## 1.8.25 - 2026-05-16
+
+- Added a controller-owned Upstash relay store adapter and removed the local drain dependency on external app `db.database.RedisStore`.
+- Added `--target-id` to manual relay drain and kept external controller mode fail-closed when registered targets exist but no target-scoped drain was selected.
+- Surfaced target-aware relay env keys in secret-safe `env check` / `env register --dry-run` output.
+- Included the new relay store adapter and focused tests in starter/controller export coverage.
+
 ## 1.8.24 - 2026-05-15
 
 - Changed bare `./harness run` into the default external-controller autopilot loop.

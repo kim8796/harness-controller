@@ -1998,6 +1998,9 @@ def test_env_check_and_register_are_secret_safe(tmp_path: Path, capsys, monkeypa
                 "HARNESS_TELEGRAM_OPERATOR_USER_IDS=123456",
                 "HARNESS_RELAY_ENABLED=true",
                 "HARNESS_RELAY_REPO_ID=demo",
+                "HARNESS_RELAY_TARGET_ID=private-target-123",
+                "HARNESS_RELAY_TARGET_IDS=private-target-123,other-target-456",
+                "HARNESS_RELAY_TARGET_ALIASES=prod=private-target-123",
                 "HARNESS_RELAY_SIGNING_KEY=" + ("x" * 64),
                 "UPSTASH_REDIS_REST_URL=https://upstash.example.invalid",
                 "UPSTASH_REDIS_REST_TOKEN=redis-secret",
@@ -2012,17 +2015,28 @@ def test_env_check_and_register_are_secret_safe(tmp_path: Path, capsys, monkeypa
     rendered = json.dumps(payload, ensure_ascii=False)
     assert payload["ok"] is True
     assert payload["values_redacted"] is True
+    assert {entry["key"] for entry in payload["entries"]} >= {
+        "HARNESS_RELAY_TARGET_ID",
+        "HARNESS_RELAY_TARGET_IDS",
+        "HARNESS_RELAY_TARGET_ALIASES",
+    }
     assert "bot-secret" not in rendered
     assert "redis-secret" not in rendered
     assert "https://upstash.example.invalid" not in rendered
+    assert "private-target-123" not in rendered
+    assert "other-target-456" not in rendered
+    assert "prod=private-target-123" not in rendered
 
     assert module.main(["env", "register", "--provider", "vercel", "--dry-run"]) == 0
     output = capsys.readouterr().out
     assert "원격 변경: 실행 안 함" in output
+    assert "계획: HARNESS_RELAY_TARGET_IDS (present)" in output
     assert "계획: HARNESS_RELAY_SIGNING_KEY (present)" in output
     assert "bot-secret" not in output
     assert "redis-secret" not in output
     assert "https://upstash.example.invalid" not in output
+    assert "private-target-123" not in output
+    assert "prod=private-target-123" not in output
 
     assert module.main(["env", "register", "--provider", "vercel", "--dry-run", "--json"]) == 0
     register_payload = json.loads(capsys.readouterr().out)
@@ -2032,6 +2046,7 @@ def test_env_check_and_register_are_secret_safe(tmp_path: Path, capsys, monkeypa
     assert "bot-secret" not in register_rendered
     assert "redis-secret" not in register_rendered
     assert "https://upstash.example.invalid" not in register_rendered
+    assert "private-target-123" not in register_rendered
 
 
 def test_env_register_requires_dry_run(capsys) -> None:

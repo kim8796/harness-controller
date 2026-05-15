@@ -923,17 +923,22 @@ def _owner_instruction_write_context(
 
 
 def _build_relay_store_from_env() -> Any | None:
-    url = os.environ.get("UPSTASH_REDIS_REST_URL", "").strip()
-    token = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "").strip()
-    if not url or not token:
-        return None
     try:
-        from upstash_redis import Redis
-        from db.database import RedisStore
-    except Exception as exc:  # pragma: no cover - optional app deps in harness-only contexts
+        import harness_relay_store
+    except Exception as exc:  # pragma: no cover - adapter may be absent in split-worker tests
         LOGGER.warning("telegram relay store unavailable: %s", exc.__class__.__name__)
         return None
-    return RedisStore(Redis(url=url, token=token))
+    builder = getattr(harness_relay_store, "build_upstash_relay_store_from_env", None)
+    if not callable(builder):
+        builder = getattr(harness_relay_store, "build_relay_store_from_env", None)
+    if not callable(builder):
+        LOGGER.warning("telegram relay store unavailable: missing relay store factory")
+        return None
+    try:
+        return builder()
+    except Exception as exc:
+        LOGGER.warning("telegram relay store unavailable: %s", exc.__class__.__name__)
+        return None
 
 
 def _materialize_relay_envelope(
@@ -1008,6 +1013,26 @@ def drain_redis_relay_once(
     operator_user_ids = _relay_operator_user_ids()
     if not operator_user_ids:
         return {"fetched": 0, "materialized": 0, "duplicates": 0, "failed": 0, "skipped_config": 1}
+    if active_target_id is None:
+        known_targets, registry_error = _controller_target_ids(repo_root)
+        if registry_error:
+            return {
+                "fetched": 0,
+                "materialized": 0,
+                "duplicates": 0,
+                "failed": 0,
+                "skipped_config": 1,
+                "reason": registry_error,
+            }
+        if known_targets:
+            return {
+                "fetched": 0,
+                "materialized": 0,
+                "duplicates": 0,
+                "failed": 0,
+                "skipped_target": 1,
+                "reason": "target-scoped relay drain requires target_id in external controller mode",
+            }
     active_store = store or _build_relay_store_from_env()
     if active_store is None:
         return {"fetched": 0, "materialized": 0, "duplicates": 0, "failed": 0, "skipped_authless": 1}
@@ -1332,6 +1357,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--push-outbox", action="store_true")
     parser.add_argument("--poll-inbound", action="store_true")
     parser.add_argument("--drain-relay", action="store_true")
+    parser.add_argument("--target-id", help="Drain a target-scoped relay queue when used with --drain-relay.")
     parser.add_argument("--json", action="store_true", dest="as_json")
     args = parser.parse_args(argv)
     if not args.push_outbox and not args.poll_inbound and not args.drain_relay:
@@ -1342,7 +1368,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.poll_inbound:
         results["inbound"] = poll_inbound_once(args.root)
     if args.drain_relay:
-        results["relay"] = drain_redis_relay_once(args.root)
+        results["relay"] = drain_redis_relay_once(args.root, target_id=args.target_id)
     if args.as_json:
         print(json.dumps(results, ensure_ascii=False, indent=2, sort_keys=True))
     else:

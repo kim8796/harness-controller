@@ -45,7 +45,7 @@
 
 ## 운영 규칙
 
-- `v1.8.24` 기준 external controller 의 beginner 기본 실행은 `./harness run` autopilot 이다. default target 의 queued auto backlog 를 반복 처리하고, 성공한 항목은 기존 gate 로 implement, complete, commit, push preflight/apply 까지 묶어 닫는다. 단일 transaction 점검은 `./harness run --once` 를 사용한다.
+- `v1.8.25` 기준 external controller 의 beginner 기본 실행은 `./harness run` autopilot 이다. default target 의 queued auto backlog 를 반복 처리하고, 성공한 항목은 기존 gate 로 implement, complete, commit, push preflight/apply 까지 묶어 닫는다. 단일 transaction 점검은 `./harness run --once` 를 사용한다. Telegram/Redis relay drain 은 controller-owned Upstash adapter 를 쓰며 manual smoke 는 `--target-id <target>` 를 명시한다.
 - controller retention 은 product repo 를 지우지 않는다. smoke/temp sidecar 는 `./harness controller audit-size` 와 `./harness controller cleanup --dry-run|--apply` 로 delete-safe 후보만 다룬다.
 - `backlog/` 는 대기열이고 `runs/harness/` 는 실행 근거다. `CURRENT_STATE.md` 와 `RUNS_INDEX.md` 는 복구용 뷰다.
 - `docs/harness/GOALS.md` 는 backlog 보다 상위의 방향 문서다. 새 backlog, discovery proposal, plan 범위는 먼저 여기와 맞는지 본다.

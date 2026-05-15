@@ -143,6 +143,9 @@ def test_export_bundle_copies_sources_and_writes_readme(tmp_path: Path) -> None:
     assert (bundle_dir / "scripts" / "harness_profiles.py").read_text(encoding="utf-8") == (
         "scripts/harness_profiles.py\n"
     )
+    assert (bundle_dir / "scripts" / "harness_relay_store.py").read_text(encoding="utf-8") == (
+        "scripts/harness_relay_store.py\n"
+    )
     assert (bundle_dir / "scripts" / "harness_shared.py").read_text(encoding="utf-8") == (
         "scripts/harness_shared.py\n"
     )
@@ -237,6 +240,7 @@ def test_starter_bundle_excludes_live_state_and_can_create_project(tmp_path: Pat
     assert not (bundle / ".github" / "workflows" / "harness-controller-ci.yml").exists()
     assert not (bundle / "tests").exists()
     assert (bundle / "scripts" / "harness_autonomy" / "relay.py").exists()
+    assert (bundle / "scripts" / "harness_relay_store.py").exists()
     assert (bundle / "scripts" / "harness_starter_install.py").exists()
     bundle_readme = (bundle / "README.md").read_text(encoding="utf-8")
     assert "./harness new" in bundle_readme
@@ -292,6 +296,7 @@ def test_starter_bundle_excludes_live_state_and_can_create_project(tmp_path: Pat
     assert (created / "scripts" / "harness_cli.py").exists()
     assert not (created / ".github" / "workflows" / "harness-controller-ci.yml").exists()
     assert (created / "scripts" / "harness_autonomy" / "relay.py").exists()
+    assert (created / "scripts" / "harness_relay_store.py").exists()
     assert (created / ".env").exists()
     assert "runs/harness/*" not in (created / ".gitignore").read_text(encoding="utf-8")
     assert "HARNESS_RELAY_SIGNING_KEY=" not in create_result.stdout
@@ -360,11 +365,14 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "harness controller export" in workflow_text
     assert (bundle / "scripts" / "harness_controller.py").exists()
     assert (bundle / "scripts" / "harness_autonomy" / "relay.py").exists()
+    assert (bundle / "scripts" / "harness_relay_store.py").exists()
     assert (bundle / "tests" / "conftest.py").exists()
     assert (bundle / "tests" / "test_harness_autonomy.py").exists()
     assert (bundle / "tests" / "test_harness_cli.py").exists()
     assert (bundle / "tests" / "test_harness_controller.py").exists()
+    assert (bundle / "tests" / "test_harness_env.py").exists()
     assert (bundle / "tests" / "test_harness_export.py").exists()
+    assert (bundle / "tests" / "test_harness_relay_store.py").exists()
     assert (bundle / "tests" / "test_harness_telegram_bridge.py").exists()
     assert (bundle / "tests" / "test_redis_relay.py").exists()
     assert (bundle / "docs" / "harness" / "releases" / "v1.8.8.md").exists()

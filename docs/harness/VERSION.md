@@ -1,8 +1,16 @@
 # Harness Framework Version
 
-- Current Version: 1.8.24
-- Release Date: 2026-05-15
-- Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + routed Start Here docs + beginner install prompt + beginner help home + beginner `install/task/list/run/finish` controller UX + task interview + task packet status visibility + task scope normalization + controller release-check gate + advisory AI review artifacts + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + managed-latest/xhigh external implementation gate + backlog-bound product push gate + external controller autopilot run + controller smoke retention cleanup + controller release-history-preserving export + generated coverage artifact exclusion + on-demand export output.
+- Current Version: 1.8.25
+- Release Date: 2026-05-16
+- Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + routed Start Here docs + beginner install prompt + beginner help home + beginner `install/task/list/run/finish` controller UX + task interview + task packet status visibility + task scope normalization + controller release-check gate + advisory AI review artifacts + one-command starter CLI + optional global wrapper + secret-safe env provider checks + target-aware Telegram/Redis env readiness + controller-owned Upstash relay drain adapter + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + managed-latest/xhigh external implementation gate + backlog-bound product push gate + external controller autopilot run + controller smoke retention cleanup + controller release-history-preserving export + generated coverage artifact exclusion + on-demand export output.
+
+## What Changed In 1.8.25
+
+- Added a controller-owned Upstash relay store adapter so local Telegram/Redis drain no longer imports product or external app internals.
+- Added target-scoped manual relay drain support with `scripts/harness_telegram_bridge.py --drain-relay --target-id <target>`.
+- Fail-closed external controller relay drain now rejects unscoped state-changing relay queues instead of falling back to root inbox materialization when registered targets exist.
+- Surfaced `HARNESS_RELAY_TARGET_ID`, `HARNESS_RELAY_TARGET_IDS`, and `HARNESS_RELAY_TARGET_ALIASES` in secret-safe env readiness and dry-run registration plans.
+- Updated starter/controller export coverage so portable bundles include the relay store adapter and its focused tests.
 
 ## What Changed In 1.8.24
 

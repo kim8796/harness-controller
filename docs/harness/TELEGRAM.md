@@ -80,6 +80,7 @@ Manual-review dashboard, Cleanup Decision Packet, Operator Dashboard 본문은 T
 ```bash
 ./harness env check --provider upstash
 ./harness env check --provider vercel
+python3 scripts/harness_telegram_bridge.py --drain-relay --target-id my-app --json
 ./harness status
 ```
 

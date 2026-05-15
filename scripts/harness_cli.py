@@ -63,6 +63,7 @@ CONTROLLER_RELEASE_CHECK_RUFF_PATHS = (
     "scripts/harness_controller.py",
     "scripts/harness_env.py",
     "scripts/harness_export.py",
+    "scripts/harness_relay_store.py",
     "scripts/harness_starter_install.py",
     "scripts/harness_task_intake.py",
     "scripts/harness_telegram_bridge.py",
@@ -70,7 +71,9 @@ CONTROLLER_RELEASE_CHECK_RUFF_PATHS = (
     "tests/test_harness_autonomy.py",
     "tests/test_harness_cli.py",
     "tests/test_harness_controller.py",
+    "tests/test_harness_env.py",
     "tests/test_harness_export.py",
+    "tests/test_harness_relay_store.py",
     "tests/test_harness_task_intake.py",
     "tests/test_harness_telegram_bridge.py",
     "tests/test_redis_relay.py",
@@ -79,7 +82,9 @@ CONTROLLER_RELEASE_CHECK_PYTEST_PATHS = (
     "tests/test_harness_autonomy.py",
     "tests/test_harness_cli.py",
     "tests/test_harness_controller.py",
+    "tests/test_harness_env.py",
     "tests/test_harness_export.py",
+    "tests/test_harness_relay_store.py",
     "tests/test_harness_task_intake.py",
     "tests/test_harness_telegram_bridge.py",
     "tests/test_redis_relay.py",
@@ -2037,7 +2042,7 @@ def _env_command_root() -> Path:
 
 
 def _state_lists(entries: Sequence[Mapping[str, str]]) -> dict[str, list[str]]:
-    states = {"present": [], "missing": [], "weak": []}
+    states = {"present": [], "missing": [], "weak": [], "optional-missing": []}
     for entry in entries:
         state = str(entry.get("state") or "")
         key = str(entry.get("key") or "")
@@ -2058,6 +2063,8 @@ def _render_env_check_text(payload: Mapping[str, object]) -> None:
         print(f"- 누락: {', '.join(states['missing'])}")
     if states["weak"]:
         print(f"- 보강 필요: {', '.join(states['weak'])}")
+    if states["optional-missing"]:
+        print(f"- 선택 누락: {', '.join(states['optional-missing'])}")
     for index, action in enumerate(payload["next_actions_ko"], start=1):  # type: ignore[index]
         print(f"- 다음 조치 {index}: {action}")
 

@@ -10,5 +10,6 @@
 <!-- BEGIN AUTO -->
 | Run | 상태 | 갱신 시각 | 제목 |
 | --- | --- | --- | --- |
+| `20260516-controller-portable-relay-drain` | `completed` | `2026-05-16 00:00` | Controller-owned portable Redis relay drain |
 | `20260515-controller-autopilot-retention-loop` | `completed` | `2026-05-15 21:52` | Controller autopilot run and retention cleanup |
 <!-- END AUTO -->
