@@ -258,6 +258,9 @@ def test_starter_bundle_excludes_live_state_and_can_create_project(tmp_path: Pat
     assert source_title not in (bundle / "CLAUDE.md").read_text(encoding="utf-8")
     assert not (bundle / "runs" / "autonomy" / "control.json").exists()
     assert not (bundle / "runs" / "autonomy" / "telegram-sent.json").exists()
+    starter_gitignore = (bundle / ".gitignore").read_text(encoding="utf-8")
+    assert "targets/" in starter_gitignore
+    assert "runs/harness/*" not in starter_gitignore
     sanitization = module.build_starter_sanitization_report(bundle)
     assert sanitization["ok"] is True
     assert sanitization["blockers"] == []
@@ -290,6 +293,7 @@ def test_starter_bundle_excludes_live_state_and_can_create_project(tmp_path: Pat
     assert not (created / ".github" / "workflows" / "harness-controller-ci.yml").exists()
     assert (created / "scripts" / "harness_autonomy" / "relay.py").exists()
     assert (created / ".env").exists()
+    assert "runs/harness/*" not in (created / ".gitignore").read_text(encoding="utf-8")
     assert "HARNESS_RELAY_SIGNING_KEY=" not in create_result.stdout
     assert not (created / "runs" / "autonomy" / "control.json").exists()
     subprocess.run(
@@ -399,8 +403,8 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert no_arg_help.stdout == explicit_help.stdout
     assert "하네스 시작" in no_arg_help.stdout
     assert "./harness task list" in no_arg_help.stdout
-    assert "./harness task review <packet-id>" in no_arg_help.stdout
-    assert "./harness task queue <packet-id> --auto" in no_arg_help.stdout
+    assert "./harness controller audit-size" in no_arg_help.stdout
+    assert "./harness controller cleanup --dry-run" in no_arg_help.stdout
     assert not (bundle / "targets").exists()
     readme = (bundle / "README.md").read_text(encoding="utf-8")
     assert "Harness Controller Bundle" in readme
@@ -414,18 +418,19 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "./harness task review <packet-id> --ai" in readme
     assert "./harness task queue <packet-id> --auto" in readme
     assert "./harness task fix-scope <packet-id> --apply" in readme
-    assert "./harness finish" in readme
-    assert "`./harness run` 은 자동 실행 가능한 요청 1개" in readme
-    assert "`./harness finish` 는 실행 이후 남은 완료 처리와 커밋/푸시 단계" in readme
-    assert "finish 순서: `./harness finish --apply`" in readme
+    assert "./harness controller audit-size" in readme
+    assert "`./harness run` 은 기본 autopilot 루프" in readme
+    assert "완료 처리, product local commit, push gate" in readme
+    assert "`./harness finish` 는 복구/고급 명령" in readme
     assert "자동 원격 롤백은 없다" in readme
     assert "`./harness task` 는 요구사항 초안을 만든다" in readme
     assert "`./harness task fix-scope` 는 scope 문법 때문에 잘못 manual-review로 들어간" in readme
     assert "`./harness task review --ai` 는 AI가 읽기 좋은 검토용 파일만 만들며" in readme
-    assert "Bare `./harness run` maps to `target run @default --implement-backlog-once`" in readme
-    assert "Bare `./harness finish` maps to a read-only summary" in readme
+    assert "Bare `./harness run` is an autopilot wrapper" in readme
+    assert "Bare `./harness finish` maps to a recovery summary" in readme
     assert "finish --push --apply" in readme
     assert "./harness smoke implementation" in readme
+    assert "--keep" in readme
     assert "HARNESS_RELAY_TARGET_IDS=my-app" in readme
     assert "HARNESS_RELAY_TARGET_ALIASES=app=my-app" in readme
     assert "./harness target alias add my-app app" in readme
@@ -567,15 +572,15 @@ def test_exported_controller_beginner_flow_runs_from_bundle(tmp_path: Path) -> N
     assert (bundle / "targets" / "demo" / "backlog" / "drafts" / "task-demo" / "ai-review-prompt.md").exists()
     assert not tuple((bundle / "targets" / "demo" / "backlog" / "queued").glob("*.md"))
     no_backlog_run = subprocess.run(
-        [str(harness), "run"],
+        [str(harness), "run", "--once"],
         cwd=bundle,
         check=False,
         text=True,
         capture_output=True,
         env=_git_env(),
     )
-    assert no_backlog_run.returncode == 2
-    assert "실행 가능한 sidecar backlog" in no_backlog_run.stdout
+    assert no_backlog_run.returncode == 0
+    assert "queued auto backlog가 없습니다" in no_backlog_run.stdout
     subprocess.run(
         [str(harness), "task", "queue", "task-demo", "--auto"],
         cwd=bundle,

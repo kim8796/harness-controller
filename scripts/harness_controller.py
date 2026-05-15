@@ -75,6 +75,10 @@ HARNESS_MARKER_PREFIXES = (
     "reports/harness-autonomy/",
     "docs/harness/",
 )
+SECRET_LIKE_PRODUCT_PATH = re.compile(r"(?i)(api[_-]?key|credential|password|secret|signing[_-]?key|token)")
+SECRET_LIKE_PRODUCT_CONTENT = re.compile(
+    r"(?i)(api[_-]?key|credential|password|secret|signing[_-]?key|token)\s*[:=]\s*['\"]?[A-Za-z0-9_./+=-]{12,}"
+)
 SIDECAR_DIRS = (
     Path("reports"),
     Path("operator-inbox"),
@@ -1223,6 +1227,50 @@ def find_target_implementation_evidence(
     return _target_implementation_evidence_summary(record, state_paths, selected_run_id, evidence_path, payload)
 
 
+def pending_backlog_product_pushes(*, controller_root: Path, record: TargetRecord) -> list[dict[str, str]]:
+    """Return completed implementation runs with a local commit receipt but no push receipt."""
+
+    state_paths = record.state_paths(controller_root)
+    runs_root = state_paths.state_root / "runs" / "harness"
+    pending: list[dict[str, str]] = []
+    if not runs_root.exists():
+        return pending
+    push_run_ids: set[str] = set()
+    for push_evidence in sorted(runs_root.glob("external-*-backlog-push-*/generated-evidence.json")):
+        try:
+            push_payload = _read_json_file(push_evidence, label="backlog product push generated evidence")
+        except ControllerError:
+            continue
+        if (
+            str(push_payload.get("operation") or "") == "backlog-product-push"
+            and bool(push_payload.get("applied")) is True
+            and str(push_payload.get("target_id") or "") == record.target_id
+        ):
+            push_run_ids.add(str(push_payload.get("implementation_run_id") or ""))
+    for evidence_path in sorted(runs_root.glob("*/generated-evidence.json")):
+        if evidence_path.is_symlink() or not evidence_path.is_file():
+            continue
+        if not _path_is_relative_to(evidence_path.resolve(strict=False), state_paths.state_root.resolve()):
+            continue
+        try:
+            payload = _read_json_file(evidence_path, label="implementation generated evidence")
+        except ControllerError:
+            continue
+        run_id = evidence_path.parent.name
+        if run_id in push_run_ids or not _target_implementation_evidence_matches(record, state_paths, payload):
+            continue
+        summary = _target_implementation_evidence_summary(record, state_paths, run_id, evidence_path, payload)
+        if summary["backlog_status"] == "completed" and summary["matching_commit_receipt"]:
+            pending.append(
+                {
+                    "run_id": run_id,
+                    "backlog_id": str(summary["backlog_id"]),
+                    "backlog_title": str(summary["backlog_title"]),
+                }
+            )
+    return pending
+
+
 def _target_implementation_backlog_status(state_paths: StatePaths, backlog_id: str) -> str:
     if not backlog_id:
         return "unknown"
@@ -1316,6 +1364,7 @@ def _completed_transition_backlog_ref_from_evidence(
     expected_paths = [str(path) for path in evidence.get("product_diff_paths") or [] if str(path)]
     if not expected_paths:
         raise ControllerError("transition evidence has no product diff paths")
+    ensure_product_diff_policy(record.repo, expected_paths)
     current_status = target_git_status_lines(record.repo)
     current_paths = target_status_paths(current_status)
     if current_paths != expected_paths:
@@ -1387,6 +1436,7 @@ def _completed_backlog_item_for_push(record: TargetRecord, state_paths: StatePat
     if not before_head or before_head != after_head:
         raise ControllerError("push evidence must be based on an uncommitted implementation diff")
     expected_paths = _safe_product_diff_paths([str(path) for path in evidence.get("product_diff_paths") or [] if str(path)])
+    ensure_product_diff_policy(record.repo, expected_paths)
     expected_fingerprint = str(evidence.get("product_diff_fingerprint") or "").strip()
     if not expected_fingerprint:
         raise ControllerError("push evidence lacks product diff fingerprint; rerun implementation with current controller")
@@ -1661,6 +1711,35 @@ def _safe_product_diff_paths(paths: Sequence[str]) -> list[str]:
     if not cleaned:
         raise ControllerError("product diff paths are required")
     return cleaned
+
+
+def product_diff_policy_blockers(target_root: Path, paths: Sequence[str]) -> list[str]:
+    blockers: list[str] = []
+    for rel in _safe_product_diff_paths(paths):
+        normalized = rel.rstrip("/")
+        path = Path(normalized)
+        if _is_harness_marker_path(path) and "product-diff-harness-state" not in blockers:
+            blockers.append("product-diff-harness-state")
+        if path.parts and path.parts[0].startswith(".env") and "product-diff-env-file" not in blockers:
+            blockers.append("product-diff-env-file")
+        if SECRET_LIKE_PRODUCT_PATH.search(normalized) and "product-diff-secret-like-path" not in blockers:
+            blockers.append("product-diff-secret-like-path")
+        candidate = target_root / normalized
+        if candidate.is_file() and not candidate.is_symlink():
+            try:
+                if candidate.stat().st_size <= 1024 * 1024:
+                    content = candidate.read_text(encoding="utf-8", errors="ignore")
+                    if SECRET_LIKE_PRODUCT_CONTENT.search(content) and "product-diff-secret-like-content" not in blockers:
+                        blockers.append("product-diff-secret-like-content")
+            except OSError:
+                continue
+    return blockers
+
+
+def ensure_product_diff_policy(target_root: Path, paths: Sequence[str]) -> None:
+    blockers = product_diff_policy_blockers(target_root, paths)
+    if blockers:
+        raise ControllerError("target product diff violates autopilot policy: " + ", ".join(blockers))
 
 
 def product_diff_fingerprint(target_root: Path, paths: Sequence[str]) -> str:

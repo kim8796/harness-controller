@@ -1,8 +1,17 @@
 # Harness Framework Version
 
-- Current Version: 1.8.23
+- Current Version: 1.8.24
 - Release Date: 2026-05-15
-- Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + routed Start Here docs + beginner install prompt + beginner help home + beginner `install/task/list/run/finish` controller UX + task interview + task packet status visibility + task scope normalization + controller release-check gate + advisory AI review artifacts + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + managed-latest/xhigh external implementation gate + backlog-bound product push gate + controller release-history-preserving export + generated coverage artifact exclusion + on-demand export output.
+- Compatibility: Codex + Claude primary profile + AI-agnostic canonical contract + routed Start Here docs + beginner install prompt + beginner help home + beginner `install/task/list/run/finish` controller UX + task interview + task packet status visibility + task scope normalization + controller release-check gate + advisory AI review artifacts + one-command starter CLI + optional global wrapper + secret-safe env provider checks + thin adapters + root-canonical `main` checkout + repo-local recovery state + unattended CLI autonomy loop + adaptive lane timeout budgeting + canonical Telegram `/harness` owner instruction inbox + Operator Decision Packet v2 + cleanup debt visibility + successful-cycle commit/push/persistent-branch backup + external Doctor/launcher failure repair and publication boundary + manager scope contract + builder-owned manifest/evidence materialization + canonical `goal_state` + deterministic `state-apply` receipt proof + workspace-keyed control-plane cache + policy/state proposal visibility surfaces + guard/recovery/export discipline + append-only and restore-proof run evidence gates + harness LOC budget guard + managed-latest/xhigh external implementation gate + backlog-bound product push gate + external controller autopilot run + controller smoke retention cleanup + controller release-history-preserving export + generated coverage artifact exclusion + on-demand export output.
+
+## What Changed In 1.8.24
+
+- Changed bare `./harness run` into a long-running external controller autopilot loop.
+- Each successful backlog transaction now reuses the existing implementation, sidecar completion, product commit, and product push gates in order.
+- Kept `./harness run --once` as a one-transaction debug/smoke mode and stopped on first failure, dirty mismatch, product pollution, or push preflight blocker.
+- Added compact autopilot incident recording under `targets/<id>/state/incidents/` to stop blind repeated retries on the same signature.
+- Made `./harness smoke implementation` dispose of its smoke sidecar by default, with `--keep` for retained debugging.
+- Added `./harness controller audit-size` and `./harness controller cleanup --dry-run|--apply` for delete-safe controller-owned smoke/temp sidecars.
 
 ## What Changed In 1.8.23
 

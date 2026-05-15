@@ -158,6 +158,7 @@ ARCHIVE_POLICY_VERSION_V1 = "runs-harness-archive-v1"
 ARCHIVE_POLICY_VERSION_V2 = "runs-harness-archive-v2"
 ARCHIVE_POLICY_VERSIONS = frozenset({ARCHIVE_POLICY_VERSION_V1, ARCHIVE_POLICY_VERSION_V2})
 VERSION_PATTERN = re.compile(r"^-\s*Current Version:\s*(?P<version>[0-9]+\.[0-9]+\.[0-9]+)\s*$", re.MULTILINE)
+CONTROLLER_SOURCE_CHECKOUT_MARKER = Path(".codex/skills/harness-local/SKILL.md")
 AGENT_PATTERN = re.compile(r"^Agent:\s*(?P<agent>.+?)\s*$", re.MULTILINE)
 CHANGE_CLASS_PATTERN = re.compile(
     r"^(?P<indent>\s*)(?P<bullet>[-*]\s*)?Change-Class:\s*(?P<change_class>.+?)\s*$"
@@ -436,6 +437,10 @@ def _guess_related_tests(path: Path, root: Path) -> tuple[Path, ...]:
             Path("tests/test_harness_export.py"),
             Path("tests/test_harness_loop.py"),
         ),
+        "scripts/harness_starter_install.py": (
+            Path("tests/test_harness_cli.py"),
+            Path("tests/test_harness_export.py"),
+        ),
         "services/calendar_service.py": (
             Path("tests/test_calendar.py"),
             Path("tests/test_commands.py"),
@@ -500,6 +505,26 @@ def _is_canonical_lane_artifact(path: Path) -> bool:
 
 def _is_harness_run_file(path: Path) -> bool:
     return len(path.parts) >= 4 and path.parts[:2] == ("runs", "harness")
+
+
+def _is_controller_distribution_checkout(root: Path) -> bool:
+    if (root / CONTROLLER_SOURCE_CHECKOUT_MARKER).exists():
+        return False
+    agents_path = root / "AGENTS.md"
+    if not agents_path.exists():
+        return False
+    try:
+        return agents_path.read_text(encoding="utf-8", errors="replace").startswith("# Harness Controller Adapter")
+    except OSError:
+        return False
+
+
+def _is_controller_distribution_retention_delete(root: Path, path: Path) -> bool:
+    return (
+        _is_controller_distribution_checkout(root)
+        and _is_harness_run_file(path)
+        and path != Path("runs/harness/README.md")
+    )
 
 
 def _is_archive_manifest_file(path: Path) -> bool:
@@ -967,6 +992,31 @@ def _build_changed_artifact_index(
     return by_run_dir
 
 
+def _latest_local_harness_artifact_index(root: Path, *, mode: str) -> dict[Path, dict[str, Path]]:
+    runs_root = root / "runs" / "harness"
+    if not runs_root.exists():
+        return {}
+    required_files = _required_artifact_files(mode)
+    candidates: list[tuple[float, Path, dict[str, Path]]] = []
+    for run_dir in runs_root.iterdir():
+        if not run_dir.is_dir():
+            continue
+        relative_run_dir = Path("runs") / "harness" / run_dir.name
+        artifact_files = {
+            filename: relative_run_dir / filename
+            for filename in required_files
+            if (run_dir / filename).exists()
+        }
+        if not artifact_files:
+            continue
+        latest_mtime = max((run_dir / filename).stat().st_mtime for filename in artifact_files)
+        candidates.append((latest_mtime, relative_run_dir, artifact_files))
+    if not candidates:
+        return {}
+    _, run_dir, artifact_files = max(candidates, key=lambda item: (item[0], item[1].as_posix()))
+    return {run_dir: artifact_files}
+
+
 def _select_active_run_dir(
     artifacts_by_run_dir: dict[Path, dict[str, Path]],
     *,
@@ -1201,6 +1251,8 @@ def _collect_append_only_unit_violations(
     for entry in entries:
         if entry.status in {"M", "D"} and _is_harness_run_file(entry.path) and exists_before(entry.path):
             if entry.status == "D" and entry.path in archive_covered_deletes:
+                continue
+            if entry.status == "D" and _is_controller_distribution_retention_delete(root, entry.path):
                 continue
             run_id = _run_id_for_path(entry.path)
             run_dir = _run_dir_for_path(entry.path)
@@ -2001,12 +2053,21 @@ def build_report(
         if line_count > max_file_lines:
             oversized_files.append((rel_path, line_count))
 
+    local_entries = _discover_local_change_entries(root, staged_only=staged_only)
+    controller_distribution_retention_deletes = frozenset(
+        entry.path
+        for entry in local_entries
+        if entry.status == "D" and _is_controller_distribution_retention_delete(root, entry.path)
+    )
     changed_harness_artifacts = tuple(
         path
         for path in changed_paths
         if _is_harness_artifact(path) and not _is_archive_covered_delete(root, path, archive_covered_deletes)
+        and path not in controller_distribution_retention_deletes
     )
     artifacts_by_run_dir = _build_changed_artifact_index(changed_harness_artifacts)
+    if python_files and not artifacts_by_run_dir and _is_controller_distribution_checkout(root):
+        artifacts_by_run_dir = _latest_local_harness_artifact_index(root, mode=mode)
     selected_run_dir, changed_artifact_files = _select_active_run_dir(
         artifacts_by_run_dir,
         root=root,

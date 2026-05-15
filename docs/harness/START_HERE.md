@@ -2,7 +2,7 @@
 
 하네스를 처음 쓰는 사람이 보는 입구 문서다. 이 파일은 짧게 유지하고, 자세한 운영/설정/문제 해결은 아래 문서로 연결한다.
 
-현재 기준은 `v1.8.23` 이다. 전체 변경 이력은 [VERSION.md](VERSION.md), export 계약은 [FRAMEWORK_EXPORT.md](FRAMEWORK_EXPORT.md), starter 파일 구조는 [STARTER_SCAFFOLD.md](STARTER_SCAFFOLD.md)를 본다.
+현재 기준은 `v1.8.24` 이다. 전체 변경 이력은 [VERSION.md](VERSION.md), export 계약은 [FRAMEWORK_EXPORT.md](FRAMEWORK_EXPORT.md), starter 파일 구조는 [STARTER_SCAFFOLD.md](STARTER_SCAFFOLD.md)를 본다.
 
 ## 어디부터 보면 되나
 
@@ -32,11 +32,7 @@ cd harness-controller
 ```bash
 ./harness install /path/to/my-app --id my-app --branch main --default
 ./harness task
-./harness task list
-./harness task review <packet-id>
-./harness task queue <packet-id> --auto
 ./harness run
-./harness finish
 ```
 
 이 흐름에서 product repo에는 `HARNESS.md`, `harness`, `scripts/harness*`, `runs/**`, `reports/**`, `backlog/**`, `targets/**`, `.env*`를 쓰지 않는다. 하네스 상태와 실행 증거는 controller의 `targets/<id>/` 아래에 남는다.
@@ -64,7 +60,7 @@ cd /path/to/harness-controller
 
 출력된 `request.md`는 외부 에디터로 자유롭게 수정해도 된다. 이미지 참고가 필요하면 `./harness task from <file> --image <path>`를 쓴다. 자세한 방식은 [TASK_INTAKE.md](TASK_INTAKE.md)에 있다.
 
-4. 검토하고 실행 가능한 backlog로 넣는다.
+4. 필요하면 검토하고 실행 가능한 backlog로 넣는다.
 
 ```bash
 ./harness task list
@@ -80,27 +76,36 @@ cd /path/to/harness-controller
 
 모호한 broad glob, `.env*` File Scope, secret path, 수동 smoke가 필요한 작업은 `manual-review`로 남기는 것이 정상이다.
 
-5. 한 작업을 실행한다.
+5. autopilot을 실행한다.
 
 ```bash
 ./harness run
 ```
 
-기본 실행은 selected backlog 하나를 구현 lane에 넘기고 local product diff만 만든다. backlog 완료, product commit, remote push는 자동으로 하지 않는다.
+기본 실행은 queued auto backlog를 계속 처리한다. 각 backlog가 성공하면 `implement → complete → product commit → push gate` 순서로 닫는다. remote/upstream/branch/dirty/remote drift preflight가 맞지 않으면 commit까지만 끝내고 멈춘다.
 
-6. 결과를 마무리한다.
+6. 복구가 필요할 때만 finish를 쓴다.
 
 ```bash
 ./harness finish
 ```
 
-`finish`는 기본적으로 읽기 전용이다. 실제 적용은 다음처럼 명시한다.
+`finish`는 autopilot이 중간에서 멈춘 구현 기록을 수동으로 닫는 복구/고급 명령이다. 실제 적용은 다음처럼 명시한다.
 
 ```bash
 ./harness finish --apply
 ./harness finish --commit --message "feat: ..." --apply
 ./harness finish --push --apply
 ```
+
+컨트롤러에 smoke/temp target이 쌓였는지는 다음으로 본다.
+
+```bash
+./harness controller audit-size
+./harness controller cleanup --dry-run
+```
+
+cleanup apply는 controller-owned delete-safe smoke/temp sidecar만 지우며 product repo 파일은 지우지 않는다.
 
 ## 자주 쓰는 명령
 
@@ -109,7 +114,7 @@ cd /path/to/harness-controller
 ./harness dashboard
 ./harness task list
 ./harness run
-./harness finish
+./harness controller audit-size
 ```
 
 고급 명령은 [OPERATOR_GUIDE.md](OPERATOR_GUIDE.md)에 정리돼 있다. `./harness --help`는 raw argparse reference이고, bare `./harness`와 `./harness help`는 한국어 beginner home이다.

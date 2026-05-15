@@ -115,4 +115,4 @@ scope 문법만 문제였던 요청을 이미 manual-review로 queue했다면 �
 
 draft는 source of truth가 아니다. 실제 실행 단위는 `task queue`가 만든 canonical sidecar backlog markdown이다.
 
-실행 후 결과를 닫을 때는 [OPERATOR_GUIDE.md](OPERATOR_GUIDE.md)의 `finish` 흐름을 따른다.
+실행은 `./harness run` autopilot이 담당한다. 성공 transaction은 완료 처리, product commit, push gate까지 기존 gate로 닫는다. 중간에서 멈춘 구현 기록을 수동으로 복구할 때만 [OPERATOR_GUIDE.md](OPERATOR_GUIDE.md)의 `finish` 흐름을 따른다.

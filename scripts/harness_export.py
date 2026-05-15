@@ -123,6 +123,7 @@ GENERATED_EXPORT_TEMPLATE_PATHS = (
 )
 STARTER_TEMPLATE_OVERRIDE_PATHS = frozenset(
     {
+        Path(".gitignore"),
         Path("AGENTS.md"),
         Path("CLAUDE.md"),
         Path("docs/harness/GOALS.md"),
@@ -540,6 +541,7 @@ def starter_goals_template() -> str:
 
 def build_starter_generated_templates(version: str) -> dict[Path, str]:
     templates = dict(build_generated_export_templates(version))
+    templates[Path(".gitignore")] = starter_gitignore_template()
     templates[Path("AGENTS.md")] = starter_agents_template()
     templates[Path("CLAUDE.md")] = starter_claude_template()
     templates[Path("docs/harness/GOALS.md")] = starter_goals_template()
@@ -724,6 +726,51 @@ def starter_claude_template() -> str:
 
 For operational details, use [HARNESS.md](HARNESS.md).
 """
+
+
+def starter_gitignore_template() -> str:
+    return dedent(
+        """\
+        .env
+        .env.*
+        !.env.example
+        .venv/
+        node_modules/
+        __pycache__/
+        .pytest_cache/
+        .mypy_cache/
+        .coverage
+        *.py[cod]
+        .DS_Store
+        .vercel
+        .harness-autonomy.lock
+        .harness-autonomy-runtime.json
+        .worktrees/
+        reports/harness-autonomy/*
+        !reports/harness-autonomy/README.md
+        !reports/harness-autonomy/*/
+        reports/harness-autonomy/*/*
+        !reports/harness-autonomy/*/report.md
+        runs/autonomy/inbox/*
+        !runs/autonomy/inbox/README.md
+        runs/autonomy/outbox/*
+        !runs/autonomy/outbox/README.md
+        runs/autonomy/telegram-sent.json
+        runs/autonomy/telegram-bridge-state.json
+        runs/autonomy/doctor.lock
+        runs/autonomy/control.json
+        runs/autonomy/control-plane-state.json
+        runs/autonomy/policy-state.json
+        runs/autonomy/state-proposal-state.json
+        runs/miniapp-telemetry/*
+        !runs/miniapp-telemetry/README.md
+        exports/harness/*
+        !exports/harness/README.md
+        targets/
+        scripts/gptsovits/modal/bundles/
+        scripts/gptsovits/modal/dist/
+        """
+    )
 
 
 def read_current_version(root: Path) -> str:
@@ -1007,7 +1054,7 @@ def export_controller_bundle(root: Path, output_dir: Path, version: str | None =
                 "./harness controller release-check --run-lint --run-pytest",
                 "./harness install /path/to/product-repo --id my-app --branch main --default",
                 "./harness task",
-                "# 프롬프트에 답하거나 출력된 request.md 를 수정한 뒤:",
+                "# 프롬프트에 답하거나 출력된 request.md 를 수정한 뒤 필요한 경우:",
                 "./harness task list",
                 "./harness task review <packet-id>",
                 "# 선택: AI에게 물어볼 prompt/schema artifact 생성",
@@ -1016,7 +1063,8 @@ def export_controller_bundle(root: Path, output_dir: Path, version: str | None =
                 "# 이미 manual-review로 queue했지만 scope 보정 가능할 때:",
                 "./harness task fix-scope <packet-id> --apply",
                 "./harness run",
-                "./harness finish",
+                "./harness controller audit-size",
+                "./harness controller cleanup --dry-run",
                 "```",
                 "",
                 "초보자 경로:",
@@ -1031,19 +1079,21 @@ def export_controller_bundle(root: Path, output_dir: Path, version: str | None =
                 "- `./harness task review --ai` 는 AI가 읽기 좋은 검토용 파일만 만들며, 자동 실행 여부를 혼자 결정하지 않는다.",
                 "- `./harness task queue` 는 검증된 작업만 실행 대기열에 넣고, 불명확한 작업은 사람 확인이 필요한 상태로 둔다.",
                 "- `./harness task fix-scope` 는 scope 문법 때문에 잘못 manual-review로 들어간 queued task를 controller sidecar 안에서만 auto로 복구한다.",
-                "- `./harness run` 은 자동 실행 가능한 요청 1개를 구현해 제품 파일 변경만 남긴다. 완료 처리와 커밋/푸시는 자동이 아니다.",
-                "- `./harness finish` 는 실행 이후 남은 완료 처리와 커밋/푸시 단계를 짧게 보여준다. 실제 변경은 `--apply` 가 있을 때만 수행한다.",
-                "- finish 순서: `./harness finish --apply` 로 작업 상태를 완료 처리하고, `./harness finish --commit --message \"feat: ...\" --apply` 로 로컬 커밋을 만든 뒤, 필요할 때만 `./harness finish --push --apply` 로 원격 저장소를 갱신한다.",
+                "- `./harness run` 은 기본 autopilot 루프다. queued auto 요청을 반복 처리하고, 성공하면 완료 처리, product local commit, push gate까지 순서대로 시도한다.",
+                "- push는 기본 transaction에 포함되지만 upstream/remote/branch/dirty/remote drift preflight가 맞지 않으면 commit까지만 끝내고 멈춘다.",
+                "- `./harness run --once` 는 한 backlog transaction만 처리하고 종료하는 debug/smoke 모드다.",
+                "- `./harness finish` 는 복구/고급 명령이다. autopilot이 중간에서 멈춘 구현 기록을 수동으로 완료/커밋/푸시할 때 쓴다.",
                 "- 푸시는 배포나 외부 자동화를 트리거할 수 있고 자동 원격 롤백은 없다.",
-                "- `./harness smoke implementation` 은 임시 제품 저장소로 구현 경로가 정상인지 검증한다.",
+                "- `./harness smoke implementation` 은 임시 제품 저장소로 구현 경로가 정상인지 검증하고 기본적으로 smoke sidecar를 정리한다. 남기려면 `--keep`을 붙인다.",
+                "- `./harness controller audit-size` 와 `./harness controller cleanup --dry-run|--apply` 는 controller-owned smoke/temp sidecar 정리 후보만 다룬다. product repo 파일은 지우지 않는다.",
                 "",
                 "Advanced mapping:",
                 "",
                 "- `./harness target add my-app --repo /path/to/product-repo --branch main` is the lower-level form behind `install`.",
                 "- `./harness target alias add my-app app` and `./harness target set-default my-app` are available when operators need shorter selectors.",
                 "- `./harness target verify my-app`, `./harness target dashboard my-app`, and `./harness target run my-app --once` remain the explicit inspection/smoke commands.",
-                "- Bare `./harness run` maps to `target run @default --implement-backlog-once`.",
-                "- Bare `./harness finish` maps to a read-only summary over the latest implementation evidence. `finish --apply`, `finish --commit --message ... --apply`, and `finish --push --apply` delegate to the existing dry-run-first target backlog gates.",
+                "- Bare `./harness run` is an autopilot wrapper over `target run @default --implement-backlog-once`, `target backlog transition`, `target backlog commit`, and `target backlog push`.",
+                "- Bare `./harness finish` maps to a recovery summary over the latest implementation evidence. `finish --apply`, `finish --commit --message ... --apply`, and `finish --push --apply` delegate to the same target backlog gates used by autopilot.",
                 "",
                 "Telegram/Redis owner commands are target-scoped in external mode:",
                 "",

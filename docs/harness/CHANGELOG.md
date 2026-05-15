@@ -1,5 +1,13 @@
 # Harness Changelog
 
+## 1.8.24 - 2026-05-15
+
+- Changed bare `./harness run` into the default external-controller autopilot loop.
+- Reused the existing implementation, sidecar completion, product commit, and product push gates instead of adding a new runner or ledger.
+- Kept `run --once` as a single-backlog transaction mode and stopped on first failure or push preflight blocker.
+- Added compact incident signatures for repeated autopilot failures.
+- Made implementation smoke sidecars disposable by default and added controller `audit-size` / `cleanup` for delete-safe smoke/temp targets.
+
 ## 1.8.23 - 2026-05-15
 
 - Normalized safe beginner config scope aliases during `task review` without broadening the canonical backlog parser.

@@ -3,14 +3,17 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import io
 import json
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -41,6 +44,7 @@ UNSAFE_GLOBAL_SHIM_DIRS = (
     Path("/opt/homebrew/bin"),
 )
 FINISH_PUSH_CAUTION_KO = "remote push는 배포나 외부 자동화를 트리거할 수 있고 자동 remote rollback은 없습니다."
+AUTOPILOT_INCIDENT_THRESHOLD = 2
 CONTROLLER_RELEASE_CHECK_RUFF_PATHS = (
     "scripts/harness_autonomy.py",
     "scripts/harness_autonomy/core.py",
@@ -97,26 +101,39 @@ class FinishEvidence:
     matching_commit_receipt: bool
 
 
+@dataclass(frozen=True)
+class AutopilotTransaction:
+    status: str
+    run_id: str
+    backlog_id: str
+    commit_sha: str
+    push_sha: str
+    message: str
+
+
+@dataclass(frozen=True)
+class SmokeCleanupCandidate:
+    target_id: str
+    path: Path
+    repo: Path
+    size_bytes: int
+    delete_safe: bool
+    reason: str
+
+
 BEGINNER_HELP_TEXT = """하네스 시작
 
 5분 경로:
 1. ./harness install /path/to/product --id my-app --default
 2. ./harness task
-3. ./harness task list
-4. ./harness task review <packet-id>
-5. ./harness task queue <packet-id> --auto
-6. ./harness run
-7. ./harness finish
+3. ./harness run
 
 무엇을 하는지:
 - install: 제품 저장소를 하네스 관리 대상으로 등록합니다. 제품 저장소에는 하네스 파일을 쓰지 않습니다.
   터미널에서 ./harness install만 입력하면 경로와 이름을 물어봅니다.
 - task: 요구사항 초안을 만듭니다. 출력된 request.md는 외부 에디터로 수정해도 됩니다.
-- task list: 여러 요청의 검토/대기열 상태와 다음 명령을 보여줍니다.
-- task review: 실행 전에 요구사항을 점검하고 작업 미리보기를 만듭니다. 아직 실행 대기열에 넣지 않습니다.
-- task queue: 검증된 작업만 실행 대기열에 넣습니다. 불명확하면 사람 확인이 필요한 상태로 둡니다.
-- run: 자동 실행 가능한 요청 1개를 구현해 제품 파일 변경만 남깁니다. 완료 처리와 커밋/푸시는 자동이 아닙니다.
-- finish: 남은 완료 처리와 커밋/푸시 단계를 보여줍니다. 실제 변경은 --apply가 있을 때만 수행합니다.
+- run: 자동 실행 가능한 요청을 계속 처리합니다. 성공하면 완료 처리, product commit, push gate까지 시도합니다.
+- finish: 복구/고급 명령입니다. 자동 루프가 멈춘 구현 기록을 수동으로 닫을 때 씁니다.
 
 자주 쓰는 확인:
 - ./harness status
@@ -124,6 +141,8 @@ BEGINNER_HELP_TEXT = """하네스 시작
 - ./harness task list
 - ./harness verify --loop-ready
 - ./harness smoke implementation
+- ./harness controller audit-size
+- ./harness controller cleanup --dry-run
 
 고급 명령:
 - ./harness --help
@@ -1275,6 +1294,184 @@ def _task_next_command(record: harness_controller.TargetRecord, summary: harness
     return "사람 확인 항목입니다. request.md를 보강한 뒤 다시 review/queue 하세요."
 
 
+def _target_next_auto_backlog_item(record: harness_controller.TargetRecord) -> object | None:
+    try:
+        return _select_executable_backlog_plan(record.state_paths(repo_root()))
+    except harness_controller.ControllerError as exc:
+        if str(exc) == "no executable sidecar backlog found":
+            return None
+        raise
+
+
+def _target_evidence_paths(record: harness_controller.TargetRecord) -> set[Path]:
+    root = record.state_root / "runs" / "harness"
+    if not root.exists():
+        return set()
+    return {path for path in root.glob("*/generated-evidence.json") if path.is_file() and not path.is_symlink()}
+
+
+def _autopilot_commit_message(backlog_id: str, backlog_title: str) -> str:
+    title = re.sub(r"\s+", " ", str(backlog_title or "").strip())
+    if not title or title == "새 작업 요청":
+        return f"feat: complete {backlog_id}"
+    title = re.sub(r"[^0-9A-Za-z가-힣 _./:-]+", "", title).strip(" .:-")
+    return f"feat: {title[:72] or backlog_id}"
+
+
+def _autopilot_incident_signature(stage: str, error: BaseException | str) -> str:
+    text = str(error)
+    normalized = re.sub(r"`[^`]+`", "`<value>`", text)
+    normalized = re.sub(r"/(?:private|Users|tmp|var)/\S+", "<path>", normalized)
+    normalized = re.sub(r"\b[0-9a-f]{7,40}\b", "<sha>", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\d{8}-\d{6}|\d{4}-\d{2}-\d{2}T\S+", "<time>", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip().lower()[:240]
+    payload = json.dumps({"stage": stage, "error": normalized}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _record_autopilot_incident(
+    *,
+    record: harness_controller.TargetRecord,
+    stage: str,
+    error: BaseException | str,
+    backlog_id: str = "",
+    run_id: str = "",
+) -> Mapping[str, object]:
+    signature = _autopilot_incident_signature(stage, error)
+    incidents_dir = record.state_root / "state" / "incidents"
+    incidents_dir.mkdir(parents=True, exist_ok=True)
+    incident_path = incidents_dir / f"{signature}.json"
+    now = datetime.now().isoformat(timespec="seconds")
+    payload: dict[str, object] = {}
+    if incident_path.exists() and not incident_path.is_symlink():
+        try:
+            payload = json.loads(incident_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            payload = {}
+    count = int(payload.get("count") or 0) + 1
+    updated = {
+        "schema_version": 1,
+        "target_id": record.target_id,
+        "signature": signature,
+        "stage": stage,
+        "count": count,
+        "first_seen": str(payload.get("first_seen") or now),
+        "last_seen": now,
+        "last_error": sanitize_for_outbox(str(error))[:500],
+        "backlog_id": backlog_id,
+        "run_id": run_id,
+        "retention_class": "incident",
+        "artifact_owner": "autopilot",
+        "purpose": "compact repeated failure tracking",
+        "cleanup_path": "resolved incident keeps summary; bulky evidence becomes cleanup candidate",
+        "source_of_truth": False,
+    }
+    incident_path.write_text(json.dumps(updated, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return updated
+
+
+def _target_open_incident_blocker(
+    record: harness_controller.TargetRecord,
+    backlog_id: str,
+) -> Mapping[str, object] | None:
+    incidents_dir = record.state_root / "state" / "incidents"
+    if not incidents_dir.exists():
+        return None
+    for path in sorted(incidents_dir.glob("*.json")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if payload.get("resolved_at"):
+            continue
+        if str(payload.get("backlog_id") or "") != backlog_id:
+            continue
+        if int(payload.get("count") or 0) >= AUTOPILOT_INCIDENT_THRESHOLD:
+            return payload
+    return None
+
+
+def _run_autopilot_transaction(record: harness_controller.TargetRecord, args: argparse.Namespace) -> AutopilotTransaction:
+    before_evidence = _target_evidence_paths(record)
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        rc = command_target_run(
+            argparse.Namespace(
+                target=record.target_id,
+                once=False,
+                plan_once=False,
+                execute_once=False,
+                execute_backlog_once=False,
+                implement_backlog_once=True,
+                runner=args.runner,
+                runner_model=args.runner_model,
+                runner_reasoning_effort=args.runner_reasoning_effort,
+                command_template=args.command_template,
+                commit=False,
+                push=False,
+            )
+        )
+    implementation_output = buffer.getvalue().strip()
+    if rc != 0:
+        if implementation_output:
+            print(implementation_output)
+        raise HarnessCliError("AI 구현 lane이 실패했습니다.")
+    new_evidence = sorted(_target_evidence_paths(record) - before_evidence)
+    if len(new_evidence) != 1:
+        if implementation_output:
+            print(implementation_output)
+        raise HarnessCliError("구현 run id를 정확히 특정하지 못했습니다.")
+    run_id = new_evidence[0].parent.name
+    summary = harness_controller.find_target_implementation_evidence(
+        controller_root=repo_root(),
+        record=record,
+        run_id=run_id,
+    )
+    backlog_id = str(summary.get("backlog_id") or "")
+    backlog_title = str(summary.get("backlog_title") or "")
+    print(f"- 구현 완료: `{run_id}`")
+    print(f"- 작업 항목: `{backlog_id}`" + (f" - {backlog_title}" if backlog_title else ""))
+
+    transition = harness_controller.transition_sidecar_backlog(
+        controller_root=repo_root(),
+        record=record,
+        status="completed",
+        reason="autopilot implementation accepted",
+        run_id=run_id,
+        apply=True,
+    )
+    print(f"- 완료 처리: `{transition['target_path']}`")
+
+    message = _autopilot_commit_message(backlog_id, backlog_title)
+    commit = harness_controller.commit_sidecar_backlog_product_diff(
+        controller_root=repo_root(),
+        record=record,
+        run_id=run_id,
+        message=message,
+        apply=True,
+    )
+    commit_sha = str(commit.get("product_commit_sha") or "")
+    print(f"- product commit: `{commit_sha}`")
+
+    try:
+        push = harness_controller.push_sidecar_backlog_product_commit(
+            controller_root=repo_root(),
+            record=record,
+            run_id=run_id,
+            apply=True,
+        )
+    except harness_controller.ControllerError as exc:
+        print("- product push: 보류")
+        print(f"- 멈춘 이유: {exc}")
+        print("다음 조치: product repo remote/upstream을 확인한 뒤 `./harness finish --push --apply`")
+        return AutopilotTransaction("push-blocked", run_id, backlog_id, commit_sha, "", str(exc))
+    push_sha = str(push.get("product_push_sha") or "")
+    print(f"- product push: `{push_sha}`")
+    return AutopilotTransaction("pushed", run_id, backlog_id, commit_sha, push_sha, "completed")
+
+
 def _task_summary_json(
     record: harness_controller.TargetRecord,
     summary: harness_task_intake.TaskPacketSummary,
@@ -1378,24 +1575,6 @@ def command_task_list(args: argparse.Namespace) -> int:
 
 
 def command_run(args: argparse.Namespace) -> int:
-    try:
-        if args.once:
-            target_root = harness_starter_install._git_toplevel(Path.cwd())
-            payload = _build_verify_payload(target_root, loop_ready=True)
-            if not payload["ok"]:
-                _render_verify_text(payload, loop_ready=True)
-                print("run --once 중단: 위 blocker를 먼저 해결해야 합니다.")
-                return 2
-            extra = list(args.extra)
-            if extra[:1] == ["--"]:
-                extra = extra[1:]
-            return _run_existing_script(
-                "harness_autonomy.py",
-                ["run-once", "--mode", "auto", "--runner", "codex", "--runner-model", "auto", "--git-backup", "off", *extra],
-            )
-    except harness_starter_install.InstallerError as exc:
-        print(f"error: {exc}")
-        return 2
     if args.extra:
         print("error: `./harness run` beginner path does not accept extra arguments.")
         print("고급 실행: `./harness target run @default --implement-backlog-once ...`")
@@ -1409,28 +1588,73 @@ def command_run(args: argparse.Namespace) -> int:
         print("run 중단: 기본 대상이 없습니다.")
         print("다음 명령: `./harness install /path/to/product --id my-app --branch main --default`")
         return 2
-    print("하네스 beginner run 시작")
+    max_cycles = 1 if args.once else max(0, int(args.max_cycles or 0))
+    idle_seconds = max(0, int(args.idle_seconds or 0))
+    processed = 0
+    print("하네스 autopilot run 시작")
     print(f"- 대상: `{record.target_id}`")
-    print("- 실행: queued auto backlog 1개를 AI 구현 lane에 넘깁니다.")
+    print("- 실행: queued auto backlog를 반복 처리합니다.")
     print("- 모델: Codex managed latest/default, reasoning=xhigh")
-    print("- 제품 변경: local diff only")
-    print("- backlog 완료/commit/push: 자동 수행 안 함")
-    return command_target_run(
-        argparse.Namespace(
-            target="@default",
-            once=False,
-            plan_once=False,
-            execute_once=False,
-            execute_backlog_once=False,
-            implement_backlog_once=True,
-            runner="codex",
-            runner_model=None,
-            runner_reasoning_effort="xhigh",
-            command_template=None,
-            commit=False,
-            push=False,
-        )
-    )
+    print("- 처리: implement -> complete -> commit -> push gate")
+    print(f"- push 주의: {FINISH_PUSH_CAUTION_KO}")
+    while True:
+        try:
+            pending_pushes = harness_controller.pending_backlog_product_pushes(
+                controller_root=repo_root(),
+                record=record,
+            )
+            if pending_pushes:
+                latest = pending_pushes[-1]
+                print("run 중단: 이전 transaction의 product push가 아직 닫히지 않았습니다.")
+                print(f"- 구현 기록: `{latest['run_id']}`")
+                print(f"- 작업 항목: `{latest['backlog_id']}`")
+                print("- 다음 명령: `./harness finish --push --apply`")
+                return 2
+            item = _target_next_auto_backlog_item(record)
+        except (harness_loop.LoopError, harness_controller.ControllerError) as exc:
+            incident = _record_autopilot_incident(record=record, stage="discover", error=exc)
+            print(f"run 중단: backlog 상태를 읽지 못했습니다. {exc}")
+            print(f"- incident: `{incident['signature']}` count={incident['count']}")
+            return 2
+        if item is None:
+            print("대기: queued auto backlog가 없습니다.")
+            print("다음 작업을 넣으려면 `./harness task`를 사용하세요.")
+            if args.once or max_cycles:
+                return 0
+            time.sleep(idle_seconds)
+            continue
+        backlog_id = str(getattr(item, "item_id", ""))
+        print(f"transaction 시작: `{backlog_id}`")
+        incident_blocker = _target_open_incident_blocker(record, backlog_id)
+        if incident_blocker:
+            print("run 중단: 같은 작업의 반복 실패가 threshold에 도달했습니다.")
+            print(f"- incident: `{incident_blocker['signature']}` count={incident_blocker['count']}")
+            print("- 다음 조치: controller maintenance로 원인 수정 후 incident를 해결 처리하세요.")
+            return 2
+        try:
+            outcome = _run_autopilot_transaction(record, args)
+        except (HarnessCliError, harness_controller.ControllerError, harness_loop.LoopError) as exc:
+            incident = _record_autopilot_incident(record=record, stage="transaction", error=exc, backlog_id=backlog_id)
+            print(f"run 중단: {exc}")
+            print(f"- incident: `{incident['signature']}` count={incident['count']}")
+            if int(incident["count"]) >= AUTOPILOT_INCIDENT_THRESHOLD:
+                print("- 반복 실패: 같은 문제를 다시 시도하지 않습니다. controller maintenance가 필요합니다.")
+            return 2
+        processed += 1
+        if outcome.status == "push-blocked":
+            _record_autopilot_incident(
+                record=record,
+                stage="push",
+                error=outcome.message,
+                backlog_id=outcome.backlog_id,
+                run_id=outcome.run_id,
+            )
+            print("run 일시정지: commit은 완료됐지만 push gate가 막혔습니다.")
+            return 2
+        print(f"transaction 완료: `{outcome.backlog_id}`")
+        if args.once or (max_cycles and processed >= max_cycles):
+            print(f"run 종료: 처리한 backlog {processed}개")
+            return 0
 
 
 def _find_finish_evidence(record: harness_controller.TargetRecord, run_id: str | None) -> FinishEvidence:
@@ -1609,6 +1833,7 @@ def command_smoke_implementation(args: argparse.Namespace) -> int:
     target_id = f"smoke-{datetime.now().strftime('%H%M%S')}"
     temp_root = Path(tempfile.mkdtemp(prefix="harness-implementation-smoke-"))
     product = temp_root / "product"
+    record: harness_controller.TargetRecord | None = None
     try:
         _init_smoke_product(product)
         record = harness_controller.add_target(
@@ -1618,7 +1843,7 @@ def command_smoke_implementation(args: argparse.Namespace) -> int:
             branch="main",
             controller_version=_controller_version(),
             profile=harness_profiles.PROFILE_MINIMAL,
-            display_name="Implementation Smoke",
+            display_name="Implementation Smoke Kept" if args.keep else "Implementation Smoke Ephemeral",
         )
         request = temp_root / "request.md"
         request.write_text(
@@ -1672,8 +1897,8 @@ def command_smoke_implementation(args: argparse.Namespace) -> int:
         print(f"- 임시 제품 저장소: `{product.as_posix()}`")
         print(f"- 임시 대상: `{record.target_id}`")
         print(f"- queued backlog: `{queued.backlog_path.as_posix()}`")
-        print("- 자동 cleanup/destructive git 명령은 실행하지 않습니다.")
-        return command_target_run(
+        print("- smoke sidecar: " + ("보존" if args.keep else "실행 후 자동 정리"))
+        return_code = command_target_run(
             argparse.Namespace(
                 target=record.target_id,
                 once=False,
@@ -1689,11 +1914,19 @@ def command_smoke_implementation(args: argparse.Namespace) -> int:
                 push=False,
             )
         )
+        return return_code
     except (HarnessCliError, harness_controller.ControllerError, harness_task_intake.TaskIntakeError) as exc:
         print(f"error: {exc}")
         if temp_root.exists():
             print(f"- 임시 경로: `{temp_root.as_posix()}`")
         return 2
+    finally:
+        if record is not None and not args.keep:
+            state_root = record.state_root.resolve()
+            expected_parent = (root / "targets").resolve()
+            if state_root.parent == expected_parent and state_root.name.startswith("smoke") and state_root.exists():
+                shutil.rmtree(state_root)
+                print(f"- smoke sidecar 정리: `{state_root.as_posix()}`")
 
 
 def command_export(args: argparse.Namespace) -> int:
@@ -1941,6 +2174,236 @@ def command_controller_doctor(args: argparse.Namespace) -> int:
         print("- Telegram/Redis secret 위치: controller env only")
         print("다음 명령: `./harness target add <id> --repo /path/to/product-repo --branch main`")
     return 0 if not missing and targets_ignored else 2
+
+
+def _directory_size_bytes(path: Path) -> int:
+    if not path.exists() or path.is_symlink():
+        return 0
+    total = 0
+    for child in path.rglob("*"):
+        if child.is_symlink():
+            continue
+        try:
+            if child.is_file():
+                total += child.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _target_subdir_size(record: harness_controller.TargetRecord, name: str) -> int:
+    return _directory_size_bytes(record.state_root / name)
+
+
+def _repo_is_temp_or_gone(path: Path) -> bool:
+    resolved = path.resolve(strict=False)
+    temp_roots = {
+        Path(tempfile.gettempdir()).resolve(strict=False),
+        Path("/tmp").resolve(strict=False),
+        Path("/private/tmp").resolve(strict=False),
+        Path("/var/folders").resolve(strict=False),
+        Path("/private/var/folders").resolve(strict=False),
+    }
+    if not resolved.exists():
+        return True
+    return any(resolved == root or _path_is_relative_to(resolved, root) for root in temp_roots)
+
+
+def _smoke_cleanup_candidates(root: Path) -> list[SmokeCleanupCandidate]:
+    targets_root = (root / "targets").resolve(strict=False)
+    candidates: list[SmokeCleanupCandidate] = []
+    for record in harness_controller.list_targets(root):
+        is_smoke = record.target_id == "smoke" or record.target_id.startswith("smoke-")
+        raw_state_root = record.state_root
+        state_root = record.state_root.resolve(strict=False)
+        reason = "not-smoke-target"
+        delete_safe = False
+        if not is_smoke:
+            reason = "not-smoke-target"
+        elif record.is_default:
+            reason = "default-target-protected"
+        elif record.profile != harness_profiles.PROFILE_MINIMAL or record.display_name != "Implementation Smoke Ephemeral":
+            reason = "missing-ephemeral-smoke-marker"
+        elif raw_state_root.is_symlink():
+            reason = "state-root-symlink-protected"
+        elif state_root.parent != targets_root or not state_root.name.startswith("smoke"):
+            reason = "state-root-outside-smoke-targets"
+        elif (state_root / "locks" / "target-run.lock").exists():
+            reason = "target-lock-present"
+        elif not _repo_is_temp_or_gone(record.repo):
+            reason = "product-repo-not-temp"
+        else:
+            delete_safe = True
+            reason = "delete-safe-smoke-temp-sidecar"
+        candidates.append(
+            SmokeCleanupCandidate(
+                target_id=record.target_id,
+                path=state_root,
+                repo=record.repo,
+                size_bytes=_directory_size_bytes(state_root),
+                delete_safe=delete_safe,
+                reason=reason,
+            )
+        )
+    return candidates
+
+
+def _build_controller_audit_size_payload(root: Path) -> dict[str, object]:
+    records = harness_controller.list_targets(root)
+    smoke_candidates = _smoke_cleanup_candidates(root)
+    candidate_bytes = sum(candidate.size_bytes for candidate in smoke_candidates if candidate.delete_safe)
+    target_rows: list[dict[str, object]] = []
+    for record in records:
+        target_rows.append(
+            {
+                "target_id": record.target_id,
+                "state_root": record.state_root.as_posix(),
+                "repo": record.repo.as_posix(),
+                "is_default": record.is_default,
+                "size_bytes": _directory_size_bytes(record.state_root),
+                "runs_bytes": _target_subdir_size(record, "runs"),
+                "reports_bytes": _target_subdir_size(record, "reports"),
+                "outbox_bytes": _target_subdir_size(record, "operator-outbox"),
+                "incidents_bytes": _directory_size_bytes(record.state_root / "state" / "incidents"),
+            }
+        )
+    return {
+        "schema_version": 1,
+        "controller_root": root.as_posix(),
+        "retention_policy": {
+            "ephemeral": "smoke/temp sidecars are delete-safe when controller-owned and not locked",
+            "hot": "latest reports/dashboards are bounded by target-specific cleanup",
+            "receipt": "transition/commit/push receipts are source of truth and protected",
+            "incident": "compact incident summaries remain until resolved",
+        },
+        "targets_count": len(records),
+        "targets": target_rows,
+        "smoke_cleanup_candidates": [
+            {
+                "target_id": candidate.target_id,
+                "path": candidate.path.as_posix(),
+                "repo": candidate.repo.as_posix(),
+                "size_bytes": candidate.size_bytes,
+                "delete_safe": candidate.delete_safe,
+                "reason": candidate.reason,
+            }
+            for candidate in smoke_candidates
+        ],
+        "delete_safe_count": sum(1 for candidate in smoke_candidates if candidate.delete_safe),
+        "delete_safe_bytes": candidate_bytes,
+        "protected_count": sum(1 for candidate in smoke_candidates if not candidate.delete_safe),
+        "loop_blocker": False,
+        "enforcement": "advisory",
+    }
+
+
+def _render_controller_audit_size_text(payload: Mapping[str, object]) -> None:
+    print("하네스 controller size audit")
+    print(f"- controller root: `{payload['controller_root']}`")
+    print(f"- targets: {payload['targets_count']}")
+    print(f"- cleanup 후보: {payload['delete_safe_count']}개 / {payload['delete_safe_bytes']} bytes")
+    print(f"- 보호된 smoke/target: {payload['protected_count']}개")
+    print("- loop blocker: no")
+    for candidate in payload.get("smoke_cleanup_candidates") or []:
+        if not isinstance(candidate, Mapping):
+            continue
+        label = "delete-safe" if candidate.get("delete_safe") else "protected"
+        print(
+            f"- {candidate.get('target_id')}: {label}, {candidate.get('size_bytes')} bytes, "
+            f"reason={candidate.get('reason')}"
+        )
+    print("다음 명령: `./harness controller cleanup --dry-run`")
+
+
+def command_controller_audit_size(args: argparse.Namespace) -> int:
+    try:
+        payload = _build_controller_audit_size_payload(repo_root())
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        else:
+            _render_controller_audit_size_text(payload)
+        return 0
+    except harness_controller.ControllerError as exc:
+        print(f"error: {exc}")
+        return 2
+
+
+def _cleanup_receipts_dir(root: Path) -> Path:
+    return root / "targets" / ".cleanup-receipts"
+
+
+def _write_controller_cleanup_receipt(root: Path, payload: Mapping[str, object]) -> Path:
+    receipts_dir = _cleanup_receipts_dir(root)
+    targets_root = (root / "targets").resolve(strict=False)
+    resolved_receipts = receipts_dir.resolve(strict=False)
+    if receipts_dir.exists() and receipts_dir.is_symlink():
+        raise HarnessCliError("cleanup receipt directory must not be a symlink")
+    if resolved_receipts.parent != targets_root:
+        raise HarnessCliError("cleanup receipt directory must stay under controller targets")
+    receipts_dir.mkdir(parents=True, exist_ok=True)
+    path = receipts_dir / f"cleanup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def command_controller_cleanup(args: argparse.Namespace) -> int:
+    try:
+        root = repo_root()
+        payload = _build_controller_audit_size_payload(root)
+        candidates = [item for item in payload["smoke_cleanup_candidates"] if item["delete_safe"]]
+        if args.json and not args.apply:
+            print(json.dumps({"applied": False, "candidates": candidates}, ensure_ascii=False, indent=2, sort_keys=True))
+        elif not args.apply:
+            print("하네스 controller cleanup dry-run")
+            print(f"- delete-safe 후보: {len(candidates)}개")
+            for candidate in candidates:
+                print(f"- {candidate['target_id']}: `{candidate['path']}` ({candidate['size_bytes']} bytes)")
+            print("적용하려면: `./harness controller cleanup --apply`")
+        if not args.apply:
+            return 0
+        if not candidates:
+            if args.json:
+                print(json.dumps({"applied": True, "deleted": [], "deleted_count": 0}, ensure_ascii=False, indent=2))
+            else:
+                print("하네스 controller cleanup 적용 완료")
+                print("- 삭제: 0개")
+                print("- receipt: 없음")
+                print("- product repo 삭제: 없음")
+            return 0
+
+        deleted: list[dict[str, object]] = []
+        targets_root = (root / "targets").resolve(strict=False)
+        for candidate in candidates:
+            path = Path(str(candidate["path"])).resolve(strict=False)
+            if path.parent != targets_root or not path.name.startswith("smoke") or not path.exists() or path.is_symlink():
+                raise HarnessCliError(f"unsafe cleanup candidate changed: {path.as_posix()}")
+            shutil.rmtree(path)
+            deleted.append(candidate)
+        receipt_payload = {
+            "schema_version": 1,
+            "operation": "controller-cleanup",
+            "applied": True,
+            "deleted": deleted,
+            "deleted_count": len(deleted),
+            "retention_class": "ephemeral",
+            "artifact_owner": "controller-cleanup",
+            "purpose": "remove controller-owned smoke/temp sidecars",
+            "cleanup_path": "delete-safe smoke sidecars only",
+            "source_of_truth": False,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        receipt = _write_controller_cleanup_receipt(root, receipt_payload)
+        if args.json:
+            print(json.dumps({**receipt_payload, "receipt": receipt.as_posix()}, ensure_ascii=False, indent=2, sort_keys=True))
+        else:
+            print("하네스 controller cleanup 적용 완료")
+            print(f"- 삭제: {len(deleted)}개")
+            print(f"- receipt: `{receipt.as_posix()}`")
+            print("- product repo 삭제: 없음")
+        return 0
+    except (HarnessCliError, harness_controller.ControllerError) as exc:
+        print(f"error: {exc}")
+        return 2
 
 
 def _git_tracked_paths(root: Path) -> tuple[str, ...]:
@@ -2706,6 +3169,12 @@ def command_target_run(args: argparse.Namespace) -> int:
                 post_blockers.append("target-head-changed")
             if not after_status:
                 post_blockers.append("target-no-product-diff")
+            for blocker in harness_controller.product_diff_policy_blockers(
+                record.repo,
+                harness_controller.target_status_paths(after_status),
+            ):
+                if blocker not in post_blockers:
+                    post_blockers.append(blocker)
         elif head_changed:
             post_blockers.append("target-head-changed")
         if post_markers:
@@ -3232,12 +3701,23 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard = subparsers.add_parser("dashboard", help="Show local operator dashboard paths.")
     dashboard.set_defaults(func=command_dashboard)
 
-    run = subparsers.add_parser("run", help="Beginner run. No --once runs @default sidecar backlog local diff only.")
-    run.add_argument("--once", action="store_true")
+    run = subparsers.add_parser("run", help="Beginner autopilot run for the default external target.")
+    run.add_argument("--once", action="store_true", help="Process at most one backlog transaction and exit.")
+    run.add_argument("--max-cycles", type=int, default=0, help=argparse.SUPPRESS)
+    run.add_argument("--idle-seconds", type=int, default=60, help=argparse.SUPPRESS)
+    run.add_argument("--runner", choices=("codex", "claude", "custom"), default="codex", help=argparse.SUPPRESS)
+    run.add_argument("--runner-model", default=None, help=argparse.SUPPRESS)
+    run.add_argument(
+        "--runner-reasoning-effort",
+        default="xhigh",
+        choices=("minimal", "low", "medium", "high", "xhigh"),
+        help=argparse.SUPPRESS,
+    )
+    run.add_argument("--command-template", help=argparse.SUPPRESS)
     run.add_argument("extra", nargs=argparse.REMAINDER)
     run.set_defaults(func=command_run)
 
-    finish = subparsers.add_parser("finish", help="Beginner finish: complete, commit, or push the latest implementation.")
+    finish = subparsers.add_parser("finish", help="Recovery/advanced finish gate for a stopped implementation transaction.")
     finish.add_argument("--target", default="@default", help="Target selector; default is @default.")
     finish.add_argument("--run", help="Implementation run id. Defaults to the latest matching run for the target.")
     finish.add_argument("--complete", action="store_true", help="Dry-run sidecar backlog completion; add --apply to mutate.")
@@ -3263,6 +3743,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     smoke_implementation.add_argument("--command-template", help=argparse.SUPPRESS)
+    smoke_implementation.add_argument("--keep", action="store_true", help="Retain the smoke target sidecar under targets/.")
     smoke_implementation.set_defaults(func=command_smoke_implementation)
 
     export = subparsers.add_parser("export", help="Write a starter-safe bundle for installing elsewhere.")
@@ -3309,6 +3790,20 @@ def build_parser() -> argparse.ArgumentParser:
     controller_doctor = controller_subparsers.add_parser("doctor", help="Check this checkout as a harness controller.")
     controller_doctor.add_argument("--json", action="store_true")
     controller_doctor.set_defaults(func=command_controller_doctor)
+    controller_audit_size = controller_subparsers.add_parser(
+        "audit-size",
+        help="Show target sidecar sizes and delete-safe retention candidates.",
+    )
+    controller_audit_size.add_argument("--json", action="store_true")
+    controller_audit_size.set_defaults(func=command_controller_audit_size)
+    controller_cleanup = controller_subparsers.add_parser(
+        "cleanup",
+        help="Remove controller-owned delete-safe smoke/temp sidecars.",
+    )
+    controller_cleanup.add_argument("--dry-run", action="store_true", help="Preview delete-safe cleanup candidates.")
+    controller_cleanup.add_argument("--apply", action="store_true", help="Apply delete-safe cleanup candidates.")
+    controller_cleanup.add_argument("--json", action="store_true")
+    controller_cleanup.set_defaults(func=command_controller_cleanup)
     controller_release_check = controller_subparsers.add_parser(
         "release-check",
         help="Run the controller-distribution release gate without mutating targets or GitHub.",

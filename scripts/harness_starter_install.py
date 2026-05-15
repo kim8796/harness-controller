@@ -17,6 +17,7 @@ import harness_export
 
 ALLOWED_GENERATED_PATHS = frozenset(
     {
+        Path(".gitignore"),
         Path("CURRENT_STATE.md"),
         Path("RUNS_INDEX.md"),
         Path("SESSION_BOOTSTRAP.md"),

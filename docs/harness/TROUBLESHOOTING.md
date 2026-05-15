@@ -10,7 +10,6 @@
 ./harness install /path/to/my-app --id my-app --default
 ./harness task
 ./harness run
-./harness finish
 ```
 
 고급 `target ...` 명령은 필요할 때만 본다.
@@ -68,6 +67,23 @@ private controller repo에서:
 ```
 
 tracked `.env*`, `targets/**`, live reports/runs, cache 파일이 있으면 release 전 정리해야 한다.
+
+## smoke target이 쌓인다
+
+v1.8.24부터 `./harness smoke implementation`은 기본적으로 smoke sidecar를 정리한다. 과거 smoke target은 먼저 dry-run으로 본다.
+
+```bash
+./harness controller audit-size
+./harness controller cleanup --dry-run
+```
+
+delete-safe 후보만 적용하려면:
+
+```bash
+./harness controller cleanup --apply
+```
+
+cleanup은 controller-owned smoke/temp sidecar만 다루며 product repo 파일은 삭제하지 않는다.
 
 ## 무엇을 먼저 읽을지 모르겠다
 

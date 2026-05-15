@@ -11,7 +11,6 @@
 ./harness task review <packet-id>
 ./harness task queue <packet-id> --auto
 ./harness run
-./harness finish
 ```
 
 `install`은 global wrapper 설치가 아니라 product repo를 controller target으로 등록하는 명령이다. global convenience wrapper는 `./harness self install`이다.
@@ -44,12 +43,20 @@
 
 기본 구현 gate는 Codex managed latest/default 모델과 `xhigh` reasoning을 사용한다. 다른 모델이 필요할 때만 `--runner-model <model-id>`를 명시한다.
 
-기본 실행은 local product diff만 만든다. 다음은 자동으로 하지 않는다.
+기본 실행은 queued auto backlog를 반복 처리한다. 각 transaction은 다음 순서로 기존 gate를 재사용한다.
 
-- backlog 완료 처리
-- product commit
-- remote push
-- Telegram-triggered execution
+- implementation
+- sidecar backlog completed 전환
+- product local commit
+- product push gate
+
+push preflight가 맞지 않으면 commit까지만 끝내고 멈춘다. 한 작업만 확인하려면:
+
+```bash
+./harness run --once
+```
+
+Telegram/Redis는 operator instruction transport이고 product-changing 실행기는 아니다.
 
 ## 마무리
 
@@ -57,7 +64,7 @@
 ./harness finish
 ```
 
-읽기 전용 요약을 보고 필요한 단계만 명시적으로 적용한다.
+autopilot이 중간에서 멈췄을 때 읽기 전용 요약을 보고 필요한 단계만 명시적으로 적용한다.
 
 ```bash
 ./harness finish --apply
@@ -82,6 +89,17 @@ commit/push는 dry-run first다. 자동 remote rollback은 하지 않는다.
 ```bash
 ./harness smoke implementation
 ```
+
+기본 smoke는 controller sidecar를 남기지 않는다. 디버깅용으로 보존하려면 `--keep`을 붙인다.
+
+controller-owned smoke/temp sidecar 정리 후보:
+
+```bash
+./harness controller audit-size
+./harness controller cleanup --dry-run
+```
+
+cleanup은 product repo 파일을 삭제하지 않는다.
 
 target을 건드리지 않는 read-only/no-op smoke:
 

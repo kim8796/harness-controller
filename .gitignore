@@ -31,6 +31,8 @@ runs/autonomy/policy-state.json
 runs/autonomy/state-proposal-state.json
 runs/miniapp-telemetry/*
 !runs/miniapp-telemetry/README.md
+runs/harness/*
+!runs/harness/README.md
 exports/harness/*
 !exports/harness/README.md
 targets/
