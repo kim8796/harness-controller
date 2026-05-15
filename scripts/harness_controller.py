@@ -350,14 +350,32 @@ def clean_git_env() -> dict[str, str]:
     return env
 
 
-def git(args: Sequence[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+def harness_git_identity_env() -> dict[str, str]:
+    author_name = str(os.environ.get("HARNESS_GIT_AUTHOR_NAME") or "").strip()
+    author_email = str(os.environ.get("HARNESS_GIT_AUTHOR_EMAIL") or "").strip()
+    committer_name = str(os.environ.get("HARNESS_GIT_COMMITTER_NAME") or author_name).strip()
+    committer_email = str(os.environ.get("HARNESS_GIT_COMMITTER_EMAIL") or author_email).strip()
+    if not author_name or not author_email or not committer_name or not committer_email:
+        return {}
+    return {
+        "GIT_AUTHOR_NAME": author_name,
+        "GIT_AUTHOR_EMAIL": author_email,
+        "GIT_COMMITTER_NAME": committer_name,
+        "GIT_COMMITTER_EMAIL": committer_email,
+    }
+
+
+def git(args: Sequence[str], *, cwd: Path, extra_env: Mapping[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    env = clean_git_env()
+    if extra_env:
+        env.update(dict(extra_env))
     return subprocess.run(
         ["git", *args],
         cwd=cwd,
         check=False,
         text=True,
         capture_output=True,
-        env=clean_git_env(),
+        env=env,
     )
 
 
@@ -966,8 +984,9 @@ def target_git_parent(target_root: Path, commit: str = "HEAD") -> str:
 
 
 def target_git_identity_ready(target_root: Path) -> bool:
+    identity_env = harness_git_identity_env()
     for var_name in ("GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"):
-        result = git(["var", var_name], cwd=target_root)
+        result = git(["var", var_name], cwd=target_root, extra_env=identity_env)
         if result.returncode != 0 or not result.stdout.strip():
             return False
     return True
@@ -1865,6 +1884,7 @@ def commit_product_backlog_diff(target_root: Path, *, paths: Sequence[str], mess
             *literal_pathspecs,
         ],
         cwd=target_root,
+        extra_env=harness_git_identity_env(),
     )
     if commit_result.returncode != 0:
         detail = (commit_result.stderr or commit_result.stdout).strip()
@@ -2339,6 +2359,7 @@ def commit_product_diff_smoke(target_root: Path) -> str:
             path,
         ],
         cwd=target_root,
+        extra_env=harness_git_identity_env(),
     )
     if commit_result.returncode != 0:
         detail = (commit_result.stderr or commit_result.stdout).strip()

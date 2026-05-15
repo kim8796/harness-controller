@@ -282,6 +282,29 @@ def test_commit_product_backlog_diff_uses_literal_pathspecs_for_bracket_paths(tm
     assert module.product_diff_smoke_commit_diff_lines(product) == ["A\tapp/users/[id]/page.tsx"]
 
 
+def test_commit_product_backlog_diff_uses_harness_identity_env(monkeypatch, tmp_path: Path) -> None:
+    module = _load_module()
+    product = tmp_path / "product"
+    _init_git_repo(product)
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    monkeypatch.setenv("HARNESS_GIT_AUTHOR_NAME", "Harness CI")
+    monkeypatch.setenv("HARNESS_GIT_AUTHOR_EMAIL", "harness-ci@example.invalid")
+
+    (product / "README.md").write_text("# Product\n\nHarness identity.\n", encoding="utf-8")
+    commit_sha = module.commit_product_backlog_diff(product, paths=["README.md"], message="fix: use harness identity")
+
+    author = subprocess.run(
+        ["git", "log", "-1", "--format=%an <%ae>|%cn <%ce>", commit_sha],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.strip()
+    assert author == "Harness CI <harness-ci@example.invalid>|Harness CI <harness-ci@example.invalid>"
+
+
 def test_target_alias_and_default_resolve_to_canonical_id(tmp_path: Path) -> None:
     module = _load_module()
     controller = tmp_path / "controller"

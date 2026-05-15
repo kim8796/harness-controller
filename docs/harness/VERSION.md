@@ -12,7 +12,7 @@
 - Added compact autopilot incident recording under `targets/<id>/state/incidents/` to stop blind repeated retries on the same signature.
 - Made `./harness smoke implementation` dispose of its smoke sidecar by default, with `--keep` for retained debugging.
 - Added `./harness controller audit-size` and `./harness controller cleanup --dry-run|--apply` for delete-safe controller-owned smoke/temp sidecars.
-- Hardened product diff commit staging with literal Git pathspecs, deletion support, nested directory policy scans, and Korean beginner blocker explanations.
+- Hardened product diff commit staging with literal Git pathspecs, deletion support, nested directory policy scans, `HARNESS_GIT_AUTHOR_*` identity fallback, and Korean beginner blocker explanations.
 
 ## What Changed In 1.8.23
 
