@@ -239,6 +239,7 @@ class GuardReport:
     incomplete_required_artifacts: tuple[str, ...]
     artifacts_missing_agent_metadata: tuple[str, ...]
     non_independent_agents: tuple[str, ...]
+    workflow_tab_violations: tuple[str, ...]
     missing_required_docs: tuple[Path, ...]
     core_harness_changed: bool
     change_class: str | None
@@ -1976,6 +1977,26 @@ def _format_paths(paths: Sequence[Path], limit: int = 8) -> str:
     return ", ".join(shown)
 
 
+def _collect_workflow_tab_violations(root: Path) -> tuple[str, ...]:
+    workflows_dir = root / ".github" / "workflows"
+    if not workflows_dir.is_dir():
+        return tuple()
+
+    violations: list[str] = []
+    workflow_paths = sorted(
+        path
+        for pattern in ("*.yml", "*.yaml")
+        for path in workflows_dir.glob(pattern)
+        if path.is_file()
+    )
+    for path in workflow_paths:
+        rel_path = path.relative_to(root)
+        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if "\t" in line:
+                violations.append(f"{rel_path.as_posix()}:{line_number}")
+    return tuple(violations)
+
+
 def discover_changed_paths(mode: str, root: Path, *, staged_only: bool = False) -> tuple[Path, ...]:
     if mode == "pre-commit":
         raw_paths = _git(["diff", "--cached", "--name-only", "--diff-filter=ACMRD"], root)
@@ -2130,6 +2151,7 @@ def build_report(
                     continue
                 seen_agents[agent] = current_label
 
+    workflow_tab_violations = _collect_workflow_tab_violations(root)
     missing_required_docs = tuple(path for path in REQUIRED_HARNESS_DOCS if not (root / path).exists())
     core_harness_changed = any(
         path in CORE_HARNESS_SYNC_SOURCES and path not in GENERATED_RECOVERY_DOCS
@@ -2228,6 +2250,7 @@ def build_report(
         incomplete_required_artifacts=tuple(incomplete_required_artifacts),
         artifacts_missing_agent_metadata=tuple(artifacts_missing_agent_metadata),
         non_independent_agents=tuple(non_independent_agents),
+        workflow_tab_violations=workflow_tab_violations,
         missing_required_docs=missing_required_docs,
         core_harness_changed=core_harness_changed,
         change_class=change_class,
@@ -2360,6 +2383,11 @@ def render_report(report: GuardReport, *, max_file_lines: int) -> str:
     else:
         lines.append("- 독립 lane 상태 정상")
 
+    if report.workflow_tab_violations:
+        lines.append("- workflow tab 위반: " + ", ".join(report.workflow_tab_violations[:8]))
+    else:
+        lines.append("- workflow tab 상태 정상")
+
     if report.missing_required_docs:
         lines.append("- 빠진 핵심 harness 문서: " + _format_paths(report.missing_required_docs))
     else:
@@ -2477,6 +2505,7 @@ def should_fail(report: GuardReport) -> bool:
             report.incomplete_required_artifacts,
             report.artifacts_missing_agent_metadata,
             report.non_independent_agents,
+            report.workflow_tab_violations,
             report.missing_required_docs,
             report.missing_export_sync_files,
             report.append_only_violations,

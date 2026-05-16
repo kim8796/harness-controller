@@ -100,3 +100,14 @@ def test_telegram_setup_and_profiles_have_explicit_related_tests() -> None:
     assert Path("tests/test_harness_telegram_setup.py") in setup_related
     assert Path("tests/test_harness_cli.py") in profile_related
     assert Path("tests/test_harness_export.py") in profile_related
+
+
+def test_workflow_tab_violations_are_reported(tmp_path: Path) -> None:
+    module = _load_module()
+    workflow = tmp_path / ".github" / "workflows" / "ci.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("name: CI\non: push\njobs:\n\tbad: true\n", encoding="utf-8")
+
+    violations = module._collect_workflow_tab_violations(tmp_path)
+
+    assert violations == (".github/workflows/ci.yml:4",)
