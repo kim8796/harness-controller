@@ -137,6 +137,9 @@ def test_export_bundle_copies_sources_and_writes_readme(tmp_path: Path) -> None:
     assert (bundle_dir / "scripts" / "harness_telegram_bridge.py").read_text(encoding="utf-8") == (
         "scripts/harness_telegram_bridge.py\n"
     )
+    assert (bundle_dir / "scripts" / "harness_telegram_setup.py").read_text(encoding="utf-8") == (
+        "scripts/harness_telegram_setup.py\n"
+    )
     assert (bundle_dir / "scripts" / "harness_env.py").read_text(encoding="utf-8") == (
         "scripts/harness_env.py\n"
     )
@@ -241,6 +244,7 @@ def test_starter_bundle_excludes_live_state_and_can_create_project(tmp_path: Pat
     assert not (bundle / "tests").exists()
     assert (bundle / "scripts" / "harness_autonomy" / "relay.py").exists()
     assert (bundle / "scripts" / "harness_relay_store.py").exists()
+    assert (bundle / "scripts" / "harness_telegram_setup.py").exists()
     assert (bundle / "scripts" / "harness_starter_install.py").exists()
     bundle_readme = (bundle / "README.md").read_text(encoding="utf-8")
     assert "./harness new" in bundle_readme
@@ -366,14 +370,17 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "scripts" / "harness_controller.py").exists()
     assert (bundle / "scripts" / "harness_autonomy" / "relay.py").exists()
     assert (bundle / "scripts" / "harness_relay_store.py").exists()
+    assert (bundle / "scripts" / "harness_telegram_setup.py").exists()
     assert (bundle / "tests" / "conftest.py").exists()
     assert (bundle / "tests" / "test_harness_autonomy.py").exists()
     assert (bundle / "tests" / "test_harness_cli.py").exists()
     assert (bundle / "tests" / "test_harness_controller.py").exists()
     assert (bundle / "tests" / "test_harness_env.py").exists()
     assert (bundle / "tests" / "test_harness_export.py").exists()
+    assert (bundle / "tests" / "test_harness_guard.py").exists()
     assert (bundle / "tests" / "test_harness_relay_store.py").exists()
     assert (bundle / "tests" / "test_harness_telegram_bridge.py").exists()
+    assert (bundle / "tests" / "test_harness_telegram_setup.py").exists()
     assert (bundle / "tests" / "test_redis_relay.py").exists()
     assert (bundle / "docs" / "harness" / "releases" / "v1.8.8.md").exists()
     assert (bundle / "docs" / "harness" / "releases" / "v1.8.9.md").exists()
@@ -419,6 +426,8 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "`./harness` 와 `./harness help` 는 한국어 시작 화면" in readme
     assert "./harness controller doctor" in readme
     assert "./harness controller release-check --run-lint --run-pytest" in readme
+    assert "./harness telegram setup" in readme
+    assert "--dry-run" in readme
     assert "private controller repo release 전용 검증" in readme
     assert "./harness install /path/to/product-repo --id my-app --branch main --default" in readme
     assert "./harness task list" in readme
@@ -427,7 +436,11 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "./harness task queue <packet-id> --auto" in readme
     assert "./harness task fix-scope <packet-id> --apply" in readme
     assert "./harness controller audit-size" in readme
-    assert "`./harness run` 은 기본 autopilot 루프" in readme
+    assert "`./harness run` 은 기본 autopilot 실행" in readme
+    assert "현재 queued auto 요청을 처리하고 queue가 비면 종료" in readme
+    assert "`./harness run --watch` 는 새 queued auto 요청을 계속 감시" in readme
+    assert "queued auto 요청을 반복 처리" not in readme
+    assert "기본 autopilot 루프" not in readme
     assert "완료 처리, product local commit, push gate" in readme
     assert "`./harness finish` 는 복구/고급 명령" in readme
     assert "자동 원격 롤백은 없다" in readme
@@ -436,7 +449,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "`./harness task review --ai` 는 AI가 읽기 좋은 검토용 파일만 만들며" in readme
     assert "Bare `./harness run` is an autopilot wrapper" in readme
     assert "Bare `./harness finish` maps to a recovery summary" in readme
-    assert "finish --push --apply" in readme
+    assert "exact `--run <run-id>`" in readme
     assert "./harness smoke implementation" in readme
     assert "--keep" in readme
     assert "HARNESS_RELAY_TARGET_IDS=my-app" in readme
@@ -461,6 +474,13 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "it is not deployment" in readme
     assert "does not perform automatic remote rollback" in readme
     assert "Harness Controller Adapter" in (bundle / "AGENTS.md").read_text(encoding="utf-8")
+    release_1824 = (bundle / "docs" / "harness" / "releases" / "v1.8.24.md").read_text(encoding="utf-8")
+    version_doc = (bundle / "docs" / "harness" / "VERSION.md").read_text(encoding="utf-8")
+    changelog_doc = (bundle / "docs" / "harness" / "CHANGELOG.md").read_text(encoding="utf-8")
+    for surface in (release_1824, version_doc, changelog_doc):
+        assert "long-running external controller autopilot loop" not in surface
+        assert "repeatedly processes queued auto sidecar backlog transactions" not in surface
+        assert "drain-and-exit" in surface or "drain queued auto backlog" in surface
     _assert_markdown_file_links_resolve(bundle / "START_HERE.md")
     _assert_markdown_file_links_resolve(bundle / "docs" / "harness" / "START_HERE.md")
     product_marker = "MINI" + "APP"
@@ -644,7 +664,8 @@ def test_exported_controller_beginner_flow_runs_from_bundle(tmp_path: Path) -> N
     assert head_after == head_before
     assert status_after == [" M README.md"]
     assert "하네스 finish" in finish_result.stdout
-    assert "다음 명령: `./harness finish --apply`" in finish_result.stdout
+    assert "다음 명령: `./harness finish --run " in finish_result.stdout
+    assert "--apply`" in finish_result.stdout
     assert (bundle / "targets" / "demo" / "backlog" / "queued").exists()
     preview = bundle / "targets" / "demo" / "backlog" / "drafts" / "task-demo" / "backlog-preview.md"
     assert "caption: Smoke reference image" in preview.read_text(encoding="utf-8")

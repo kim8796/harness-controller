@@ -86,3 +86,17 @@ def test_starter_install_has_explicit_related_tests() -> None:
 
     assert Path("tests/test_harness_cli.py") in related
     assert Path("tests/test_harness_export.py") in related
+
+
+def test_telegram_setup_and_profiles_have_explicit_related_tests() -> None:
+    module = _load_module()
+    root = Path(__file__).resolve().parents[1]
+
+    setup_related = module._guess_related_tests(Path("scripts/harness_telegram_setup.py"), root)
+    profile_related = module._guess_related_tests(Path("scripts/harness_profiles.py"), root)
+
+    assert Path("tests/test_harness_cli.py") in setup_related
+    assert Path("tests/test_harness_export.py") in setup_related
+    assert Path("tests/test_harness_telegram_setup.py") in setup_related
+    assert Path("tests/test_harness_cli.py") in profile_related
+    assert Path("tests/test_harness_export.py") in profile_related

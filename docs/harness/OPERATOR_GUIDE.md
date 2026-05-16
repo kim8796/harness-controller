@@ -20,6 +20,7 @@
 ```bash
 ./harness status
 ./harness dashboard
+./harness telegram setup --target-id my-app --repo-id my-app --dry-run
 ./harness target list
 ./harness target verify my-app
 ./harness target dashboard my-app
@@ -43,7 +44,7 @@
 
 기본 구현 gate는 Codex managed latest/default 모델과 `xhigh` reasoning을 사용한다. 다른 모델이 필요할 때만 `--runner-model <model-id>`를 명시한다.
 
-기본 실행은 queued auto backlog를 반복 처리한다. 각 transaction은 다음 순서로 기존 gate를 재사용한다.
+기본 실행은 현재 queued auto backlog를 처리한 뒤 queue가 비면 종료한다. 각 transaction은 다음 순서로 기존 gate를 재사용한다.
 
 - implementation
 - sidecar backlog completed 전환
@@ -56,7 +57,14 @@ push preflight가 맞지 않으면 commit까지만 끝내고 멈춘다. 한 작�
 ./harness run --once
 ```
 
+새 작업을 계속 감시하는 운영이 필요할 때만:
+
+```bash
+./harness run --watch
+```
+
 Telegram/Redis는 operator instruction transport이고 product-changing 실행기는 아니다.
+`./harness telegram setup --target-id my-app --repo-id my-app --dry-run`은 readiness dry-run만 수행하며 env/provider/webhook/deploy를 바꾸지 않는다.
 
 ## 마무리
 

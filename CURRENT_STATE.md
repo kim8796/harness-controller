@@ -9,7 +9,7 @@
 
 ## 자동 스냅샷
 <!-- BEGIN AUTO -->
-- 하네스 버전: 1.8.25
+- 하네스 버전: 1.8.26
 - 스냅샷 종류: 저장소 로컬 복구 뷰
 - 갱신 명령: `python3 scripts/harness_loop.py sync-state`
 - 현재 활성 goal 개수: 0
@@ -19,7 +19,7 @@
 - 대표 goal proposal: 없음
 - 현재 활성 run: 없음
 - 현재 active workspace key: 없음
-- 최근 완료 run: 20260516-controller-portable-relay-drain
+- 최근 완료 run: 20260515-controller-autopilot-retention-loop
 - 대기열 backlog 개수: 0
 - 다음 backlog 후보: 없음
 <!-- END AUTO -->

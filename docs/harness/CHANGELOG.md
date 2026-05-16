@@ -1,15 +1,23 @@
 # Harness Changelog
 
+## 1.8.26 - 2026-05-16
+
+- Added `./harness telegram setup` as a secret-safe setup wizard with hard dry-run override.
+- Added non-destructive Vercel env sync, separate deploy, fail-closed Telegram webhook verification, and Upstash smoke checks.
+- Aligned gateway relay env docs/tests on canonical `HARNESS_TELEGRAM_OPERATOR_USER_IDS`.
+- Changed beginner `./harness run` to drain queued auto backlog and exit when the queue is empty; use `./harness run --watch` for continuous polling.
+
 ## 1.8.25 - 2026-05-16
 
 - Added a controller-owned Upstash relay store adapter and removed the local drain dependency on external app `db.database.RedisStore`.
 - Added `--target-id` to manual relay drain and kept external controller mode fail-closed when registered targets exist but no target-scoped drain was selected.
 - Surfaced target-aware relay env keys in secret-safe `env check` / `env register --dry-run` output.
+- Added `./harness telegram setup --dry-run` as a readiness entrypoint for controller Telegram setup.
 - Included the new relay store adapter and focused tests in starter/controller export coverage.
 
 ## 1.8.24 - 2026-05-15
 
-- Changed bare `./harness run` into the default external-controller autopilot loop.
+- Introduced bare `./harness run` as the default external-controller autopilot wrapper; v1.8.26 supersedes its empty-queue behavior with drain-and-exit semantics.
 - Reused the existing implementation, sidecar completion, product commit, and product push gates instead of adding a new runner or ledger.
 - Kept `run --once` as a single-backlog transaction mode and stopped on first failure or push preflight blocker.
 - Added compact incident signatures for repeated autopilot failures.
