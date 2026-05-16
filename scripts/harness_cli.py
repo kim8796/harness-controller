@@ -27,6 +27,7 @@ import harness_loop
 import harness_profiles
 import harness_starter_install
 import harness_task_intake
+import harness_telegram_setup
 from harness_autonomy.control import sanitize_for_outbox
 from harness_autonomy.relay import normalize_relay_repo_id
 
@@ -63,25 +64,37 @@ CONTROLLER_RELEASE_CHECK_RUFF_PATHS = (
     "scripts/harness_controller.py",
     "scripts/harness_env.py",
     "scripts/harness_export.py",
+    "scripts/harness_guard.py",
+    "scripts/harness_profiles.py",
+    "scripts/harness_relay_store.py",
     "scripts/harness_starter_install.py",
     "scripts/harness_task_intake.py",
     "scripts/harness_telegram_bridge.py",
+    "scripts/harness_telegram_setup.py",
     "scripts/harness_autonomy/relay.py",
     "tests/test_harness_autonomy.py",
     "tests/test_harness_cli.py",
     "tests/test_harness_controller.py",
+    "tests/test_harness_env.py",
     "tests/test_harness_export.py",
+    "tests/test_harness_guard.py",
+    "tests/test_harness_relay_store.py",
     "tests/test_harness_task_intake.py",
     "tests/test_harness_telegram_bridge.py",
+    "tests/test_harness_telegram_setup.py",
     "tests/test_redis_relay.py",
 )
 CONTROLLER_RELEASE_CHECK_PYTEST_PATHS = (
     "tests/test_harness_autonomy.py",
     "tests/test_harness_cli.py",
     "tests/test_harness_controller.py",
+    "tests/test_harness_env.py",
     "tests/test_harness_export.py",
+    "tests/test_harness_guard.py",
+    "tests/test_harness_relay_store.py",
     "tests/test_harness_task_intake.py",
     "tests/test_harness_telegram_bridge.py",
+    "tests/test_harness_telegram_setup.py",
     "tests/test_redis_relay.py",
 )
 SOURCE_CHECKOUT_MARKER = Path(".codex/skills/harness-local/SKILL.md")
@@ -143,13 +156,14 @@ BEGINNER_HELP_TEXT = """하네스 시작
 - install: 제품 저장소를 하네스 관리 대상으로 등록합니다. 제품 저장소에는 하네스 파일을 쓰지 않습니다.
   터미널에서 ./harness install만 입력하면 경로와 이름을 물어봅니다.
 - task: 요구사항 초안을 만듭니다. 출력된 request.md는 외부 에디터로 수정해도 됩니다.
-- run: 자동 실행 가능한 요청을 계속 처리합니다. 성공하면 완료 처리, product commit, push gate까지 시도합니다.
+- run: 현재 자동 실행 가능한 요청을 처리하고 queue가 비면 종료합니다. 계속 감시는 ./harness run --watch 입니다.
 - finish: 복구/고급 명령입니다. 자동 루프가 멈춘 구현 기록을 수동으로 닫을 때 씁니다.
 
 자주 쓰는 확인:
 - ./harness status
 - ./harness dashboard
 - ./harness task list
+- ./harness telegram setup --target-id my-app --repo-id my-app --dry-run
 - ./harness verify --loop-ready
 - ./harness smoke implementation
 - ./harness controller audit-size
@@ -1306,12 +1320,17 @@ def _task_next_command(record: harness_controller.TargetRecord, summary: harness
 
 
 def _target_next_auto_backlog_item(record: harness_controller.TargetRecord) -> object | None:
-    try:
-        return _select_executable_backlog_plan(record.state_paths(repo_root()))
-    except harness_controller.ControllerError as exc:
-        if str(exc) == "no executable sidecar backlog found":
-            return None
-        raise
+    executable_items = _target_executable_backlog_items(record)
+    if not executable_items:
+        return None
+    return harness_loop.select_next_backlog_item(executable_items)
+
+
+def _target_executable_backlog_items(record: harness_controller.TargetRecord) -> list[object]:
+    state_paths = record.state_paths(repo_root())
+    harness_controller.validate_sidecar_backlog_integrity(state_paths)
+    items = harness_loop.discover_backlog_items(state_paths.state_root)
+    return [item for item in items if item.status == "queued" and item.autonomy_execute == "auto"]
 
 
 def _target_evidence_paths(record: harness_controller.TargetRecord) -> set[Path]:
@@ -1506,7 +1525,7 @@ def _run_autopilot_transaction(record: harness_controller.TargetRecord, args: ar
     except harness_controller.ControllerError as exc:
         print("- product push: 보류")
         print(f"- 멈춘 이유: {exc}")
-        print("다음 조치: product repo remote/upstream을 확인한 뒤 `./harness finish --push --apply`")
+        print(f"다음 조치: product repo remote/upstream을 확인한 뒤 `./harness finish --run {run_id} --push --apply`")
         return AutopilotTransaction("push-blocked", run_id, backlog_id, commit_sha, "", str(exc))
     push_sha = str(push.get("product_push_sha") or "")
     print(f"- product push: `{push_sha}`")
@@ -1620,6 +1639,13 @@ def command_run(args: argparse.Namespace) -> int:
         print("error: `./harness run` beginner path does not accept extra arguments.")
         print("고급 실행: `./harness target run @default --implement-backlog-once ...`")
         return 2
+    if args.once and args.watch:
+        print("error: `./harness run --once` 와 `--watch` 는 함께 사용할 수 없습니다.")
+        print("한 번만 처리하려면 `./harness run --once`, 계속 감시하려면 `./harness run --watch` 를 사용하세요.")
+        return 2
+    if args.watch and int(args.idle_seconds or 0) < 1:
+        print("error: `./harness run --watch` 의 idle interval은 1초 이상이어야 합니다.")
+        return 2
     try:
         record = harness_controller.default_target(repo_root())
     except harness_controller.ControllerError as exc:
@@ -1629,12 +1655,24 @@ def command_run(args: argparse.Namespace) -> int:
         print("run 중단: 기본 대상이 없습니다.")
         print("다음 명령: `./harness install /path/to/product --id my-app --branch main --default`")
         return 2
-    max_cycles = 1 if args.once else max(0, int(args.max_cycles or 0))
+    requested_max_cycles = max(0, int(args.max_cycles or 0))
+    max_cycles = 1 if args.once else requested_max_cycles
+    if not args.watch and not max_cycles:
+        try:
+            max_cycles = len(_target_executable_backlog_items(record))
+        except (harness_loop.LoopError, harness_controller.ControllerError) as exc:
+            incident = _record_autopilot_incident(record=record, stage="discover", error=exc)
+            print(f"run 중단: backlog 상태를 읽지 못했습니다. {exc}")
+            print(f"- incident: `{incident['signature']}` count={incident['count']}")
+            return 2
     idle_seconds = max(0, int(args.idle_seconds or 0))
     processed = 0
     print("하네스 autopilot run 시작")
     print(f"- 대상: `{record.target_id}`")
-    print("- 실행: queued auto backlog를 반복 처리합니다.")
+    if args.watch:
+        print("- 실행: queued auto backlog를 계속 감시하고 처리합니다.")
+    else:
+        print("- 실행: 현재 queued auto backlog를 처리한 뒤 queue가 비면 종료합니다.")
     print("- 모델: Codex managed latest/default, reasoning=xhigh")
     print("- 처리: implement -> complete -> commit -> push gate")
     print(f"- push 주의: {FINISH_PUSH_CAUTION_KO}")
@@ -1649,8 +1687,15 @@ def command_run(args: argparse.Namespace) -> int:
                 print("run 중단: 이전 transaction의 product push가 아직 닫히지 않았습니다.")
                 print(f"- 구현 기록: `{latest['run_id']}`")
                 print(f"- 작업 항목: `{latest['backlog_id']}`")
-                print("- 다음 명령: `./harness finish --push --apply`")
+                print(f"- 다음 명령: `./harness finish --run {latest['run_id']} --push --apply`")
                 return 2
+            if not args.watch and processed >= max_cycles:
+                if processed:
+                    print(f"run 종료: 처리한 backlog {processed}개")
+                else:
+                    print("run 종료: queued auto backlog가 없습니다.")
+                    print("다음 작업을 넣으려면 `./harness task`를 사용하세요.")
+                return 0
             item = _target_next_auto_backlog_item(record)
         except (harness_loop.LoopError, harness_controller.ControllerError) as exc:
             incident = _record_autopilot_incident(record=record, stage="discover", error=exc)
@@ -1658,12 +1703,20 @@ def command_run(args: argparse.Namespace) -> int:
             print(f"- incident: `{incident['signature']}` count={incident['count']}")
             return 2
         if item is None:
-            print("대기: queued auto backlog가 없습니다.")
+            if args.watch:
+                print("대기: queued auto backlog가 없습니다.")
+                print("다음 작업을 넣으려면 `./harness task`를 사용하세요.")
+                print(f"- watch 대기: {idle_seconds}초 후 다시 확인합니다.")
+                time.sleep(idle_seconds)
+                continue
+            if processed:
+                print(f"run 종료: queued auto backlog가 없습니다. 처리한 backlog {processed}개")
+            else:
+                print("run 종료: queued auto backlog가 없습니다.")
             print("다음 작업을 넣으려면 `./harness task`를 사용하세요.")
             if args.once or max_cycles:
                 return 0
-            time.sleep(idle_seconds)
-            continue
+            return 0
         backlog_id = str(getattr(item, "item_id", ""))
         print(f"transaction 시작: `{backlog_id}`")
         incident_blocker = _target_open_incident_blocker(record, backlog_id)
@@ -1768,12 +1821,12 @@ def command_finish(args: argparse.Namespace) -> int:
             if payload["applied"]:
                 print("finish 적용 완료: backlog 상태를 completed로 전환했습니다.")
                 print(f"- receipt: `{payload['receipt_path']}`")
-                print("다음 확인 명령: `./harness finish --commit --message \"feat: ...\"`")
-                print("실제 local commit: `./harness finish --commit --message \"feat: ...\" --apply`")
+                print(f"다음 확인 명령: `./harness finish --run {evidence.run_id} --commit --message \"feat: ...\"`")
+                print(f"실제 local commit: `./harness finish --run {evidence.run_id} --commit --message \"feat: ...\" --apply`")
             else:
                 print("finish complete dry-run 완료")
                 print("- product repo 변경: 없음")
-                print("- 적용하려면: `./harness finish --complete --apply`")
+                print(f"- 적용하려면: `./harness finish --run {evidence.run_id} --complete --apply`")
             return 0
         if args.commit:
             payload = harness_controller.commit_sidecar_backlog_product_diff(
@@ -1788,14 +1841,14 @@ def command_finish(args: argparse.Namespace) -> int:
                 print(f"- product commit: `{payload['product_commit_sha']}`")
                 print(f"- receipt: `{payload['receipt_path']}`")
                 print("- product push: 없음")
-                print("다음 확인 명령: `./harness finish --push`")
+                print(f"다음 확인 명령: `./harness finish --run {evidence.run_id} --push`")
                 print(f"주의: {FINISH_PUSH_CAUTION_KO}")
-                print("실제 remote push: `./harness finish --push --apply`")
+                print(f"실제 remote push: `./harness finish --run {evidence.run_id} --push --apply`")
             else:
                 print("finish commit dry-run 완료")
                 print("- product repo 변경: 없음")
                 print("- product push: 없음")
-                print("- 적용하려면: `./harness finish --commit --message \"...\" --apply`")
+                print(f"- 적용하려면: `./harness finish --run {evidence.run_id} --commit --message \"...\" --apply`")
             return 0
         if args.push:
             payload = harness_controller.push_sidecar_backlog_product_commit(
@@ -1816,24 +1869,24 @@ def command_finish(args: argparse.Namespace) -> int:
                 print(f"- product push: {payload['product_push_remote']}/{record.branch}")
                 print("- remote 변경: 없음")
                 print(f"- 주의: {FINISH_PUSH_CAUTION_KO}")
-                print("- 적용하려면: `./harness finish --push --apply`")
+                print(f"- 적용하려면: `./harness finish --run {evidence.run_id} --push --apply`")
             return 0
         backlog_status = _finish_backlog_status(record, evidence)
         commit_receipt = evidence.matching_commit_receipt
         print(f"- 작업 현재 상태: `{backlog_status}`")
         print(f"- 제품 커밋 증거: {'있음' if commit_receipt else '없음'}")
         if backlog_status == "queued":
-            print("다음 명령: `./harness finish --apply`")
-            print("dry-run 명령: `./harness finish --complete`")
+            print(f"다음 명령: `./harness finish --run {evidence.run_id} --apply`")
+            print(f"dry-run 명령: `./harness finish --run {evidence.run_id} --complete`")
             print(
                 "고급 명령: "
                 f"`./harness target backlog transition {record.target_id} --status completed "
                 f"--run {evidence.run_id} --reason \"{reason}\" --apply`"
             )
         elif backlog_status == "completed" and not commit_receipt:
-            print("다음 명령: `./harness finish --commit --message \"feat: ...\"`")
+            print(f"다음 명령: `./harness finish --run {evidence.run_id} --commit --message \"feat: ...\"`")
         elif backlog_status == "completed" and commit_receipt:
-            print("다음 명령: `./harness finish --push`")
+            print(f"다음 명령: `./harness finish --run {evidence.run_id} --push`")
             print(f"주의: {FINISH_PUSH_CAUTION_KO}")
         else:
             print("다음 조치: backlog 상태가 명확하지 않습니다. 고급 dashboard/status로 확인하세요.")
@@ -1847,7 +1900,10 @@ def command_finish(args: argparse.Namespace) -> int:
             print(f"확인 명령: `./harness target dashboard {args.target}`")
             return 2
         if args.push and "target product repo must be clean before backlog product push" in str(exc):
-            print("다음 명령: `./harness finish --commit --message \"feat: ...\"`")
+            evidence_obj = locals().get("evidence")
+            resolved_run = str(getattr(evidence_obj, "run_id", "") or args.run or "").strip()
+            prefix = f"./harness finish --run {resolved_run}" if resolved_run else "./harness finish"
+            print(f"다음 명령: `{prefix} --commit --message \"feat: ...\"`")
             print("설명: push 전에는 product local commit receipt가 먼저 필요합니다.")
             return 2
         print("다음 명령: `./harness run` 또는 `./harness target dashboard @default`")
@@ -2037,7 +2093,7 @@ def _env_command_root() -> Path:
 
 
 def _state_lists(entries: Sequence[Mapping[str, str]]) -> dict[str, list[str]]:
-    states = {"present": [], "missing": [], "weak": []}
+    states = {"present": [], "missing": [], "weak": [], "optional-missing": []}
     for entry in entries:
         state = str(entry.get("state") or "")
         key = str(entry.get("key") or "")
@@ -2058,6 +2114,8 @@ def _render_env_check_text(payload: Mapping[str, object]) -> None:
         print(f"- 누락: {', '.join(states['missing'])}")
     if states["weak"]:
         print(f"- 보강 필요: {', '.join(states['weak'])}")
+    if states["optional-missing"]:
+        print(f"- 선택 누락: {', '.join(states['optional-missing'])}")
     for index, action in enumerate(payload["next_actions_ko"], start=1):  # type: ignore[index]
         print(f"- 다음 조치 {index}: {action}")
 
@@ -3744,6 +3802,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = subparsers.add_parser("run", help="Beginner autopilot run for the default external target.")
     run.add_argument("--once", action="store_true", help="Process at most one backlog transaction and exit.")
+    run.add_argument("--watch", action="store_true", help="Keep polling for new queued backlog after the queue becomes empty.")
     run.add_argument("--max-cycles", type=int, default=0, help=argparse.SUPPRESS)
     run.add_argument("--idle-seconds", type=int, default=60, help=argparse.SUPPRESS)
     run.add_argument("--runner", choices=("codex", "claude", "custom"), default="codex", help=argparse.SUPPRESS)
@@ -3755,7 +3814,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     run.add_argument("--command-template", help=argparse.SUPPRESS)
-    run.add_argument("extra", nargs=argparse.REMAINDER)
+    run.add_argument("extra", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
     run.set_defaults(func=command_run)
 
     finish = subparsers.add_parser("finish", help="Recovery/advanced finish gate for a stopped implementation transaction.")
@@ -3816,6 +3875,18 @@ def build_parser() -> argparse.ArgumentParser:
     env_register.add_argument("--dry-run", action="store_true")
     env_register.add_argument("--json", action="store_true")
     env_register.set_defaults(func=command_env_register)
+
+    telegram = subparsers.add_parser(
+        "telegram",
+        help="Telegram operator transport wizards (BotFather -> controller env -> gateway env -> Vercel -> setWebhook).",
+    )
+    telegram_subparsers = telegram.add_subparsers(dest="telegram_command", required=True)
+    telegram_setup = telegram_subparsers.add_parser(
+        "setup",
+        help="Secret-safe setup wizard for Telegram/Redis relay.",
+    )
+    harness_telegram_setup.add_arguments(telegram_setup)
+    telegram_setup.set_defaults(func=harness_telegram_setup.command_entry)
 
     version = subparsers.add_parser("version", help="Show harness version and export source readiness.")
     version.add_argument("--json", action="store_true")

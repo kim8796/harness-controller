@@ -1,4 +1,4 @@
-# Harness Controller Bundle v1.8.24
+# Harness Controller Bundle v1.8.26
 
 이 디렉토리는 product repo 밖에서 실행하는 external harness controller 배포 번들이다.
 product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는다.
@@ -11,6 +11,7 @@ product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는�
 ./harness controller doctor
 ./harness controller release-check --run-lint --run-pytest
 ./harness install /path/to/product-repo --id my-app --branch main --default
+./harness telegram setup --target-id my-app --repo-id my-app-relay --dry-run
 ./harness task
 # 프롬프트에 답하거나 출력된 request.md 를 수정한 뒤 필요한 경우:
 ./harness task list
@@ -30,6 +31,7 @@ product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는�
 - `./harness` 와 `./harness help` 는 한국어 시작 화면을 보여준다. 전체 명령 참조는 `./harness --help` 를 쓴다.
 - `./harness controller release-check --run-lint --run-pytest` 는 private controller repo release 전용 검증이다. source repo pre-push guard 와 달리 controller 배포에 필요한 금지 추적 파일, export source, focused lint/test 만 확인한다.
 - `./harness install /path/to/product-repo --id my-app --default` 는 전역 설치가 아니라 제품 저장소를 하네스 관리 대상으로 등록하는 명령이다.
+- `./harness telegram setup --target-id my-app --repo-id my-app-relay --dry-run` 은 Telegram/Redis setup readiness 를 redacted 출력으로 점검한다. `--dry-run` 은 env/provider/webhook/deploy side effect 를 모두 막는다.
 - 터미널에서 인자 없이 `./harness install` 을 실행하면 필요한 값을 질문한다. 스크립트/CI에서는 `./harness install /path/to/product-repo ...` 또는 기존 `--repo` 형식으로 경로를 명시한다. 질문에 답할 수 없는 환경에서 인자 없이 실행하면 상태만 보여준다.
 - `./harness task` 는 요구사항 초안을 만든다. 출력된 `request.md` 는 외부 에디터로 수정해도 된다.
 - `./harness task list` 는 기존 요청의 검토 상태, 실행 대기열, 다시 검토 필요 여부, 다음 명령을 읽기 전용으로 보여준다.
@@ -37,9 +39,10 @@ product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는�
 - `./harness task review --ai` 는 AI가 읽기 좋은 검토용 파일만 만들며, 자동 실행 여부를 혼자 결정하지 않는다.
 - `./harness task queue` 는 검증된 작업만 실행 대기열에 넣고, 불명확한 작업은 사람 확인이 필요한 상태로 둔다.
 - `./harness task fix-scope` 는 scope 문법 때문에 잘못 manual-review로 들어간 queued task를 controller sidecar 안에서만 auto로 복구한다.
-- `./harness run` 은 기본 autopilot 루프다. queued auto 요청을 반복 처리하고, 성공하면 완료 처리, product local commit, push gate까지 순서대로 시도한다.
+- `./harness run` 은 기본 autopilot 실행이다. 현재 queued auto 요청을 처리하고 queue가 비면 종료하며, 성공하면 완료 처리, product local commit, push gate까지 순서대로 시도한다.
 - push는 기본 transaction에 포함되지만 upstream/remote/branch/dirty/remote drift preflight가 맞지 않으면 commit까지만 끝내고 멈춘다.
 - `./harness run --once` 는 한 backlog transaction만 처리하고 종료하는 debug/smoke 모드다.
+- `./harness run --watch` 는 새 queued auto 요청을 계속 감시하는 명시 long-running 모드다.
 - `./harness finish` 는 복구/고급 명령이다. autopilot이 중간에서 멈춘 구현 기록을 수동으로 완료/커밋/푸시할 때 쓴다.
 - 푸시는 배포나 외부 자동화를 트리거할 수 있고 자동 원격 롤백은 없다.
 - `./harness smoke implementation` 은 임시 제품 저장소로 구현 경로가 정상인지 검증하고 기본적으로 smoke sidecar를 정리한다. 남기려면 `--keep`을 붙인다.
@@ -51,7 +54,7 @@ Advanced mapping:
 - `./harness target alias add my-app app` and `./harness target set-default my-app` are available when operators need shorter selectors.
 - `./harness target verify my-app`, `./harness target dashboard my-app`, and `./harness target run my-app --once` remain the explicit inspection/smoke commands.
 - Bare `./harness run` is an autopilot wrapper over `target run @default --implement-backlog-once`, `target backlog transition`, `target backlog commit`, and `target backlog push`.
-- Bare `./harness finish` maps to a recovery summary over the latest implementation evidence. `finish --apply`, `finish --commit --message ... --apply`, and `finish --push --apply` delegate to the same target backlog gates used by autopilot.
+- Bare `./harness finish` maps to a recovery summary over the latest implementation evidence. When a concrete run is resolved, follow-up commands include the exact `--run <run-id>` and delegate to the same target backlog gates used by autopilot.
 
 Telegram/Redis owner commands are target-scoped in external mode:
 
@@ -182,6 +185,8 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `tests/test_harness_task_intake.py`
 - `tests/test_harness_telegram_bridge.py`
 - `tests/test_redis_relay.py`
+- `docs/harness/releases/v1.8.26.md`
+- `docs/harness/releases/v1.8.25.md`
 - `docs/harness/releases/v1.8.24.md`
 - `docs/harness/releases/v1.8.23.md`
 - `docs/harness/releases/v1.8.22.md`

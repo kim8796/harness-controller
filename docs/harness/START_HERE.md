@@ -2,7 +2,7 @@
 
 하네스를 처음 쓰는 사람이 보는 입구 문서다. 이 파일은 짧게 유지하고, 자세한 운영/설정/문제 해결은 아래 문서로 연결한다.
 
-현재 기준은 `v1.8.24` 이다. 전체 변경 이력은 [VERSION.md](VERSION.md), export 계약은 [FRAMEWORK_EXPORT.md](FRAMEWORK_EXPORT.md), starter 파일 구조는 [STARTER_SCAFFOLD.md](STARTER_SCAFFOLD.md)를 본다.
+현재 기준은 `v1.8.26` 이다. 전체 변경 이력은 [VERSION.md](VERSION.md), export 계약은 [FRAMEWORK_EXPORT.md](FRAMEWORK_EXPORT.md), starter 파일 구조는 [STARTER_SCAFFOLD.md](STARTER_SCAFFOLD.md)를 본다. Telegram/Redis relay drain 은 controller-owned Upstash adapter 를 사용하며 외부 app 내부 RedisStore 를 요구하지 않는다.
 
 ## 어디부터 보면 되나
 
@@ -24,6 +24,8 @@
 ```bash
 git clone git@github.com:kim8796/harness-controller.git
 cd harness-controller
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 ./harness controller doctor
 ```
 
@@ -43,8 +45,12 @@ cd harness-controller
 
 ```bash
 cd /path/to/harness-controller
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 ./harness controller doctor
 ```
+
+Telegram/Redis relay를 새 컴퓨터에서 붙일 때는 controller local runtime, gateway/Vercel runtime, BotFather, Upstash, Vercel env를 각각 준비해야 한다. 자세한 단계는 [TELEGRAM.md](TELEGRAM.md)의 New Computer Bootstrap을 따른다.
 
 2. 제품 repo를 등록한다.
 
@@ -82,7 +88,7 @@ cd /path/to/harness-controller
 ./harness run
 ```
 
-기본 실행은 queued auto backlog를 계속 처리한다. 각 backlog가 성공하면 `implement → complete → product commit → push gate` 순서로 닫는다. remote/upstream/branch/dirty/remote drift preflight가 맞지 않으면 commit까지만 끝내고 멈춘다.
+기본 실행은 현재 queued auto backlog를 처리한 뒤 queue가 비면 종료한다. 각 backlog가 성공하면 `implement → complete → product commit → push gate` 순서로 닫는다. remote/upstream/branch/dirty/remote drift preflight가 맞지 않으면 commit까지만 끝내고 멈춘다. 새 작업을 계속 감시하는 운영은 명시적으로 `./harness run --watch`를 사용한다.
 
 6. 복구가 필요할 때만 finish를 쓴다.
 
@@ -122,6 +128,12 @@ cleanup apply는 controller-owned delete-safe smoke/temp sidecar만 지우며 pr
 ## Telegram을 붙이는 경우
 
 Telegram은 실행기가 아니라 operator instruction transport다. 상태 변경 명령은 즉시 실행하지 않고 inbox에 기록되며, 다음 safe point에서 local controller가 처리한다.
+
+먼저 controller에서 dry-run setup 상태를 본다. 이 명령은 env/provider/webhook/deploy를 바꾸지 않는다.
+
+```bash
+./harness telegram setup --target-id my-app --repo-id my-app --dry-run
+```
 
 ```text
 /harness status my-app
@@ -169,7 +181,7 @@ cd /path/to/harness-starter
 - controller target이 등록돼 있다: `./harness target list`
 - queued auto task가 있다: `./harness task list`
 - 필요한 secret은 `.env` 또는 환경변수에만 있다.
-- Telegram/Redis를 쓴다면 [TELEGRAM.md](TELEGRAM.md)의 env가 준비돼 있다.
+- Telegram/Redis를 쓴다면 `./harness telegram setup --target-id <id> --repo-id <repo> --dry-run`과 [TELEGRAM.md](TELEGRAM.md)의 env가 준비돼 있다.
 
 문제가 생기면 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)를 먼저 본다.
 

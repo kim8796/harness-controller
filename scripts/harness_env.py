@@ -15,6 +15,9 @@ TELEGRAM_RELAY_ENV_KEYS = (
     "HARNESS_TELEGRAM_OPERATOR_USER_IDS",
     "HARNESS_RELAY_ENABLED",
     "HARNESS_RELAY_REPO_ID",
+    "HARNESS_RELAY_TARGET_ID",
+    "HARNESS_RELAY_TARGET_IDS",
+    "HARNESS_RELAY_TARGET_ALIASES",
     "HARNESS_RELAY_SIGNING_KEY",
     "UPSTASH_REDIS_REST_URL",
     "UPSTASH_REDIS_REST_TOKEN",
@@ -26,6 +29,9 @@ PROVIDER_ENV_KEYS = {
     ),
     "vercel": TELEGRAM_RELAY_ENV_KEYS,
 }
+OPTIONAL_PROVIDER_ENV_KEYS = {
+    "vercel": frozenset({"HARNESS_RELAY_TARGET_ID", "HARNESS_RELAY_TARGET_ALIASES"}),
+}
 _READINESS_KEY_BY_ENV = {
     "HARNESS_TELEGRAM_BRIDGE_ENABLED": "bridge_enabled",
     "HARNESS_TELEGRAM_BOT_TOKEN": "bot_token",
@@ -33,6 +39,9 @@ _READINESS_KEY_BY_ENV = {
     "HARNESS_TELEGRAM_OPERATOR_USER_IDS": "operator_ids",
     "HARNESS_RELAY_ENABLED": "relay_enabled",
     "HARNESS_RELAY_REPO_ID": "relay_repo_id",
+    "HARNESS_RELAY_TARGET_ID": "relay_target_id",
+    "HARNESS_RELAY_TARGET_IDS": "relay_target_ids",
+    "HARNESS_RELAY_TARGET_ALIASES": "relay_target_aliases",
     "HARNESS_RELAY_SIGNING_KEY": "relay_signing_key",
     "UPSTASH_REDIS_REST_URL": "upstash_url",
     "UPSTASH_REDIS_REST_TOKEN": "upstash_token",
@@ -157,6 +166,9 @@ def telegram_relay_readiness(values: Mapping[str, str]) -> dict[str, bool]:
         "operator_ids": bool(values.get("HARNESS_TELEGRAM_OPERATOR_USER_IDS")),
         "relay_enabled": values.get("HARNESS_RELAY_ENABLED") == "true",
         "relay_repo_id": bool(values.get("HARNESS_RELAY_REPO_ID")),
+        "relay_target_id": bool(values.get("HARNESS_RELAY_TARGET_ID")),
+        "relay_target_ids": bool(values.get("HARNESS_RELAY_TARGET_IDS")),
+        "relay_target_aliases": bool(values.get("HARNESS_RELAY_TARGET_ALIASES")),
         "relay_signing_key": len(signing_key) >= MIN_RELAY_SIGNING_KEY_CHARS,
         "upstash_url": bool(values.get("UPSTASH_REDIS_REST_URL")),
         "upstash_token": bool(values.get("UPSTASH_REDIS_REST_TOKEN")),
@@ -174,9 +186,17 @@ def _provider_keys(provider: str) -> tuple[str, ...]:
         raise ValueError(f"unknown provider: {provider}") from exc
 
 
-def _env_state(key: str, values: Mapping[str, str], readiness: Mapping[str, bool]) -> str:
+def _env_state(
+    key: str,
+    values: Mapping[str, str],
+    readiness: Mapping[str, bool],
+    *,
+    optional: bool = False,
+) -> str:
     value = values.get(key, "")
     if not value:
+        if optional:
+            return "optional-missing"
         return "missing"
     readiness_key = _READINESS_KEY_BY_ENV.get(key)
     if readiness_key and not readiness.get(readiness_key, False):
@@ -204,22 +224,25 @@ def _next_actions_for(provider: str, entries: list[dict[str, str]]) -> list[str]
 def build_provider_env_report(values: Mapping[str, str], provider: str) -> dict[str, object]:
     keys = _provider_keys(provider)
     readiness = telegram_relay_readiness(values)
+    optional_keys = OPTIONAL_PROVIDER_ENV_KEYS.get(provider, frozenset())
     entries = [
         {
             "key": key,
-            "state": _env_state(key, values, readiness),
+            "state": _env_state(key, values, readiness, optional=key in optional_keys),
+            "required": key not in optional_keys,
         }
         for key in keys
     ]
     present = sum(1 for entry in entries if entry["state"] == "present")
     missing = sum(1 for entry in entries if entry["state"] == "missing")
     weak = sum(1 for entry in entries if entry["state"] == "weak")
+    optional_missing = sum(1 for entry in entries if entry["state"] == "optional-missing")
     return {
         "schema_version": 1,
         "provider": provider,
         "provider_label": _PROVIDER_LABELS_KO[provider],
         "ok": missing == 0 and weak == 0,
-        "counts": {"present": present, "missing": missing, "weak": weak},
+        "counts": {"present": present, "missing": missing, "weak": weak, "optional_missing": optional_missing},
         "entries": entries,
         "values_redacted": True,
         "next_actions_ko": _next_actions_for(provider, entries),

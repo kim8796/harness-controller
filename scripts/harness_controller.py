@@ -50,6 +50,7 @@ PRODUCT_BACKLOG_PUSH_CAUTION = (
     "automation. No automatic remote rollback is performed; coordinate with the branch owner and use "
     "an operator-reviewed revert or repo-policy recovery."
 )
+DEFAULT_GIT_COMMAND_TIMEOUT_SECONDS = 120
 BACKLOG_TRANSITION_STATUSES = ("completed", "blocked", "manual-review")
 PRODUCT_HARNESS_MARKERS = (
     Path("harness"),
@@ -347,7 +348,29 @@ def clean_git_env() -> dict[str, str]:
     for key in tuple(env):
         if key.startswith("GIT_"):
             env.pop(key, None)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ASKPASS"] = ""
+    env["SSH_ASKPASS"] = ""
+    env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o ConnectTimeout=15"
     return env
+
+
+def _git_command_timeout_seconds() -> int:
+    raw = str(os.environ.get("HARNESS_GIT_COMMAND_TIMEOUT_SECONDS") or "").strip()
+    if not raw:
+        return DEFAULT_GIT_COMMAND_TIMEOUT_SECONDS
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return DEFAULT_GIT_COMMAND_TIMEOUT_SECONDS
+
+
+def _timeout_output(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
 
 
 def harness_git_identity_env() -> dict[str, str]:
@@ -369,14 +392,21 @@ def git(args: Sequence[str], *, cwd: Path, extra_env: Mapping[str, str] | None =
     env = clean_git_env()
     if extra_env:
         env.update(dict(extra_env))
-    return subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        check=False,
-        text=True,
-        capture_output=True,
-        env=env,
-    )
+    command = ["git", *args]
+    timeout_seconds = _git_command_timeout_seconds()
+    try:
+        return subprocess.run(
+            command,
+            cwd=cwd,
+            check=False,
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stderr = _timeout_output(exc.stderr) or f"git command timed out after {timeout_seconds}s"
+        return subprocess.CompletedProcess(command, 124, _timeout_output(exc.stdout), stderr)
 
 
 def git_toplevel(path: Path) -> Path:
@@ -2146,7 +2176,8 @@ def push_sidecar_backlog_product_commit(
         raise ControllerError("target verification blocks backlog product push: " + ", ".join(blockers))
     push_target = resolve_product_diff_smoke_push_target(record.repo, record.branch)
     expected_remote_before = str(commit_evidence.get("product_head_before") or "")
-    if push_target.remote_head != expected_remote_before:
+    already_pushed = push_target.remote_head == before_head
+    if push_target.remote_head != expected_remote_before and not already_pushed:
         raise ControllerError("target push remote head does not match backlog product commit base")
     payload: dict[str, Any] = {
         "schema_version": 1,
@@ -2177,6 +2208,7 @@ def push_sidecar_backlog_product_commit(
         "product_push_remote_before": push_target.remote_head,
         "product_push_remote_after": push_target.remote_head,
         "product_push_command": list(push_target.command),
+        "product_push_already_present": already_pushed,
         "push_caution": PRODUCT_BACKLOG_PUSH_CAUTION,
         "receipt_path": "",
         "generated_evidence_path": "",
@@ -2184,7 +2216,7 @@ def push_sidecar_backlog_product_commit(
     if not apply:
         return payload
 
-    remote_after = push_product_backlog_commit(record.repo, push_target, before_head)
+    remote_after = before_head if already_pushed else push_product_backlog_commit(record.repo, push_target, before_head)
     after_head = target_git_head(record.repo)
     after_status = target_git_status_lines(record.repo)
     post_blockers: list[str] = []

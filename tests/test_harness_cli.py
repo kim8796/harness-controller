@@ -32,6 +32,7 @@ def test_beginner_help_home_no_args_and_help_are_static(monkeypatch, tmp_path: P
     assert "./harness task list" in no_arg_output
     assert "./harness run" in no_arg_output
     assert "./harness finish" in no_arg_output
+    assert "./harness telegram setup --target-id my-app --repo-id my-app --dry-run" in no_arg_output
     assert "./harness controller audit-size" in no_arg_output
     assert "./harness controller cleanup --dry-run" in no_arg_output
     assert "./harness --help" in no_arg_output
@@ -306,6 +307,37 @@ def test_beginner_run_rejects_extra_args_before_delegate(monkeypatch, tmp_path: 
     assert calls == []
 
 
+def test_beginner_run_rejects_once_watch_conflict(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+
+    def fail_default_target(_root: Path) -> object:
+        raise AssertionError("conflicting run flags must fail before target discovery")
+
+    monkeypatch.setattr(module.harness_controller, "default_target", fail_default_target)
+
+    assert module.main(["run", "--once", "--watch"]) == 2
+    output = capsys.readouterr().out
+
+    assert "--once" in output
+    assert "--watch" in output
+    assert "함께 사용할 수 없습니다" in output
+
+
+def test_beginner_run_watch_rejects_zero_idle_interval(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+
+    def fail_default_target(_root: Path) -> object:
+        raise AssertionError("invalid watch idle interval must fail before target discovery")
+
+    monkeypatch.setattr(module.harness_controller, "default_target", fail_default_target)
+
+    assert module.main(["run", "--watch", "--idle-seconds", "0"]) == 2
+    output = capsys.readouterr().out
+
+    assert "idle interval" in output
+    assert "1초 이상" in output
+
+
 def test_beginner_run_once_autopilot_uses_default_target_transaction(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_module()
     controller = tmp_path / "controller"
@@ -346,6 +378,126 @@ def test_beginner_run_once_autopilot_uses_default_target_transaction(monkeypatch
     assert "run 종료: 처리한 backlog 1개" in output
 
 
+def test_beginner_run_default_drains_queue_and_exits_when_empty(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    record = module.harness_controller.TargetRecord(
+        target_id="demo",
+        repo=product,
+        branch="main",
+        state_root=controller / "targets" / "demo",
+        controller_version="test",
+        created_at="",
+        updated_at="",
+        is_default=True,
+    )
+    calls: list[object] = []
+    queue = [type("Item", (), {"item_id": "BL-demo"})(), None]
+
+    def fail_sleep(_seconds: int) -> None:
+        raise AssertionError("default run must exit instead of idling on an empty queue")
+
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_controller, "default_target", lambda root: record)
+    monkeypatch.setattr(module, "_target_executable_backlog_items", lambda _record: [queue[0]])
+    monkeypatch.setattr(module, "_target_next_auto_backlog_item", lambda _record: queue.pop(0))
+    monkeypatch.setattr(module.time, "sleep", fail_sleep)
+    monkeypatch.setattr(
+        module,
+        "_run_autopilot_transaction",
+        lambda _record, args: calls.append(args)
+        or module.AutopilotTransaction("pushed", "run-demo", "BL-demo", "abc1234", "abc1234", "completed"),
+    )
+
+    assert module.main(["run"]) == 0
+    output = capsys.readouterr().out
+
+    assert len(calls) == 1
+    assert "현재 queued auto backlog를 처리한 뒤 queue가 비면 종료" in output
+    assert "transaction 완료: `BL-demo`" in output
+    assert "run 종료: 처리한 backlog 1개" in output
+
+
+def test_beginner_run_default_is_bounded_to_initial_queue_size(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    record = module.harness_controller.TargetRecord(
+        target_id="demo",
+        repo=product,
+        branch="main",
+        state_root=controller / "targets" / "demo",
+        controller_version="test",
+        created_at="",
+        updated_at="",
+        is_default=True,
+    )
+    first = type("Item", (), {"item_id": "BL-first"})()
+    late = type("Item", (), {"item_id": "BL-late"})()
+    live_queue = [first, late]
+    calls: list[str] = []
+
+    def fail_sleep(_seconds: int) -> None:
+        raise AssertionError("default run must not watch newly queued backlog")
+
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_controller, "default_target", lambda root: record)
+    monkeypatch.setattr(module, "_target_executable_backlog_items", lambda _record: [first])
+    monkeypatch.setattr(module, "_target_next_auto_backlog_item", lambda _record: live_queue.pop(0))
+    monkeypatch.setattr(module.time, "sleep", fail_sleep)
+    monkeypatch.setattr(
+        module,
+        "_run_autopilot_transaction",
+        lambda _record, _args: calls.append("called")
+        or module.AutopilotTransaction("pushed", "run-first", "BL-first", "abc1234", "abc1234", "completed"),
+    )
+
+    assert module.main(["run"]) == 0
+    output = capsys.readouterr().out
+
+    assert calls == ["called"]
+    assert "transaction 시작: `BL-first`" in output
+    assert "BL-late" not in output
+    assert "run 종료: 처리한 backlog 1개" in output
+
+
+def test_beginner_run_default_empty_queue_exits_without_sleep(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    record = module.harness_controller.TargetRecord(
+        target_id="demo",
+        repo=product,
+        branch="main",
+        state_root=controller / "targets" / "demo",
+        controller_version="test",
+        created_at="",
+        updated_at="",
+        is_default=True,
+    )
+
+    def fail_sleep(_seconds: int) -> None:
+        raise AssertionError("default run must exit instead of idling on an empty queue")
+
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_controller, "default_target", lambda root: record)
+    monkeypatch.setattr(module, "_target_next_auto_backlog_item", lambda _record: None)
+    monkeypatch.setattr(module.time, "sleep", fail_sleep)
+
+    assert module.main(["run"]) == 0
+    output = capsys.readouterr().out
+
+    assert "run 종료: queued auto backlog가 없습니다." in output
+    assert "다음 작업을 넣으려면 `./harness task`를 사용하세요." in output
+
+
 def test_beginner_run_once_autopilot_completes_and_commits_before_push_block(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
@@ -380,6 +532,8 @@ def test_beginner_run_once_autopilot_completes_and_commits_before_push_block(
     assert "완료 처리:" in output
     assert "product commit:" in output
     assert "product push: 보류" in output
+    assert "./harness finish --run " in output
+    assert "--push --apply" in output
     assert "run 일시정지" in output
     assert _product_head(product) != before_head
     assert _product_git_status(product) == []
@@ -404,6 +558,8 @@ def test_beginner_run_once_autopilot_completes_and_commits_before_push_block(
     assert module.main(["run", "--once", "--runner", "custom", "--command-template", "printf 'next\\n' > next.txt"]) == 2
     blocked_output = capsys.readouterr().out
     assert "이전 transaction의 product push가 아직 닫히지 않았습니다" in blocked_output
+    assert "./harness finish --run " in blocked_output
+    assert "--push --apply" in blocked_output
     assert "BL-next" not in blocked_output
     assert not (product / "next.txt").exists()
 
@@ -557,7 +713,7 @@ def test_beginner_finish_dry_run_and_apply_complete_sidecar_backlog(monkeypatch,
     assert "하네스 finish" in output
     assert f"구현 기록: `{run_id}`" in output
     assert "작업 현재 상태: `queued`" in output
-    assert "다음 명령: `./harness finish --apply`" in output
+    assert f"다음 명령: `./harness finish --run {run_id} --apply`" in output
     assert (controller / "targets" / "demo" / "backlog" / "queued" / "BL-demo.md").exists()
 
     assert module.main(["finish", "--apply"]) == 0
@@ -702,7 +858,7 @@ def test_beginner_finish_commit_and_push_delegate_existing_gates(monkeypatch, tm
         env=_git_env(),
     ).stdout.split()[0]
     assert "target product repo must be clean before backlog product push" in output
-    assert './harness finish --commit --message "feat: ..."' in output
+    assert f'./harness finish --run {run_id} --commit --message "feat: ..."' in output
     assert remote_before_commit == head_before
     assert not list((controller / "targets" / "demo" / "runs" / "harness").glob("*/product-push-receipt.json"))
 
@@ -746,6 +902,7 @@ def test_beginner_finish_commit_and_push_delegate_existing_gates(monkeypatch, tm
     assert "finish commit 완료" in output
     assert "배포나 외부 자동화를 트리거" in output
     assert "자동 remote rollback은 없습니다" in output
+    assert f"./harness finish --run {run_id} --push --apply" in output
     assert product_commit != head_before
     assert _product_git_status(product) == []
     assert module.main(["finish", "--target", "demo", "--run", run_id]) == 0
@@ -755,6 +912,7 @@ def test_beginner_finish_commit_and_push_delegate_existing_gates(monkeypatch, tm
     output = capsys.readouterr().out
     assert "finish push dry-run 완료" in output
     assert "자동 remote rollback은 없습니다" in output
+    assert f"./harness finish --run {run_id} --push --apply" in output
     remote_before_apply = subprocess.run(
         ["git", "ls-remote", "origin", "refs/heads/main"],
         cwd=product,
@@ -849,7 +1007,7 @@ def test_beginner_finish_requires_run_when_multiple_implementation_evidence(monk
     assert module.main(["finish", "--run", "external-demo-impl-a"]) == 0
     output = capsys.readouterr().out
     assert "구현 기록: `external-demo-impl-a`" in output
-    assert "다음 명령: `./harness finish --apply`" in output
+    assert "다음 명령: `./harness finish --run external-demo-impl-a --apply`" in output
 
 
 def test_beginner_finish_fails_closed_without_default_or_evidence(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -1954,6 +2112,7 @@ def test_profiles_and_version_commands_are_secret_safe(capsys) -> None:
     telegram_output = capsys.readouterr().out
     assert "Telegram/Redis 준비" in telegram_output
     assert "HARNESS_RELAY_SIGNING_KEY" in telegram_output
+    assert "./harness telegram setup" in telegram_output
 
     assert module.main(["profiles", "show", "minimal"]) == 0
     minimal_output = capsys.readouterr().out
@@ -1963,6 +2122,70 @@ def test_profiles_and_version_commands_are_secret_safe(capsys) -> None:
     payload = json.loads(capsys.readouterr().out)
     assert payload["version"]
     assert "HARNESS_RELAY_SIGNING_KEY" not in json.dumps(payload)
+
+
+def test_telegram_setup_command_is_dry_run_and_secret_safe(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    for key in (*module.harness_env.TELEGRAM_RELAY_ENV_KEYS, module.harness_env.TELEGRAM_BOT_TOKEN_ENV):
+        monkeypatch.delenv(key, raising=False)
+
+    assert module.main(["telegram", "setup", "--target-id", "demo", "--repo-id", "demo", "--non-interactive", "--json"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["values_redacted"] is True
+    assert payload["steps"][-1]["name"] == "setup"
+    assert payload["steps"][-1]["status"] == "failed"
+    assert not (controller / ".env").exists()
+    assert not (product / ".env").exists()
+
+    secret_values = {
+        "HARNESS_TELEGRAM_BOT_TOKEN": "987654321:TOKEN-aaaaaaaaaaaaaaaaaaaaaa",
+        "HARNESS_RELAY_SIGNING_KEY": "x" * 32,
+        "UPSTASH_REDIS_REST_URL": "https://example.upstash.io",
+        "UPSTASH_REDIS_REST_TOKEN": "upstash-secret-token",
+    }
+    for key, value in secret_values.items():
+        monkeypatch.setenv(key, value)
+
+    assert (
+        module.main(
+            [
+                "telegram",
+                "setup",
+                "--target-id",
+                "demo",
+                "--repo-id",
+                "demo",
+                "--webhook-url",
+                "https://gateway.example.com/api/webhook",
+                "--operator-user-ids",
+                "67890",
+                "--admin-chat-id",
+                "12345",
+                "--dry-run",
+                "--apply",
+                "--apply-vercel",
+                "--set-webhook",
+                "--non-interactive",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    ready_rendered = capsys.readouterr().out
+    ready_payload = json.loads(ready_rendered)
+    assert ready_payload["dry_run_overrode_apply_flags"] is True
+    assert ready_payload["inputs"]["target_id"] == "demo"
+    assert ready_payload["inputs"]["repo_id"] == "demo"
+    assert all(step["status"] != "failed" for step in ready_payload["steps"])
+    assert "987654321:TOKEN-aaaaaaaaaaaaaaaaaaaaaa" not in ready_rendered
+    assert "upstash-secret-token" not in ready_rendered
+    assert not (controller / ".env").exists()
+    assert not (product / ".env").exists()
 
 
 def test_version_uses_starter_aware_export_check(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -1998,6 +2221,9 @@ def test_env_check_and_register_are_secret_safe(tmp_path: Path, capsys, monkeypa
                 "HARNESS_TELEGRAM_OPERATOR_USER_IDS=123456",
                 "HARNESS_RELAY_ENABLED=true",
                 "HARNESS_RELAY_REPO_ID=demo",
+                "HARNESS_RELAY_TARGET_ID=private-target-123",
+                "HARNESS_RELAY_TARGET_IDS=private-target-123,other-target-456",
+                "HARNESS_RELAY_TARGET_ALIASES=prod=private-target-123",
                 "HARNESS_RELAY_SIGNING_KEY=" + ("x" * 64),
                 "UPSTASH_REDIS_REST_URL=https://upstash.example.invalid",
                 "UPSTASH_REDIS_REST_TOKEN=redis-secret",
@@ -2012,17 +2238,28 @@ def test_env_check_and_register_are_secret_safe(tmp_path: Path, capsys, monkeypa
     rendered = json.dumps(payload, ensure_ascii=False)
     assert payload["ok"] is True
     assert payload["values_redacted"] is True
+    assert {entry["key"] for entry in payload["entries"]} >= {
+        "HARNESS_RELAY_TARGET_ID",
+        "HARNESS_RELAY_TARGET_IDS",
+        "HARNESS_RELAY_TARGET_ALIASES",
+    }
     assert "bot-secret" not in rendered
     assert "redis-secret" not in rendered
     assert "https://upstash.example.invalid" not in rendered
+    assert "private-target-123" not in rendered
+    assert "other-target-456" not in rendered
+    assert "prod=private-target-123" not in rendered
 
     assert module.main(["env", "register", "--provider", "vercel", "--dry-run"]) == 0
     output = capsys.readouterr().out
     assert "원격 변경: 실행 안 함" in output
+    assert "계획: HARNESS_RELAY_TARGET_IDS (present)" in output
     assert "계획: HARNESS_RELAY_SIGNING_KEY (present)" in output
     assert "bot-secret" not in output
     assert "redis-secret" not in output
     assert "https://upstash.example.invalid" not in output
+    assert "private-target-123" not in output
+    assert "prod=private-target-123" not in output
 
     assert module.main(["env", "register", "--provider", "vercel", "--dry-run", "--json"]) == 0
     register_payload = json.loads(capsys.readouterr().out)
@@ -2032,6 +2269,7 @@ def test_env_check_and_register_are_secret_safe(tmp_path: Path, capsys, monkeypa
     assert "bot-secret" not in register_rendered
     assert "redis-secret" not in register_rendered
     assert "https://upstash.example.invalid" not in register_rendered
+    assert "private-target-123" not in register_rendered
 
 
 def test_env_register_requires_dry_run(capsys) -> None:
@@ -2234,8 +2472,12 @@ def test_controller_release_check_runs_optional_focused_checks(monkeypatch, tmp_
     assert payload["checks"]["pytest"]["ok"] is True
     assert len(calls) == 2
     assert calls[0][1:4] == ["-m", "ruff", "check"]
+    assert "scripts/harness_telegram_setup.py" in calls[0]
+    assert "scripts/harness_profiles.py" in calls[0]
     assert calls[1][1:4] == ["-m", "pytest", "tests/test_harness_autonomy.py"]
+    assert "tests/test_harness_guard.py" in calls[1]
     assert "tests/test_harness_task_intake.py" in calls[1]
+    assert "tests/test_harness_telegram_setup.py" in calls[1]
 
 
 def test_controller_release_check_reports_skipped_and_failed_optional_checks(
@@ -3335,6 +3577,74 @@ def test_external_target_backlog_push_apply_updates_registered_remote(
     assert receipt["product_push_remote_before"] == head_before
     assert receipt["product_push_remote_after"] == product_commit
     assert receipt["product_push_command"] == ["push", "--no-verify", "origin", "HEAD:refs/heads/main"]
+    assert receipt["product_push_already_present"] is False
+
+
+def test_external_target_backlog_push_apply_closes_when_commit_already_on_remote(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    remote = tmp_path / "remote.git"
+    controller.mkdir()
+    _init_product_repo(product, configure_identity=True)
+    _configure_product_upstream(product, remote)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.12")
+    run_id = _create_completed_sidecar_backlog_with_product_diff(module, controller, product, capsys)
+    assert (
+        module.main(
+            [
+                "target",
+                "backlog",
+                "commit",
+                "demo",
+                "--run",
+                run_id,
+                "--message",
+                "feat: implement demo backlog",
+                "--apply",
+            ]
+        )
+        == 0
+    )
+    product_commit = _product_head(product)
+    subprocess.run(
+        ["git", "push", "--no-verify", "origin", "HEAD:refs/heads/main"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    )
+    capsys.readouterr()
+
+    assert module.main(["target", "backlog", "push", "demo", "--run", run_id, "--apply"]) == 0
+    output = capsys.readouterr().out
+    remote_after = subprocess.run(
+        ["git", "ls-remote", "origin", "refs/heads/main"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout.split()[0]
+
+    assert "적용 완료" in output
+    assert remote_after == product_commit
+    assert _product_head(product) == product_commit
+    assert _product_git_status(product) == []
+    receipts = list((controller / "targets" / "demo" / "runs" / "harness").glob("*/product-push-receipt.json"))
+    assert receipts
+    receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+    assert receipt["operation"] == "backlog-product-push"
+    assert receipt["status"] == "pass"
+    assert receipt["product_commit_sha"] == product_commit
+    assert receipt["product_push_sha"] == product_commit
+    assert receipt["product_push_remote_before"] == product_commit
+    assert receipt["product_push_remote_after"] == product_commit
+    assert receipt["product_push_already_present"] is True
 
 
 def test_external_target_backlog_push_blocks_remote_drift(monkeypatch, tmp_path: Path, capsys) -> None:

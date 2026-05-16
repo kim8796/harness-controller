@@ -6,6 +6,7 @@ import json
 import logging
 import subprocess
 import sys
+import types
 import urllib.error
 from pathlib import Path
 
@@ -1433,6 +1434,109 @@ def test_drain_redis_relay_rejects_malformed_payload_without_inbox(
     assert result["failed"] == 1
     assert not (tmp_path / "runs" / "autonomy" / "inbox").exists()
     assert result["processing_count"] == 0
+
+
+def test_relay_store_factory_uses_controller_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_module()
+    fake_store = object()
+    calls = 0
+
+    def build_upstash_relay_store_from_env() -> object:
+        nonlocal calls
+        calls += 1
+        return fake_store
+
+    monkeypatch.setitem(
+        sys.modules,
+        "harness_relay_store",
+        types.SimpleNamespace(build_upstash_relay_store_from_env=build_upstash_relay_store_from_env),
+    )
+
+    assert module._build_relay_store_from_env() is fake_store
+    assert calls == 1
+    assert "db.database" not in Path(module.__file__).read_text(encoding="utf-8")
+
+
+def test_relay_store_factory_fails_closed_on_adapter_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_module()
+
+    def build_upstash_relay_store_from_env() -> object:
+        raise RuntimeError("UPSTASH_REDIS_REST_TOKEN=secret-token")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "harness_relay_store",
+        types.SimpleNamespace(build_upstash_relay_store_from_env=build_upstash_relay_store_from_env),
+    )
+
+    assert module._build_relay_store_from_env() is None
+
+
+def test_main_drain_relay_forwards_manual_target_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_module()
+    calls: list[tuple[Path, str | None]] = []
+
+    def fake_drain(root: Path, *, target_id: str | None = None) -> dict[str, object]:
+        calls.append((root, target_id))
+        return {"target_id": target_id, "materialized": 0}
+
+    monkeypatch.setattr(module, "drain_redis_relay_once", fake_drain)
+
+    assert module.main(["--root", str(tmp_path), "--drain-relay", "--target-id", "app", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert calls == [(tmp_path, "app")]
+    assert payload["relay"]["target_id"] == "app"
+
+
+def test_drain_redis_relay_external_controller_requires_target_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    from harness_autonomy import relay
+
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _add_controller_target(controller, "app", product)
+    store = _FakeRelayStore()
+    monkeypatch.setenv(module.RELAY_ENABLED_ENV, "true")
+    monkeypatch.setenv(module.RELAY_SIGNING_KEY_ENV, SIGNING_KEY)
+    monkeypatch.setenv(module.BRIDGE_OPERATOR_USER_IDS_ENV, "42")
+    envelope = relay.build_owner_relay_envelope(
+        {
+            "command": "/harness note",
+            "action": "note",
+            "argument": "unscoped external note",
+            "canonical": "true",
+            "read_only": "false",
+        },
+        repo_id="controller",
+        source="telegram-product-bot",
+        actor_user_id=42,
+        chat_id=123456789,
+        telegram_update_id=501,
+        signing_key=SIGNING_KEY,
+    )
+    relay.enqueue_owner_relay(store, envelope)
+
+    result = module.drain_redis_relay_once(controller, store=store, repo_id="controller")
+
+    assert result["skipped_target"] == 1
+    assert "target_id" in result["reason"]
+    assert relay.owner_relay_queue_length(store, repo_id="controller") == 1
+    assert not (controller / "runs" / "autonomy" / "inbox").exists()
+    inbox_files = [
+        path for path in (controller / "targets" / "app" / "operator-inbox").glob("*.md")
+        if path.name != "README.md"
+    ]
+    assert inbox_files == []
+    assert not (product / "runs").exists()
 
 
 def test_handle_inbound_rejects_non_admin_chat(tmp_path: Path) -> None:

@@ -36,6 +36,34 @@ def _init_git_repo(path: Path) -> None:
     (path / "README.md").write_text("# Product\n", encoding="utf-8")
 
 
+def test_controller_git_wrapper_is_noninteractive_and_times_out(monkeypatch, tmp_path: Path) -> None:
+    module = _load_module()
+    seen: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        seen["command"] = command
+        seen["timeout"] = kwargs.get("timeout")
+        seen["env"] = kwargs.get("env")
+        raise subprocess.TimeoutExpired(command, kwargs.get("timeout"), output="partial", stderr="")
+
+    monkeypatch.setenv("HARNESS_GIT_COMMAND_TIMEOUT_SECONDS", "7")
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    result = module.git(["ls-remote", "origin", "refs/heads/main"], cwd=tmp_path)
+
+    assert result.returncode == 124
+    assert result.args == ["git", "ls-remote", "origin", "refs/heads/main"]
+    assert result.stdout == "partial"
+    assert "timed out after 7s" in result.stderr
+    assert seen["timeout"] == 7
+    env = seen["env"]
+    assert isinstance(env, dict)
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["GIT_ASKPASS"] == ""
+    assert env["SSH_ASKPASS"] == ""
+    assert "BatchMode=yes" in env["GIT_SSH_COMMAND"]
+
+
 def test_root_context_embedded_preserves_existing_root_semantics(tmp_path: Path) -> None:
     module = _load_module()
     root = tmp_path / "embedded"

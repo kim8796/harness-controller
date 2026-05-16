@@ -16,10 +16,12 @@
 ./harness finish
 ```
 
-`v1.8.24`부터 bare `./harness run`은 default target의 queued auto backlog를 계속 처리하는 autopilot이다.
+`v1.8.26`부터 bare `./harness run`은 default target의 현재 queued auto backlog를 처리한 뒤 queue가 비면 종료하는 autopilot이고, Telegram/Redis relay drain은 controller-owned Upstash adapter를 사용한다.
 성공한 transaction은 기존 gate를 묶어 `implement -> complete -> commit -> push preflight/apply` 순서로 진행한다.
 원격 upstream, branch, dirty state, drift, secret-like diff, product pollution 중 하나라도 막히면 다음 backlog로 넘어가지 않고 이유와 다음 명령을 출력한다.
-한 항목만 점검하려면 `./harness run --once`를 사용한다.
+한 항목만 점검하려면 `./harness run --once`, 새 작업을 계속 감시하려면 `./harness run --watch`를 사용한다.
+relay smoke 는 target을 명시해 `python3 scripts/harness_telegram_bridge.py --drain-relay --target-id <target> --json` 으로 확인한다.
+Telegram/Redis setup readiness 는 `./harness telegram setup --target-id <id> --repo-id <repo> --dry-run` 으로 먼저 확인하며, dry-run 은 env/provider/webhook/deploy side effect 를 만들지 않는다.
 
 `task review` 는 안전한 config alias 만 exact 후보 파일명으로 보정한다.
 이미 `manual-review` 로 queue 되었지만 scope 문법만 문제였던 항목은 다음처럼 복구한다.
