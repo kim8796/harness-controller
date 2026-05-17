@@ -18,9 +18,9 @@
 
 ```bash
 ./harness controller doctor
-./harness install /path/to/product-repo --id my-app --branch main --default
-./harness task
-./harness run
+./harness install /path/to/product-repo
+./harness do "README에 설치 방법을 간단히 추가해"
+./harness watch
 ```
 
 자세한 설명은 [docs/harness/START_HERE.md](docs/harness/START_HERE.md)를 본다.

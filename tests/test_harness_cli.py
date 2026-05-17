@@ -28,14 +28,15 @@ def test_beginner_help_home_no_args_and_help_are_static(monkeypatch, tmp_path: P
     assert module.main([]) == 0
     no_arg_output = capsys.readouterr().out
     assert "하네스 시작" in no_arg_output
-    assert "./harness install /path/to/product --id my-app --default" in no_arg_output
-    assert "./harness task list" in no_arg_output
-    assert "./harness run" in no_arg_output
-    assert "./harness finish" in no_arg_output
+    assert "./harness install /path/to/product" in no_arg_output
+    assert './harness do "맵이 너무 둥글고 캐릭터가 커서 줄여줘"' in no_arg_output
+    assert "./harness watch" in no_arg_output
+    assert "./harness task review <packet-id> --normalize auto" not in no_arg_output
+    assert "./harness target archive plan my-app" not in no_arg_output
     assert "./harness telegram setup --target-id my-app --repo-id my-app --dry-run" in no_arg_output
     assert "./harness controller audit-size" in no_arg_output
-    assert "./harness controller cleanup --dry-run" in no_arg_output
     assert "./harness --help" in no_arg_output
+    assert "./harness task --help" in no_arg_output
     assert not (tmp_path / "targets").exists()
 
     assert module.main(["help"]) == 0
@@ -52,6 +53,8 @@ def test_argparse_help_and_invalid_command_remain_advanced_reference(capsys) -> 
     assert top_help.value.code == 0
     output = capsys.readouterr().out
     assert "usage: harness" in output
+    assert "do" in output
+    assert "watch" in output
     assert "target" in output
     assert "하네스 시작" not in output
 
@@ -63,10 +66,161 @@ def test_argparse_help_and_invalid_command_remain_advanced_reference(capsys) -> 
     assert "alias" in output
     assert "하네스 시작" not in output
 
+    with pytest.raises(SystemExit) as install_help:
+        module.main(["install", "--help"])
+    assert install_help.value.code == 0
+    output = capsys.readouterr().out
+    assert "usage: harness install [-h] [repo_path]" in output
+    assert "--id" not in output
+    assert "--branch" not in output
+    assert "--default" not in output
+
     with pytest.raises(SystemExit) as invalid:
         module.main(["unknown-command"])
     assert invalid.value.code == 2
     assert "invalid choice" in capsys.readouterr().err
+
+
+def test_task_review_help_documents_normalization_modes(capsys) -> None:
+    module = _load_module()
+
+    with pytest.raises(SystemExit) as task_review_help:
+        module.main(["task", "review", "--help"])
+
+    assert task_review_help.value.code == 0
+    output = capsys.readouterr().out
+    assert "--normalize" in output
+    assert "auto" in output
+    assert "deterministic" in output
+    assert "off" in output
+    assert "--ai-response" in output
+
+
+def test_target_archive_help_documents_audit_plan_apply(capsys) -> None:
+    module = _load_module()
+
+    with pytest.raises(SystemExit) as target_archive_help:
+        module.main(["target", "archive", "--help"])
+
+    assert target_archive_help.value.code == 0
+    output = capsys.readouterr().out
+    assert "audit" in output
+    assert "plan" in output
+    assert "apply" in output
+    assert "targets/<target-id>" in output
+    assert "product repo" in output
+
+
+def test_do_queue_only_creates_normalized_auto_backlog(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.27")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    capsys.readouterr()
+
+    assert module.main(["do", "--no-run", "README에 설치 방법을 간단히 추가해"]) == 0
+    output = capsys.readouterr().out
+
+    assert "하네스 do task intake 완료" in output
+    assert "자동 실행 가능: 예" in output
+    assert "do queue-only 완료" in output
+    queued = tuple((controller / "targets" / "demo" / "backlog" / "queued").glob("*.md"))
+    assert len(queued) == 1
+    body = queued[0].read_text(encoding="utf-8")
+    assert "Autonomy-Execute: auto" in body
+    assert "Intake-Packet:" in body
+    memory = controller / "targets" / "demo" / "memory" / "autopilot-lessons.jsonl"
+    assert memory.exists()
+    assert '"event": "task-intake"' in memory.read_text(encoding="utf-8")
+    _assert_no_product_harness_pollution(product)
+
+
+def test_do_rejects_manual_review_without_running(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.27")
+    calls: list[object] = []
+    monkeypatch.setattr(module, "command_run", lambda args: calls.append(args) or 0)
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    capsys.readouterr()
+
+    assert module.main(["do", "데이터베이스 마이그레이션 돌려줘"]) == 2
+    output = capsys.readouterr().out
+
+    assert "do 중단" in output
+    assert "확인 필요" in output or "안전 경고" in output
+    assert calls == []
+    _assert_no_product_harness_pollution(product)
+
+
+def test_watch_is_simple_wrapper_for_run_with_relay_and_maintenance(monkeypatch, capsys) -> None:
+    module = _load_module()
+    calls: list[object] = []
+    monkeypatch.setattr(module, "command_run", lambda args: calls.append(args) or 0)
+
+    assert module.main(["watch"]) == 0
+
+    assert len(calls) == 1
+    args = calls[0]
+    assert args.watch is True
+    assert args.drain_telegram is True
+    assert args.auto_maintenance is True
+    assert args.extra == []
+    assert capsys.readouterr().out == ""
+
+
+def test_operator_task_inbox_converts_only_explicit_task_instruction(monkeypatch, tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.27")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    record = module.harness_controller.load_target(controller, "demo")
+    inbox = controller / "targets" / "demo" / "operator-inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    (inbox / "note.md").write_text("Action: note\n\n## Raw Instruction\n\nignore me\n", encoding="utf-8")
+    (inbox / "task.md").write_text(
+        "\n".join(
+            [
+                "# Operator Inbox Message",
+                "",
+                "Action: task",
+                "",
+                "## Raw Instruction",
+                "",
+                "```json owner-instruction",
+                '{"raw_instruction": "README에 설치 방법을 간단히 추가해"}',
+                "```",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = module._process_operator_task_inbox(record)
+
+    assert result["seen"] == 1
+    assert result["created"] == 1
+    assert result["queued"] == 1
+    queued = tuple((controller / "targets" / "demo" / "backlog" / "queued").glob("*.md"))
+    assert len(queued) == 1
+    receipts = tuple((controller / "targets" / "demo" / "state" / "operator-inbox-task-receipts").glob("*.json"))
+    assert len(receipts) == 1
+    _assert_no_product_harness_pollution(product)
 
 
 def _git_env() -> dict[str, str]:
@@ -280,7 +434,7 @@ def test_run_once_empty_default_target_does_not_delegate_embedded_launcher(monke
     assert module.main(["run", "--once"]) == 0
     output = capsys.readouterr().out
     assert "queued auto backlog가 없습니다" in output
-    assert "./harness task" in output
+    assert './harness do "요청"' in output
 
 
 def test_beginner_run_requires_default_target(monkeypatch, capsys) -> None:
@@ -495,7 +649,7 @@ def test_beginner_run_default_empty_queue_exits_without_sleep(monkeypatch, tmp_p
     output = capsys.readouterr().out
 
     assert "run 종료: queued auto backlog가 없습니다." in output
-    assert "다음 작업을 넣으려면 `./harness task`를 사용하세요." in output
+    assert '다음 작업을 넣으려면 `./harness do "요청"`을 사용하세요.' in output
 
 
 def test_beginner_run_once_autopilot_completes_and_commits_before_push_block(
@@ -1080,11 +1234,11 @@ def test_beginner_install_accepts_positional_repo(monkeypatch, tmp_path: Path, c
     monkeypatch.setattr(module, "repo_root", lambda: controller)
     monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.18")
 
-    assert module.main(["install", str(product), "--id", "demo", "--default"]) == 0
+    assert module.main(["install", str(product)]) == 0
     output = capsys.readouterr().out
     assert "하네스 install 완료" in output
-    assert "대상 ID: `demo`" in output
-    assert module.harness_controller.default_target(controller).target_id == "demo"
+    assert "대상 ID: `product`" in output
+    assert module.harness_controller.default_target(controller).target_id == "product"
     _assert_no_product_harness_pollution(product)
 
 
@@ -1133,7 +1287,7 @@ def test_beginner_install_no_args_non_tty_preserves_status(monkeypatch, tmp_path
     output = capsys.readouterr().out
     assert "하네스 install 상태" in output
     assert "등록된 대상: 0개" in output
-    assert "./harness install /path/to/product --id my-app" in output
+    assert "./harness install /path/to/product" in output
     assert not (controller / "targets").exists()
 
 
@@ -1176,15 +1330,15 @@ def test_beginner_install_tty_prompt_registers_target(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(module, "repo_root", lambda: controller)
     monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.18")
     monkeypatch.setattr(module.sys.stdin, "isatty", lambda: True)
-    answers = iter([str(product), "demo", "main", "y"])
+    answers = iter([str(product)])
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
 
     assert module.main(["install"]) == 0
     output = capsys.readouterr().out
     assert "하네스 install 인터뷰" in output
     assert "하네스 install 완료" in output
-    assert "대상 ID: `demo`" in output
-    assert module.harness_controller.default_target(controller).target_id == "demo"
+    assert "대상 ID: `product`" in output
+    assert module.harness_controller.default_target(controller).target_id == "product"
     _assert_no_product_harness_pollution(product)
 
 
@@ -2015,6 +2169,218 @@ def test_controller_audit_size_and_cleanup_delete_only_smoke_targets(monkeypatch
     assert any((controller / "targets" / ".cleanup-receipts").glob("cleanup-*.json"))
     assert product.exists()
     assert smoke_product.exists()
+
+
+def test_target_archive_audit_plan_apply_stays_inside_sidecar(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    record = module.harness_controller.add_target(
+        controller_root=controller,
+        target_id="app",
+        repo=product,
+        branch="main",
+        controller_version="test",
+        force=True,
+    )
+    active_draft = record.state_root / "backlog" / "drafts" / "task-active" / "request.md"
+    old_draft = record.state_root / "backlog" / "drafts" / "task-old" / "request.md"
+    queued = record.state_root / "backlog" / "queued" / "BL-active.md"
+    inbox_note = record.state_root / "operator-inbox" / "20260517-note.md"
+    latest_report = record.state_root / "reports" / "target-run-latest.md"
+    old_report = record.state_root / "reports" / "old-run" / "report.md"
+    evidence = record.state_root / "runs" / "harness" / "run-1" / "generated-evidence.json"
+    for path in (active_draft, old_draft, queued, inbox_note, latest_report, old_report, evidence):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    active_draft.write_text("active draft\n", encoding="utf-8")
+    old_draft.write_text("old draft\n", encoding="utf-8")
+    queued.write_text("Status: queued\nSource: task-intake\nIntake-Packet: task-active\n", encoding="utf-8")
+    inbox_note.write_text("note\n", encoding="utf-8")
+    latest_report.write_text("latest\n", encoding="utf-8")
+    old_report.write_text("old report cache\n", encoding="utf-8")
+    evidence.write_text("{}", encoding="utf-8")
+
+    assert module.main(["target", "archive", "audit", "app", "--json"]) == 0
+    audit = json.loads(capsys.readouterr().out)
+    assert audit["candidate_count"] >= 3
+    assert audit["delete_safe_count"] >= 1
+
+    assert module.main(["target", "archive", "plan", "app", "--json"]) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert Path(plan["plan_path"]).exists()
+
+    assert module.main(["target", "archive", "apply", "app", "--plan", plan["plan_path"], "--json"]) == 0
+    receipt = json.loads(capsys.readouterr().out)
+
+    assert receipt["applied"] is True
+    assert Path(receipt["receipt_path"]).exists()
+    assert product.exists()
+    assert active_draft.exists()
+    assert queued.exists()
+    assert latest_report.exists()
+    assert not old_draft.exists()
+    assert not inbox_note.exists()
+    assert not old_report.exists()
+
+
+def test_target_archive_apply_rejects_mutated_plan(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    record = module.harness_controller.add_target(
+        controller_root=controller,
+        target_id="app",
+        repo=product,
+        branch="main",
+        controller_version="test",
+        force=True,
+    )
+    queued = record.state_root / "backlog" / "queued" / "BL-active.md"
+    evidence = record.state_root / "runs" / "harness" / "run-1" / "generated-evidence.json"
+    old_report = record.state_root / "reports" / "old-run" / "report.md"
+    for path in (queued, evidence, old_report):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    queued.write_text("Status: queued\nSource: task-intake\nIntake-Packet: task-active\n", encoding="utf-8")
+    evidence.write_text("{}", encoding="utf-8")
+    old_report.write_text("old report\n", encoding="utf-8")
+
+    assert module.main(["target", "archive", "plan", "app", "--json"]) == 0
+    plan = json.loads(capsys.readouterr().out)
+    plan_path = Path(plan["plan_path"])
+    payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    payload["actions"].append({"path": "backlog/queued/BL-active.md", "action": "delete", "class": "cold-report"})
+    plan_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert module.main(["target", "archive", "apply", "app", "--plan", plan_path.as_posix()]) == 2
+    output = capsys.readouterr().out
+    assert "classification" in output or "delete-safe" in output
+    assert queued.exists()
+    assert product.exists()
+
+
+def test_target_archive_plan_rejects_symlink_output(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    record = module.harness_controller.add_target(
+        controller_root=controller,
+        target_id="app",
+        repo=product,
+        branch="main",
+        controller_version="test",
+        force=True,
+    )
+    target_file = product / "README.md"
+    output = record.state_root / "archive-plans" / "evil.json"
+    output.parent.mkdir(parents=True)
+    output.symlink_to(target_file)
+
+    assert module.main(["target", "archive", "plan", "app", "--output", "archive-plans/evil.json"]) == 2
+    assert target_file.exists()
+    assert target_file.read_text(encoding="utf-8") == "# Product\n"
+    capsys.readouterr()
+
+
+def test_target_archive_apply_rejects_destination_symlink(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    record = module.harness_controller.add_target(
+        controller_root=controller,
+        target_id="app",
+        repo=product,
+        branch="main",
+        controller_version="test",
+        force=True,
+    )
+    old_draft = record.state_root / "backlog" / "drafts" / "task-old" / "request.md"
+    old_draft.parent.mkdir(parents=True, exist_ok=True)
+    old_draft.write_text("old draft\n", encoding="utf-8")
+    assert module.main(["target", "archive", "plan", "app", "--json"]) == 0
+    plan = json.loads(capsys.readouterr().out)
+    plan_path = Path(plan["plan_path"])
+    archive_parent = record.state_root / "archive" / plan_path.stem / "backlog"
+    archive_parent.parent.mkdir(parents=True, exist_ok=True)
+    archive_parent.symlink_to(product)
+
+    assert module.main(["target", "archive", "apply", "app", "--plan", plan_path.as_posix()]) == 2
+    output = capsys.readouterr().out
+    assert "symlink" in output or "sidecar" in output
+    assert old_draft.exists()
+    assert (product / "drafts").exists() is False
+
+
+def test_target_archive_apply_rejects_receipt_symlink(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    record = module.harness_controller.add_target(
+        controller_root=controller,
+        target_id="app",
+        repo=product,
+        branch="main",
+        controller_version="test",
+        force=True,
+    )
+    old_draft = record.state_root / "backlog" / "drafts" / "task-old" / "request.md"
+    old_draft.parent.mkdir(parents=True, exist_ok=True)
+    old_draft.write_text("old draft\n", encoding="utf-8")
+    assert module.main(["target", "archive", "plan", "app", "--json"]) == 0
+    plan = json.loads(capsys.readouterr().out)
+    receipt_link = record.state_root / "archive-receipts"
+    receipt_link.symlink_to(product)
+
+    assert module.main(["target", "archive", "apply", "app", "--plan", plan["plan_path"]]) == 2
+    output = capsys.readouterr().out
+    assert "symlink" in output or "sidecar" in output
+    assert not any(product.glob("*receipt.json"))
+
+
+def test_target_archive_apply_rejects_receipt_file_symlink(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    record = module.harness_controller.add_target(
+        controller_root=controller,
+        target_id="app",
+        repo=product,
+        branch="main",
+        controller_version="test",
+        force=True,
+    )
+    old_draft = record.state_root / "backlog" / "drafts" / "task-old" / "request.md"
+    old_draft.parent.mkdir(parents=True, exist_ok=True)
+    old_draft.write_text("old draft\n", encoding="utf-8")
+    assert module.main(["target", "archive", "plan", "app", "--json"]) == 0
+    plan = json.loads(capsys.readouterr().out)
+    plan_path = Path(plan["plan_path"])
+    receipt_path = record.state_root / "archive-receipts" / f"{plan_path.stem}-receipt.json"
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.symlink_to(product / "README.md")
+
+    assert module.main(["target", "archive", "apply", "app", "--plan", plan_path.as_posix()]) == 2
+    output = capsys.readouterr().out
+    assert "symlink" in output
+    assert old_draft.exists()
+    assert (product / "README.md").read_text(encoding="utf-8") == "# Product\n"
 
 
 def test_controller_cleanup_protects_kept_smoke_marker(monkeypatch, tmp_path: Path, capsys) -> None:

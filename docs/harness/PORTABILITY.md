@@ -4,6 +4,8 @@
 
 이 문서는 이 저장소의 하네스를 특정 벤더나 특정 AI 도구에 종속되지 않게 운영하기 위한 기준이다.
 
+현재 external controller 이식 UX는 설치 후 `./harness do "요청"` 또는 `./harness watch`로 시작한다. `task review/queue`, `run`, `finish`, `target archive`는 같은 strict 게이트를 노출하는 고급/복구 표면이다.
+
 ## Canonical Source Of Truth
 
 아래 문서들이 실제 규칙이다.

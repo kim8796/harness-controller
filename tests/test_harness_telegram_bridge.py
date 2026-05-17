@@ -819,6 +819,7 @@ def test_parse_operator_command_accepts_supported_loop_commands() -> None:
     assert module.parse_operator_command("/loop_note remember this") == ("/loop_note", "remember this")
     assert module.parse_operator_command("/loop_status@mybot") == ("/loop_status", "")
     assert module.parse_operator_command("/harness@mybot answer latest go") == ("/harness answer", "latest go")
+    assert module.parse_operator_command("/harness task @game fix the map") == ("/harness task", "@game fix the map")
     assert module.parse_operator_command("/unknown nope") is None
     assert module.parse_operator_command("harness pause") is None
 

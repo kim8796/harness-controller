@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import importlib
+import inspect
 import io
 import json
 import os
@@ -136,6 +138,14 @@ class AutopilotTransaction:
 
 
 @dataclass(frozen=True)
+class NaturalTaskOutcome:
+    packet_id: str
+    request_path: Path
+    review: object
+    queued: object | None
+
+
+@dataclass(frozen=True)
 class SmokeCleanupCandidate:
     target_id: str
     path: Path
@@ -148,29 +158,31 @@ class SmokeCleanupCandidate:
 BEGINNER_HELP_TEXT = """하네스 시작
 
 5분 경로:
-1. ./harness install /path/to/product --id my-app --default
-2. ./harness task
-3. ./harness run
+1. ./harness install /path/to/product
+2. ./harness do "맵이 너무 둥글고 캐릭터가 커서 줄여줘"
+3. ./harness watch
 
 무엇을 하는지:
 - install: 제품 저장소를 하네스 관리 대상으로 등록합니다. 제품 저장소에는 하네스 파일을 쓰지 않습니다.
-  터미널에서 ./harness install만 입력하면 경로와 이름을 물어봅니다.
-- task: 요구사항 초안을 만듭니다. 출력된 request.md는 외부 에디터로 수정해도 됩니다.
-- run: 현재 자동 실행 가능한 요청을 처리하고 queue가 비면 종료합니다. 계속 감시는 ./harness run --watch 입니다.
-- finish: 복구/고급 명령입니다. 자동 루프가 멈춘 구현 기록을 수동으로 닫을 때 씁니다.
+  터미널에서 ./harness install만 입력하면 제품 저장소 경로만 물어봅니다.
+- do: 자연어 요청을 task로 만들고, 안전하면 normalize -> queue -> run -> commit/push gate까지 한 번에 진행합니다.
+- watch: Telegram relay와 queued task를 계속 감시하며, 실패는 incident/memory로 남기고 안전한 sidecar 정리를 자동 수행합니다.
+- task/run/finish/archive: 복구와 디버깅을 위한 고급 명령입니다.
 
 자주 쓰는 확인:
 - ./harness status
 - ./harness dashboard
-- ./harness task list
+- ./harness do "README에 설치 방법을 간단히 추가해"
+- ./harness watch
 - ./harness telegram setup --target-id my-app --repo-id my-app --dry-run
 - ./harness verify --loop-ready
 - ./harness smoke implementation
 - ./harness controller audit-size
-- ./harness controller cleanup --dry-run
 
 고급 명령:
 - ./harness --help
+- ./harness task --help
+- ./harness run --help
 - ./harness target --help
 - ./harness finish --help
 """
@@ -843,10 +855,10 @@ def command_install(args: argparse.Namespace) -> int:
                 print(f"- run blockers: {', '.join(run_blockers)}")
                 print(f"- 다음 명령: `./harness target status {default_record.target_id}`")
                 return 2
-            print("다음 명령: `./harness task` 또는 `./harness run`")
+            print('다음 명령: `./harness do "요청"` 또는 `./harness watch`')
             return 0
         print("- 기본 대상: 없음")
-        print("다음 명령: `./harness install /path/to/product --id my-app --branch main --default`")
+        print("다음 명령: `./harness install /path/to/product`")
         return 2
     try:
         target_id = target_id or repo.resolve().name
@@ -863,6 +875,7 @@ def command_install(args: argparse.Namespace) -> int:
         verification = harness_controller.verify_target(record)
         run_blockers = harness_controller.target_run_blockers(verification)
         ready_for_run = bool(verification["ok"]) and not run_blockers
+        make_default = make_default or _should_auto_default_new_target(root)
         if make_default and ready_for_run:
             record = harness_controller.set_default_target(root, record.target_id)
         report = harness_controller.write_dashboard(
@@ -904,7 +917,7 @@ def command_install(args: argparse.Namespace) -> int:
             print(f"- 다음 명령: `./harness target status {record.target_id}`")
             return 2
         print(f"- dashboard: `{report.as_posix()}`")
-        print("다음 명령: `./harness task`")
+        print('다음 명령: `./harness do "요청"`')
         return 0
     except harness_controller.ControllerError as exc:
         print(f"error: {exc}")
@@ -928,19 +941,19 @@ def _install_inputs(args: argparse.Namespace) -> tuple[Path | None, str | None, 
     branch = getattr(args, "branch", "main")
     make_default = bool(getattr(args, "default", False))
     if repo is None and _install_prompt_enabled(args):
-        print("하네스 install 인터뷰를 시작합니다. 제품 저장소 경로만 필수입니다.")
+        print("하네스 install 인터뷰를 시작합니다. 제품 저장소 경로만 입력하면 됩니다.")
         repo_value = _prompt_value("제품 저장소 경로")
         if not repo_value:
             raise HarnessCliError("제품 저장소 경로가 필요합니다")
         repo = Path(repo_value)
-        if not target_id:
-            target_id = _prompt_value("대상 ID (Enter = 제품 폴더명)")
-        branch_value = _prompt_value(f"브랜치 (Enter = {branch})")
-        if branch_value:
-            branch = branch_value
-        default_value = _prompt_value("기본 대상으로 설정할까요? [Y/n, Enter = Y]")
-        make_default = default_value.strip().lower() not in {"n", "no", "아니오"}
     return repo, target_id or None, branch, make_default
+
+
+def _should_auto_default_new_target(root: Path) -> bool:
+    try:
+        return harness_controller.default_target(root) is None
+    except harness_controller.ControllerError:
+        return False
 
 
 def _install_prompt_enabled(args: argparse.Namespace) -> bool:
@@ -972,6 +985,411 @@ def _task_packet_id(record: harness_controller.TargetRecord, raw: str | None) ->
     return harness_task_intake.validate_packet_id(raw)
 
 
+def _supports_keyword(function: object, names: Sequence[str]) -> bool:
+    try:
+        signature = inspect.signature(function)
+    except (TypeError, ValueError):
+        return False
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()):
+        return True
+    return any(name in signature.parameters for name in names)
+
+
+def _call_with_supported_keywords(function: object, **kwargs: object):
+    signature = inspect.signature(function)
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()):
+        return function(**kwargs)
+    supported = {key: value for key, value in kwargs.items() if key in signature.parameters}
+    return function(**supported)
+
+
+def _task_review_candidates() -> tuple[object, ...]:
+    candidates: list[object] = []
+    for name in (
+        "review_packet_with_normalization",
+        "review_packet_normalized",
+        "normalize_review_packet",
+        "review_packet",
+    ):
+        candidate = getattr(harness_task_intake, name, None)
+        if callable(candidate):
+            candidates.append(candidate)
+    return tuple(dict.fromkeys(candidates))
+
+
+def _task_review_supports_authoritative_response(function: object) -> bool:
+    return _supports_keyword(
+        function,
+        (
+            "ai_response",
+            "normalizer_response",
+            "normalization_response",
+            "response_path",
+            "response",
+        ),
+    )
+
+
+def _task_review_packet(
+    *,
+    state_root: Path,
+    packet_id: str,
+    expected_target_id: str,
+    normalize_mode: str,
+    target_repo: Path | None,
+    ai_response: Path | None,
+):
+    candidates = _task_review_candidates()
+    if ai_response is not None:
+        candidates = tuple(function for function in candidates if _task_review_supports_authoritative_response(function))
+        if not candidates:
+            raise HarnessCliError(
+                "`task review --ai-response` needs normalization core support. "
+                "Use `task review --ai --ai-response <file>` for advisory artifacts only."
+            )
+    if not candidates:
+        raise HarnessCliError("task review core is unavailable")
+    function = candidates[0]
+    kwargs: dict[str, object] = {
+        "state_root": state_root,
+        "packet_id": packet_id,
+        "expected_target_id": expected_target_id,
+        "normalize": normalize_mode,
+        "normalize_mode": normalize_mode,
+        "normalization_mode": normalize_mode,
+        "target_repo": target_repo,
+    }
+    if ai_response is not None:
+        kwargs.update(
+            {
+                "ai_response": ai_response,
+                "normalizer_response": ai_response,
+                "normalization_response": ai_response,
+                "response_path": ai_response,
+                "response": ai_response,
+            }
+        )
+    return _call_with_supported_keywords(function, **kwargs)
+
+
+def _natural_task_text(args: argparse.Namespace) -> str:
+    parts = [str(item) for item in getattr(args, "request", []) or []]
+    text = " ".join(part.strip() for part in parts if part.strip()).strip()
+    if text:
+        return text
+    if not sys.stdin.isatty():
+        return sys.stdin.read().strip()
+    return ""
+
+
+def _append_autopilot_memory(
+    record: harness_controller.TargetRecord,
+    event: str,
+    payload: Mapping[str, object] | None = None,
+) -> Path:
+    memory_dir = record.state_root / "memory"
+    if memory_dir.exists() and memory_dir.is_symlink():
+        raise HarnessCliError("target memory directory must not be a symlink")
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    path = memory_dir / "autopilot-lessons.jsonl"
+    if path.exists() and path.is_symlink():
+        raise HarnessCliError("target memory file must not be a symlink")
+    entry = {
+        "schema_version": 1,
+        "target_id": record.target_id,
+        "event": event,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "retention_class": "compact-learning",
+        "artifact_owner": "autopilot",
+        "source_of_truth": False,
+        **dict(payload or {}),
+    }
+    path.open("a", encoding="utf-8").write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+    _trim_autopilot_memory(path)
+    return path
+
+
+def _trim_autopilot_memory(path: Path, *, keep: int = 200) -> None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    if len(lines) <= keep:
+        return
+    path.write_text("\n".join(lines[-keep:]) + "\n", encoding="utf-8")
+
+
+def _create_review_queue_natural_task(
+    *,
+    record: harness_controller.TargetRecord,
+    text: str,
+    title: str | None = None,
+    source: str,
+    images: Sequence[Path] = (),
+    captions: Sequence[str] = (),
+) -> NaturalTaskOutcome:
+    request_path = harness_task_intake.create_from_text(
+        state_root=record.state_root,
+        target_id=record.target_id,
+        text=text,
+        title=title,
+        source=source,
+        images=images,
+        image_captions=captions,
+    )
+    packet_id = request_path.parent.name
+    review = _task_review_packet(
+        state_root=record.state_root,
+        packet_id=packet_id,
+        expected_target_id=record.target_id,
+        normalize_mode="auto",
+        target_repo=record.repo,
+        ai_response=None,
+    )
+    queued = None
+    if bool(getattr(review, "auto_eligible", False)):
+        queued = harness_task_intake.queue_packet(
+            state_root=record.state_root,
+            packet_id=packet_id,
+            auto=True,
+            expected_target_id=record.target_id,
+            target_repo=record.repo,
+        )
+    return NaturalTaskOutcome(packet_id=packet_id, request_path=request_path, review=review, queued=queued)
+
+
+def _render_natural_task_outcome(
+    *,
+    record: harness_controller.TargetRecord,
+    outcome: NaturalTaskOutcome,
+    prefix: str,
+) -> None:
+    review = outcome.review
+    print(f"{prefix} task intake 완료")
+    print(f"- 대상: `{record.target_id}`")
+    print(f"- 요청 묶음: `{outcome.packet_id}`")
+    print(f"- request: `{outcome.request_path.as_posix()}`")
+    print(f"- 자동 실행 가능: {'예' if getattr(review, 'auto_eligible', False) else '아니오'}")
+    if getattr(review, "normalized_contract_path", None):
+        print(f"- 정규화 출력: `{getattr(review, 'normalized_contract_path').as_posix()}`")
+    if outcome.queued is not None:
+        print(f"- 실행 대기열: `{outcome.queued.backlog_path.as_posix()}`")
+    if getattr(review, "open_questions", None):
+        print("- 확인 필요: " + ", ".join(str(item) for item in getattr(review, "open_questions")))
+    if getattr(review, "risk_flags", None):
+        print("- 안전 경고: " + ", ".join(str(item) for item in getattr(review, "risk_flags")))
+
+
+def _relay_env_configured() -> bool:
+    enabled = os.environ.get("HARNESS_RELAY_ENABLED", "").strip().lower()
+    return enabled in {"1", "true", "yes", "on"}
+
+
+def _drain_telegram_relay_for_record(record: harness_controller.TargetRecord) -> Mapping[str, object]:
+    if not _relay_env_configured() and not (repo_root() / ".env").exists():
+        return {"skipped": True, "reason": "relay env not configured"}
+    try:
+        import harness_telegram_bridge
+    except Exception as exc:
+        return {"skipped": True, "reason": f"bridge unavailable: {exc.__class__.__name__}"}
+    result = harness_telegram_bridge.drain_redis_relay_once(repo_root(), target_id=record.target_id)
+    return dict(result)
+
+
+def _extract_inbox_field(text: str, field: str) -> str:
+    prefix = f"{field}:"
+    for line in text.splitlines():
+        if line.startswith(prefix):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
+def _extract_raw_instruction(text: str) -> str:
+    match = re.search(r"```json owner-instruction\s*(?P<body>.*?)```", text, flags=re.DOTALL)
+    if match:
+        try:
+            payload = json.loads(match.group("body"))
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, Mapping):
+            value = str(payload.get("raw_instruction") or "").strip()
+            if value:
+                return value
+    raw_section = re.search(r"^## Raw Instruction\s*(?P<body>.*?)(?=^## |\Z)", text, flags=re.MULTILINE | re.DOTALL)
+    if raw_section:
+        return raw_section.group("body").strip().strip("`").strip()
+    return ""
+
+
+def _inbox_task_receipt_path(record: harness_controller.TargetRecord, inbox_path: Path) -> Path:
+    digest = hashlib.sha256(inbox_path.relative_to(record.state_root).as_posix().encode("utf-8")).hexdigest()[:16]
+    receipts_dir = record.state_root / "state" / "operator-inbox-task-receipts"
+    if receipts_dir.exists() and receipts_dir.is_symlink():
+        raise HarnessCliError("operator inbox receipt directory must not be a symlink")
+    receipts_dir.mkdir(parents=True, exist_ok=True)
+    return receipts_dir / f"{digest}.json"
+
+
+def _process_operator_task_inbox(record: harness_controller.TargetRecord, *, limit: int = 20) -> Mapping[str, object]:
+    inbox = record.state_root / "operator-inbox"
+    if not inbox.exists():
+        return {"seen": 0, "created": 0, "queued": 0, "manual_review": 0}
+    seen = created = queued = manual_review = skipped = 0
+    handled: list[dict[str, object]] = []
+    for path in sorted(inbox.glob("*.md"))[: max(1, int(limit))]:
+        if path.name.upper().startswith("README") or path.is_symlink():
+            continue
+        text = path.read_text(encoding="utf-8")
+        action = _extract_inbox_field(text, "Action").lower()
+        if action != "task":
+            skipped += 1
+            continue
+        seen += 1
+        receipt_path = _inbox_task_receipt_path(record, path)
+        if receipt_path.exists():
+            skipped += 1
+            continue
+        request_text = _extract_raw_instruction(text)
+        if not request_text:
+            manual_review += 1
+            status = "manual-review"
+            payload = {"reason": "missing raw instruction"}
+        else:
+            try:
+                outcome = _create_review_queue_natural_task(
+                    record=record,
+                    text=request_text,
+                    title=f"Telegram task {path.stem}",
+                    source=f"telegram-task:{path.stem}",
+                )
+                created += 1
+                if outcome.queued is not None:
+                    queued += 1
+                    status = "queued"
+                else:
+                    manual_review += 1
+                    status = "manual-review"
+                payload = {
+                    "packet_id": outcome.packet_id,
+                    "request_path": outcome.request_path.as_posix(),
+                    "queued_backlog_path": outcome.queued.backlog_path.as_posix() if outcome.queued else "",
+                    "auto_eligible": bool(getattr(outcome.review, "auto_eligible", False)),
+                    "open_questions": list(getattr(outcome.review, "open_questions", ()) or ()),
+                    "risk_flags": list(getattr(outcome.review, "risk_flags", ()) or ()),
+                }
+            except (HarnessCliError, harness_task_intake.TaskIntakeError) as exc:
+                manual_review += 1
+                status = "manual-review"
+                payload = {"reason": sanitize_for_outbox(str(exc))}
+        receipt = {
+            "schema_version": 1,
+            "target_id": record.target_id,
+            "source_inbox": path.relative_to(record.state_root).as_posix(),
+            "status": status,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            **payload,
+        }
+        receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        handled.append(receipt)
+    return {
+        "seen": seen,
+        "created": created,
+        "queued": queued,
+        "manual_review": manual_review,
+        "skipped": skipped,
+        "handled": handled,
+    }
+
+
+def _run_target_sidecar_maintenance(record: harness_controller.TargetRecord) -> Mapping[str, object]:
+    backend = _load_target_archive_backend()
+    if backend is None:
+        return {"status": "skipped", "reason": "target archive backend unavailable"}
+    plan_function = _target_archive_function(backend, "plan")
+    apply_function = _target_archive_function(backend, "apply")
+    if plan_function is None or apply_function is None:
+        return {"status": "skipped", "reason": "target archive backend incomplete"}
+    plan = plan_function(state_root=record.state_root, target_id=record.target_id)
+    candidate_count = int(plan.get("candidate_count") or 0) if isinstance(plan, Mapping) else 0
+    if candidate_count <= 0:
+        return {"status": "ok", "candidate_count": 0}
+    applied = apply_function(
+        state_root=record.state_root,
+        target_id=record.target_id,
+        plan_path=Path(str(plan.get("plan_path"))),
+    )
+    return {
+        "status": "applied",
+        "candidate_count": candidate_count,
+        "plan_path": str(plan.get("plan_path") or ""),
+        "receipt_path": str(applied.get("receipt_path") or "") if isinstance(applied, Mapping) else "",
+    }
+
+
+def _load_review_payload(review: object) -> Mapping[str, object]:
+    review_path = getattr(review, "review_path", None)
+    if not isinstance(review_path, Path) or not review_path.exists():
+        return {}
+    try:
+        payload = json.loads(review_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, Mapping) else {}
+
+
+def _review_attr_or_payload(review: object, payload: Mapping[str, object], *names: str) -> object:
+    for name in names:
+        value = getattr(review, name, None)
+        if value not in (None, "", (), []):
+            return value
+    for name in names:
+        value = payload.get(name)
+        if value not in (None, "", (), []):
+            return value
+    normalization = payload.get("normalization")
+    if isinstance(normalization, Mapping):
+        for name in names:
+            value = normalization.get(name)
+            if value not in (None, "", (), []):
+                return value
+    return None
+
+
+def _render_task_review_normalization(
+    *,
+    review: object,
+    requested_mode: str,
+    authoritative_response: Path | None,
+) -> None:
+    payload = _load_review_payload(review)
+    actual_mode = _review_attr_or_payload(
+        review,
+        payload,
+        "normalize_mode",
+        "normalization_mode",
+        "normalization_source",
+    )
+    status = _review_attr_or_payload(review, payload, "normalization_status", "status")
+    normalized_path = _review_attr_or_payload(
+        review,
+        payload,
+        "normalized_contract_path",
+        "normalization_path",
+        "normalized_path",
+        "normalized_request_path",
+        "normalizer_output_path",
+    )
+    print(f"- 정규화 모드: `{requested_mode}`")
+    if actual_mode is not None and str(actual_mode) != requested_mode:
+        print(f"- 정규화 적용: `{actual_mode}`")
+    if status is not None:
+        print(f"- 정규화 상태: `{status}`")
+    if normalized_path is not None:
+        print(f"- 정규화 출력: `{normalized_path}`")
+    if authoritative_response is not None:
+        print(f"- 정규화 응답 입력: `{authoritative_response.as_posix()}`")
+
+
 def command_task(args: argparse.Namespace) -> int:
     if getattr(args, "task_command", None) is None:
         return command_task_interview(args)
@@ -983,6 +1401,80 @@ def command_task(args: argparse.Namespace) -> int:
         return command_task_list(args)
     print("error: unknown task command")
     return 2
+
+
+def command_do(args: argparse.Namespace) -> int:
+    try:
+        text = _natural_task_text(args)
+        if not text:
+            print('error: 요청 문장이 필요합니다. 예: `./harness do "맵이 너무 둥글고 캐릭터가 커서 줄여줘"`')
+            return 2
+        record = _resolve_task_target(getattr(args, "target", None))
+        outcome = _create_review_queue_natural_task(
+            record=record,
+            text=text,
+            title=getattr(args, "title", None),
+            source="harness-do",
+            images=tuple(_target_path(path) for path in getattr(args, "image", []) or []),
+            captions=tuple(getattr(args, "caption", []) or []),
+        )
+        _render_natural_task_outcome(record=record, outcome=outcome, prefix="하네스 do")
+        _append_autopilot_memory(
+            record,
+            "task-intake",
+            {
+                "packet_id": outcome.packet_id,
+                "auto_eligible": bool(getattr(outcome.review, "auto_eligible", False)),
+                "queued": outcome.queued is not None,
+            },
+        )
+        if outcome.queued is None:
+            print("do 중단: 안전한 자동 실행 계약으로 정규화하지 못했습니다.")
+            print(f"다음 명령: `./harness task review {outcome.packet_id}`")
+            return 2
+        if getattr(args, "no_run", False):
+            print("do queue-only 완료: product repo 변경은 아직 없습니다.")
+            print("다음 명령: `./harness run` 또는 `./harness watch`")
+            return 0
+        executable_count = max(1, len(_target_executable_backlog_items(record)))
+        if executable_count > 1:
+            print(f"- 앞선 queued auto 작업 포함 처리 대상: {executable_count}개")
+        return command_run(
+            argparse.Namespace(
+                extra=[],
+                once=False,
+                watch=False,
+                max_cycles=executable_count,
+                idle_seconds=60,
+                runner=getattr(args, "runner", "codex"),
+                runner_model=getattr(args, "runner_model", None),
+                runner_reasoning_effort=getattr(args, "runner_reasoning_effort", "xhigh"),
+                command_template=getattr(args, "command_template", None),
+                drain_telegram=False,
+                auto_maintenance=True,
+            )
+        )
+    except (HarnessCliError, harness_controller.ControllerError, harness_loop.LoopError, harness_task_intake.TaskIntakeError) as exc:
+        print(f"error: {exc}")
+        return 2
+
+
+def command_watch(args: argparse.Namespace) -> int:
+    return command_run(
+        argparse.Namespace(
+            extra=[],
+            once=False,
+            watch=True,
+            max_cycles=0,
+            idle_seconds=getattr(args, "idle_seconds", 60),
+            runner=getattr(args, "runner", "codex"),
+            runner_model=getattr(args, "runner_model", None),
+            runner_reasoning_effort=getattr(args, "runner_reasoning_effort", "xhigh"),
+            command_template=getattr(args, "command_template", None),
+            drain_telegram=not bool(getattr(args, "no_telegram_drain", False)),
+            auto_maintenance=True,
+        )
+    )
 
 
 def _prompt_value(label: str) -> str:
@@ -1051,7 +1543,7 @@ def command_task_interview(args: argparse.Namespace) -> int:
         return 0
     except (HarnessCliError, harness_task_intake.TaskIntakeError) as exc:
         print(f"error: {exc}")
-        print("다음 명령: `./harness install /path/to/product --id my-app --default`")
+        print("다음 명령: `./harness install /path/to/product`")
         return 2
 
 
@@ -1074,7 +1566,7 @@ def command_task_draft(args: argparse.Namespace) -> int:
         return 0
     except (HarnessCliError, harness_task_intake.TaskIntakeError) as exc:
         print(f"error: {exc}")
-        print("다음 명령: `./harness install /path/to/product --id my-app --default`")
+        print("다음 명령: `./harness install /path/to/product`")
         return 2
 
 
@@ -1107,12 +1599,13 @@ def command_task_review(args: argparse.Namespace) -> int:
     try:
         record = _resolve_task_target(args.target)
         packet_id = _task_packet_id(record, args.packet)
-        if getattr(args, "ai", False) or getattr(args, "ai_response", None) is not None:
+        ai_response = _target_path(args.ai_response) if getattr(args, "ai_response", None) is not None else None
+        if getattr(args, "ai", False):
             ai_review = harness_task_intake.prepare_ai_review(
                 state_root=record.state_root,
                 packet_id=packet_id,
                 expected_target_id=record.target_id,
-                response=_target_path(args.ai_response) if getattr(args, "ai_response", None) is not None else None,
+                response=ai_response,
             )
             print("작업 요청 AI 검토 준비 완료")
             print(f"- 대상: `{ai_review.target_id}`")
@@ -1130,15 +1623,23 @@ def command_task_review(args: argparse.Namespace) -> int:
             print(f"다음 명령: `{task_prefix} list`")
             print("- queue 여부는 deterministic review/list의 다음 명령을 따르세요.")
             return 0
-        review = harness_task_intake.review_packet(
+        review = _task_review_packet(
             state_root=record.state_root,
             packet_id=packet_id,
             expected_target_id=record.target_id,
+            normalize_mode=args.normalize,
+            target_repo=record.repo,
+            ai_response=ai_response,
         )
         print("작업 요청 review 완료")
         print(f"- 대상: `{review.target_id}`")
         print(f"- 요청 묶음: `{review.packet_id}`")
         print(f"- 미리보기: `{review.preview_path.as_posix()}`")
+        _render_task_review_normalization(
+            review=review,
+            requested_mode=args.normalize,
+            authoritative_response=ai_response,
+        )
         print(f"- 자동 실행 가능: {'예' if review.auto_eligible else '아니오'}")
         if review.scope_adjustments:
             print("- 자동 보정됨:")
@@ -1194,6 +1695,7 @@ def command_task_queue(args: argparse.Namespace) -> int:
             packet_id=packet_id,
             auto=args.auto,
             expected_target_id=record.target_id,
+            target_repo=record.repo,
         )
         print("실행 대기열 등록 완료")
         print(f"- 대상: `{queued.target_id}`")
@@ -1398,6 +1900,48 @@ def _record_autopilot_incident(
     }
     incident_path.write_text(json.dumps(updated, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return updated
+
+
+def _record_autopilot_doctor_diagnosis(
+    *,
+    record: harness_controller.TargetRecord,
+    stage: str,
+    error: BaseException | str,
+    backlog_id: str = "",
+    run_id: str = "",
+) -> Mapping[str, object]:
+    doctor_dir = record.state_root / "state" / "doctor"
+    if doctor_dir.exists() and doctor_dir.is_symlink():
+        raise HarnessCliError("doctor diagnosis directory must not be a symlink")
+    doctor_dir.mkdir(parents=True, exist_ok=True)
+    created = datetime.now().strftime("%Y%m%d-%H%M%S")
+    path = doctor_dir / f"doctor-{created}-{stage}.json"
+    verification: Mapping[str, object]
+    try:
+        verification = harness_controller.verify_target(record)
+    except Exception as exc:
+        verification = {"ok": False, "blockers": [f"target verification failed: {exc.__class__.__name__}"]}
+    git_info = verification.get("git") if isinstance(verification, Mapping) else {}
+    dirty_paths = git_info.get("dirty_paths") if isinstance(git_info, Mapping) else []
+    blockers = verification.get("blockers") if isinstance(verification, Mapping) else []
+    payload = {
+        "schema_version": 1,
+        "target_id": record.target_id,
+        "stage": stage,
+        "backlog_id": backlog_id,
+        "run_id": run_id,
+        "error": sanitize_for_outbox(str(error))[:500],
+        "target_ok": bool(verification.get("ok")) if isinstance(verification, Mapping) else False,
+        "target_blockers": list(blockers or ()),
+        "dirty_paths": list(dirty_paths or ()),
+        "next_action": "resolve blockers or let watch retry after a new safe task/change",
+        "retention_class": "compact-diagnosis",
+        "artifact_owner": "autopilot-doctor",
+        "source_of_truth": False,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return {**payload, "path": path.as_posix()}
 
 
 def _target_open_incident_blocker(
@@ -1653,7 +2197,7 @@ def command_run(args: argparse.Namespace) -> int:
         return 2
     if record is None:
         print("run 중단: 기본 대상이 없습니다.")
-        print("다음 명령: `./harness install /path/to/product --id my-app --branch main --default`")
+        print("다음 명령: `./harness install /path/to/product`")
         return 2
     requested_max_cycles = max(0, int(args.max_cycles or 0))
     max_cycles = 1 if args.once else requested_max_cycles
@@ -1675,9 +2219,30 @@ def command_run(args: argparse.Namespace) -> int:
         print("- 실행: 현재 queued auto backlog를 처리한 뒤 queue가 비면 종료합니다.")
     print("- 모델: Codex managed latest/default, reasoning=xhigh")
     print("- 처리: implement -> complete -> commit -> push gate")
+    if getattr(args, "drain_telegram", False):
+        print("- 입력: Telegram relay drain + /harness task inbox intake enabled")
+    if getattr(args, "auto_maintenance", False):
+        print("- 정리: compact memory + safe sidecar maintenance enabled")
     print(f"- push 주의: {FINISH_PUSH_CAUTION_KO}")
     while True:
         try:
+            if getattr(args, "drain_telegram", False):
+                relay_result = _drain_telegram_relay_for_record(record)
+                relay_materialized = int(relay_result.get("materialized") or 0)
+                relay_failed = int(relay_result.get("failed") or 0)
+                if relay_materialized or relay_failed:
+                    print(
+                        "- Telegram relay: "
+                        f"materialized={relay_materialized}, failed={relay_failed}, "
+                        f"fetched={int(relay_result.get('fetched') or 0)}"
+                    )
+                inbox_result = _process_operator_task_inbox(record)
+                if int(inbox_result.get("queued") or 0) or int(inbox_result.get("manual_review") or 0):
+                    print(
+                        "- inbox task intake: "
+                        f"queued={int(inbox_result.get('queued') or 0)}, "
+                        f"manual-review={int(inbox_result.get('manual_review') or 0)}"
+                    )
             pending_pushes = harness_controller.pending_backlog_product_pushes(
                 controller_root=repo_root(),
                 record=record,
@@ -1687,6 +2252,15 @@ def command_run(args: argparse.Namespace) -> int:
                 print("run 중단: 이전 transaction의 product push가 아직 닫히지 않았습니다.")
                 print(f"- 구현 기록: `{latest['run_id']}`")
                 print(f"- 작업 항목: `{latest['backlog_id']}`")
+                diagnosis = _record_autopilot_doctor_diagnosis(
+                    record=record,
+                    stage="pending-push",
+                    error="previous product push is still pending",
+                    backlog_id=str(latest["backlog_id"]),
+                    run_id=str(latest["run_id"]),
+                )
+                _append_autopilot_memory(record, "doctor-diagnosis", diagnosis)
+                print(f"- doctor diagnosis: `{diagnosis['path']}`")
                 print(f"- 다음 명령: `./harness finish --run {latest['run_id']} --push --apply`")
                 return 2
             if not args.watch and processed >= max_cycles:
@@ -1694,7 +2268,7 @@ def command_run(args: argparse.Namespace) -> int:
                     print(f"run 종료: 처리한 backlog {processed}개")
                 else:
                     print("run 종료: queued auto backlog가 없습니다.")
-                    print("다음 작업을 넣으려면 `./harness task`를 사용하세요.")
+                    print('다음 작업을 넣으려면 `./harness do "요청"`을 사용하세요.')
                 return 0
             item = _target_next_auto_backlog_item(record)
         except (harness_loop.LoopError, harness_controller.ControllerError) as exc:
@@ -1705,7 +2279,7 @@ def command_run(args: argparse.Namespace) -> int:
         if item is None:
             if args.watch:
                 print("대기: queued auto backlog가 없습니다.")
-                print("다음 작업을 넣으려면 `./harness task`를 사용하세요.")
+                print('다음 작업을 넣으려면 `./harness do "요청"`을 사용하세요.')
                 print(f"- watch 대기: {idle_seconds}초 후 다시 확인합니다.")
                 time.sleep(idle_seconds)
                 continue
@@ -1713,7 +2287,7 @@ def command_run(args: argparse.Namespace) -> int:
                 print(f"run 종료: queued auto backlog가 없습니다. 처리한 backlog {processed}개")
             else:
                 print("run 종료: queued auto backlog가 없습니다.")
-            print("다음 작업을 넣으려면 `./harness task`를 사용하세요.")
+            print('다음 작업을 넣으려면 `./harness do "요청"`을 사용하세요.')
             if args.once or max_cycles:
                 return 0
             return 0
@@ -1729,8 +2303,26 @@ def command_run(args: argparse.Namespace) -> int:
             outcome = _run_autopilot_transaction(record, args)
         except (HarnessCliError, harness_controller.ControllerError, harness_loop.LoopError) as exc:
             incident = _record_autopilot_incident(record=record, stage="transaction", error=exc, backlog_id=backlog_id)
+            diagnosis = _record_autopilot_doctor_diagnosis(
+                record=record,
+                stage="transaction",
+                error=exc,
+                backlog_id=backlog_id,
+            )
             _print_beginner_transaction_error(exc)
             print(f"- incident: `{incident['signature']}` count={incident['count']}")
+            print(f"- doctor diagnosis: `{diagnosis['path']}`")
+            _append_autopilot_memory(
+                record,
+                "transaction-failed",
+                {
+                    "backlog_id": backlog_id,
+                    "incident": str(incident["signature"]),
+                    "doctor_diagnosis": str(diagnosis["path"]),
+                    "count": int(incident["count"]),
+                    "error": sanitize_for_outbox(str(exc))[:240],
+                },
+            )
             if int(incident["count"]) >= AUTOPILOT_INCIDENT_THRESHOLD:
                 print("- 반복 실패: 같은 문제를 다시 시도하지 않습니다. controller maintenance가 필요합니다.")
             return 2
@@ -1743,8 +2335,48 @@ def command_run(args: argparse.Namespace) -> int:
                 backlog_id=outcome.backlog_id,
                 run_id=outcome.run_id,
             )
+            _append_autopilot_memory(
+                record,
+                "push-blocked",
+                {
+                    "backlog_id": outcome.backlog_id,
+                    "run_id": outcome.run_id,
+                    "product_commit_sha": outcome.commit_sha,
+                    "reason": sanitize_for_outbox(outcome.message)[:240],
+                },
+            )
+            diagnosis = _record_autopilot_doctor_diagnosis(
+                record=record,
+                stage="push-blocked",
+                error=outcome.message,
+                backlog_id=outcome.backlog_id,
+                run_id=outcome.run_id,
+            )
+            _append_autopilot_memory(record, "doctor-diagnosis", diagnosis)
+            print(f"- doctor diagnosis: `{diagnosis['path']}`")
             print("run 일시정지: commit은 완료됐지만 push gate가 막혔습니다.")
             return 2
+        _append_autopilot_memory(
+            record,
+            "transaction-pushed",
+            {
+                "backlog_id": outcome.backlog_id,
+                "run_id": outcome.run_id,
+                "product_commit_sha": outcome.commit_sha,
+                "product_push_sha": outcome.push_sha,
+            },
+        )
+        if getattr(args, "auto_maintenance", False):
+            try:
+                maintenance = _run_target_sidecar_maintenance(record)
+                _append_autopilot_memory(record, "maintenance", maintenance)
+                if maintenance.get("status") == "applied":
+                    print(
+                        "- sidecar maintenance: "
+                        f"{maintenance.get('candidate_count')}개 정리, receipt `{maintenance.get('receipt_path')}`"
+                    )
+            except (HarnessCliError, harness_controller.ControllerError, OSError, ValueError) as exc:
+                print(f"- sidecar maintenance 보류: {sanitize_for_outbox(str(exc))}")
         print(f"transaction 완료: `{outcome.backlog_id}`")
         if args.once or (max_cycles and processed >= max_cycles):
             print(f"run 종료: 처리한 backlog {processed}개")
@@ -2696,6 +3328,145 @@ def _render_target_verify_text(payload: Mapping[str, object]) -> None:
     print(f"- blockers: {', '.join(str(item) for item in blockers) if blockers else 'none'}")
     print(f"- warnings: {', '.join(str(item) for item in warnings) if warnings else 'none'}")
     print("- product repo harness 파일 쓰기: no")
+
+
+def _json_safe(value: object) -> object:
+    if isinstance(value, Path):
+        return value.as_posix()
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_json_safe(item) for item in value]
+    if hasattr(value, "to_json") and callable(value.to_json):
+        try:
+            return _json_safe(value.to_json(repo_root()))
+        except TypeError:
+            return _json_safe(value.to_json())
+    if hasattr(value, "__dict__"):
+        return _json_safe(vars(value))
+    return value
+
+
+def _load_target_archive_backend() -> object | None:
+    for module_name in ("harness_target_archive", "harness_controller"):
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        if any(
+            callable(getattr(module, name, None))
+            for name in (
+                "audit_target_archive",
+                "plan_target_archive",
+                "apply_target_archive",
+                "target_archive_audit",
+                "target_archive_plan",
+                "target_archive_apply",
+                "archive_target",
+                "audit",
+                "plan",
+                "apply",
+            )
+        ):
+            return module
+    return None
+
+
+def _target_archive_function(backend: object, operation: str) -> object | None:
+    names_by_operation = {
+        "audit": ("audit_target_archive", "target_archive_audit", "archive_target_audit", "archive_target", "audit"),
+        "plan": ("plan_target_archive", "target_archive_plan", "archive_target_plan", "archive_target", "plan"),
+        "apply": ("apply_target_archive", "target_archive_apply", "archive_target_apply", "archive_target", "apply"),
+    }
+    for name in names_by_operation[operation]:
+        if name in {"audit", "plan", "apply"} and getattr(backend, "__name__", "") != "harness_target_archive":
+            continue
+        candidate = getattr(backend, name, None)
+        if callable(candidate):
+            return candidate
+    return None
+
+
+def _invoke_target_archive_backend(args: argparse.Namespace, record: harness_controller.TargetRecord) -> Mapping[str, object]:
+    operation = args.target_archive_command
+    backend = _load_target_archive_backend()
+    if backend is None:
+        raise HarnessCliError("target archive backend is unavailable")
+    function = _target_archive_function(backend, operation)
+    if function is None:
+        raise HarnessCliError(f"target archive backend does not support {operation}")
+    plan_path = getattr(args, "archive_plan", None)
+    output_path = getattr(args, "output", None)
+    kwargs: dict[str, object] = {
+        "operation": operation,
+        "controller_root": repo_root(),
+        "root": repo_root(),
+        "record": record,
+        "target": record,
+        "target_id": record.target_id,
+        "state_root": record.state_root,
+        "plan": plan_path,
+        "plan_path": plan_path,
+        "archive_plan": plan_path,
+        "output": output_path,
+        "output_path": output_path,
+        "apply": operation == "apply",
+    }
+    try:
+        result = _call_with_supported_keywords(function, **kwargs)
+    except Exception as exc:
+        raise HarnessCliError(str(exc)) from exc
+    safe_result = _json_safe(result)
+    if isinstance(safe_result, Mapping):
+        return safe_result
+    return {"schema_version": 1, "operation": operation, "result": safe_result}
+
+
+def _render_target_archive_text(
+    *,
+    operation: str,
+    record: harness_controller.TargetRecord,
+    payload: Mapping[str, object],
+) -> None:
+    action_label = {"audit": "audit 완료", "plan": "plan 완료", "apply": "apply 완료"}[operation]
+    print(f"external target archive {action_label}")
+    print(f"- 대상 ID: `{record.target_id}`")
+    print(f"- state root: `{record.state_root.as_posix()}`")
+    print("- mutation scope: controller target sidecar only")
+    print("- product repo 변경: 없음")
+    for key, label in (
+        ("candidate_count", "후보"),
+        ("plan_path", "archive plan"),
+        ("receipt_path", "receipt"),
+        ("applied", "applied"),
+        ("status", "상태"),
+    ):
+        value = payload.get(key)
+        if value not in (None, "", (), []):
+            print(f"- {label}: `{value}`")
+    if operation == "audit":
+        print(f"다음 명령: `./harness target archive plan {record.target_id}`")
+    elif operation == "plan":
+        plan_path = payload.get("plan_path") or payload.get("path") or "<plan-path>"
+        print(f"적용 명령: `./harness target archive apply {record.target_id} --plan {plan_path}`")
+
+
+def command_target_archive(args: argparse.Namespace) -> int:
+    try:
+        record = _resolve_controller_target(args.target)
+        payload = _invoke_target_archive_backend(args, record)
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        else:
+            _render_target_archive_text(
+                operation=args.target_archive_command,
+                record=record,
+                payload=payload,
+            )
+        return 0
+    except (HarnessCliError, harness_controller.ControllerError) as exc:
+        print(f"error: {exc}")
+        return 2
 
 
 def command_target_add(args: argparse.Namespace) -> int:
@@ -3720,16 +4491,58 @@ def build_parser() -> argparse.ArgumentParser:
     verify.set_defaults(func=command_verify)
 
     install = subparsers.add_parser("install", help="Beginner path: connect a product repo to this controller.")
-    install.add_argument("repo_path", nargs="?", type=Path, help="Product git repo to register.")
-    install.add_argument("--repo", type=Path, help="Product git repo to register. Omit to inspect current install state.")
-    install.add_argument("--id", help="Canonical target id. Defaults to the product repo directory name.")
-    install.add_argument("--branch", default="main")
-    install.add_argument("--profile", choices=harness_profiles.profile_names(), default=harness_profiles.DEFAULT_PROFILE)
-    install.add_argument("--display-name", help="Operator-facing display name.")
-    install.add_argument("--default", action="store_true", help="Set this target as @default for beginner run/task commands.")
-    install.add_argument("--force", action="store_true", help="Replace an existing target entry.")
-    install.add_argument("--json", action="store_true")
+    install.add_argument(
+        "repo_path",
+        nargs="?",
+        type=Path,
+        help="Product git repo to register. Omit to inspect install state or start the path-only prompt.",
+    )
+    install.add_argument("--repo", type=Path, help=argparse.SUPPRESS)
+    install.add_argument("--id", help=argparse.SUPPRESS)
+    install.add_argument("--branch", default="main", help=argparse.SUPPRESS)
+    install.add_argument(
+        "--profile",
+        choices=harness_profiles.profile_names(),
+        default=harness_profiles.DEFAULT_PROFILE,
+        help=argparse.SUPPRESS,
+    )
+    install.add_argument("--display-name", help=argparse.SUPPRESS)
+    install.add_argument("--default", action="store_true", help=argparse.SUPPRESS)
+    install.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
+    install.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
     install.set_defaults(func=command_install)
+
+    do = subparsers.add_parser("do", help="One-command task intake and autopilot run for a natural-language request.")
+    do.add_argument("request", nargs="*", help="Natural-language product request. Omit to read from stdin.")
+    do.add_argument("--target", default="@default", help="Target selector; default is @default.")
+    do.add_argument("--title", help="Optional task title.")
+    do.add_argument("--image", type=Path, action="append", default=[], help="Attach an image reference to the task.")
+    do.add_argument("--caption", action="append", default=[], help="Caption for --image; repeat in the same order.")
+    do.add_argument("--no-run", action="store_true", help=argparse.SUPPRESS)
+    do.add_argument("--runner", choices=("codex", "claude", "custom"), default="codex", help=argparse.SUPPRESS)
+    do.add_argument("--runner-model", default=None, help=argparse.SUPPRESS)
+    do.add_argument(
+        "--runner-reasoning-effort",
+        default="xhigh",
+        choices=("minimal", "low", "medium", "high", "xhigh"),
+        help=argparse.SUPPRESS,
+    )
+    do.add_argument("--command-template", help=argparse.SUPPRESS)
+    do.set_defaults(func=command_do)
+
+    watch = subparsers.add_parser("watch", help="Simple long-running autopilot loop for the default target.")
+    watch.add_argument("--idle-seconds", type=int, default=60, help=argparse.SUPPRESS)
+    watch.add_argument("--no-telegram-drain", action="store_true", help=argparse.SUPPRESS)
+    watch.add_argument("--runner", choices=("codex", "claude", "custom"), default="codex", help=argparse.SUPPRESS)
+    watch.add_argument("--runner-model", default=None, help=argparse.SUPPRESS)
+    watch.add_argument(
+        "--runner-reasoning-effort",
+        default="xhigh",
+        choices=("minimal", "low", "medium", "high", "xhigh"),
+        help=argparse.SUPPRESS,
+    )
+    watch.add_argument("--command-template", help=argparse.SUPPRESS)
+    watch.set_defaults(func=command_watch)
 
     task = subparsers.add_parser("task", help="Beginner task intake: interview, review, and queue a product request.")
     task.add_argument("--target", default="@default", help="Target selector for `./harness task`; default is @default.")
@@ -3769,8 +4582,21 @@ def build_parser() -> argparse.ArgumentParser:
     task_review = task_subparsers.add_parser("review", help="Build a backlog preview without queueing it.")
     task_review.add_argument("packet", nargs="?", default="latest")
     task_review.add_argument("--target", default=argparse.SUPPRESS, help="Target selector; default is @default.")
+    task_review.add_argument(
+        "--normalize",
+        choices=("auto", "deterministic", "off"),
+        default="auto",
+        help="Normalize a natural-language request before review; default is auto.",
+    )
     task_review.add_argument("--ai", action="store_true", help="Write AI review prompt/schema artifacts without queueing.")
-    task_review.add_argument("--ai-response", type=Path, help="Ingest a JSON AI review response file as advisory metadata.")
+    task_review.add_argument(
+        "--ai-response",
+        type=Path,
+        help=(
+            "With --ai, ingest advisory AI metadata. Without --ai, pass an offline authoritative "
+            "normalizer response to a normalization-capable review core."
+        ),
+    )
     task_review.set_defaults(func=command_task_review)
     task_queue = task_subparsers.add_parser("queue", help="Queue a reviewed task as sidecar backlog.")
     task_queue.add_argument("packet", nargs="?", default="latest")
@@ -3953,6 +4779,39 @@ def build_parser() -> argparse.ArgumentParser:
     target_dashboard.add_argument("target", help=target_selector_help)
     target_dashboard.add_argument("--json", action="store_true")
     target_dashboard.set_defaults(func=command_target_dashboard)
+    target_archive = target_subparsers.add_parser(
+        "archive",
+        help="Audit, plan, or apply restore-safe cleanup for one target sidecar; product repo files are never touched.",
+        description=(
+            "Audit, plan, or apply restore-safe cleanup under targets/<target-id>. "
+            "product repo files are never touched."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    target_archive_subparsers = target_archive.add_subparsers(dest="target_archive_command", required=True)
+    target_archive_audit = target_archive_subparsers.add_parser(
+        "audit",
+        help="Audit archive candidates under targets/<target-id> without mutating files.",
+    )
+    target_archive_audit.add_argument("target", help=target_selector_help)
+    target_archive_audit.add_argument("--json", action="store_true")
+    target_archive_audit.set_defaults(func=command_target_archive)
+    target_archive_plan = target_archive_subparsers.add_parser(
+        "plan",
+        help="Write or preview an exact-path archive plan under the target sidecar.",
+    )
+    target_archive_plan.add_argument("target", help=target_selector_help)
+    target_archive_plan.add_argument("--output", type=Path, help="Optional backend-specific archive plan output path.")
+    target_archive_plan.add_argument("--json", action="store_true")
+    target_archive_plan.set_defaults(func=command_target_archive)
+    target_archive_apply = target_archive_subparsers.add_parser(
+        "apply",
+        help="Apply a saved target archive plan and write a receipt.",
+    )
+    target_archive_apply.add_argument("target", help=target_selector_help)
+    target_archive_apply.add_argument("--plan", dest="archive_plan", required=True, type=Path)
+    target_archive_apply.add_argument("--json", action="store_true")
+    target_archive_apply.set_defaults(func=command_target_archive)
     target_run = target_subparsers.add_parser("run", help="Run an external target smoke.")
     target_run.add_argument("target", help=target_selector_help)
     target_run.add_argument("--once", action="store_true")

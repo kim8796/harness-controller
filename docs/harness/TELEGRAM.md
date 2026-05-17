@@ -448,6 +448,7 @@ External multi-target에서는 state-changing 명령에 target을 명시한다.
 
 ```text
 /harness note my-app latest 다음 방향...
+/harness task my-app README에 설치 방법을 간단히 추가해
 /harness answer my-app latest 진행해
 /harness veto my-app <proposal-id> 이유...
 ```
@@ -456,6 +457,7 @@ Alias는 operator 입력 편의용이다.
 
 ```text
 /harness note @app latest 다음 방향...
+/harness task @app 맵이 너무 둥글고 캐릭터가 커서 줄여줘
 /harness answer @default latest 진행해
 ```
 
@@ -466,6 +468,7 @@ Redis/signature/inbox/lock에는 alias가 아니라 canonical target id만 남�
 - `/harness help`: 도움말
 - `/harness status <target>`: read-only 상태
 - `/harness note <target> latest ...`: owner note
+- `/harness task <target> ...`: `watch`가 safe gate에서 task로 정규화할 실행 요청
 - `/harness answer <target> latest ...`: decision answer
 - `/harness pause|resume|retry|salvage|veto`: owner instruction
 
@@ -479,10 +482,11 @@ Legacy `/loop_*` alias는 compatibility로만 유지한다.
 /harness status my-app
 ```
 
-2. State-changing note를 하나 보낸다.
+2. State-changing note 또는 task를 하나 보낸다.
 
 ```text
 /harness note my-app latest 다음 cycle 전에 README 변경 범위를 다시 확인해줘
+/harness task my-app README에 설치 방법을 간단히 추가해
 ```
 
 3. Controller에서 relay drain을 실행한다.
@@ -497,7 +501,7 @@ Legacy `/loop_*` alias는 compatibility로만 유지한다.
 ls targets/my-app/operator-inbox
 ```
 
-기대 결과는 `targets/my-app/operator-inbox/*.md`가 생기는 것이다. 이 단계는 product repo 코드를 실행하거나 backlog 상태를 직접 바꾸지 않는다.
+기대 결과는 `targets/my-app/operator-inbox/*.md`가 생기는 것이다. 이 단계는 product repo 코드를 실행하거나 backlog 상태를 직접 바꾸지 않는다. 실제 task 실행은 controller에서 `./harness watch`가 inbox task를 정규화하고 canonical gate를 통과한 뒤에만 진행한다.
 
 ## 알림 문구
 

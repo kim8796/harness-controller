@@ -6,14 +6,13 @@
 
 ```bash
 ./harness install /path/to/my-app --id my-app --branch main --default
-./harness task
-./harness task list
-./harness task review <packet-id>
-./harness task queue <packet-id> --auto
-./harness run
+./harness do "맵이 너무 둥글고 캐릭터가 커서 줄여줘"
+./harness watch
 ```
 
 `install`은 global wrapper 설치가 아니라 product repo를 controller target으로 등록하는 명령이다. global convenience wrapper는 `./harness self install`이다.
+
+`do`는 사람이 쓴 자연어 요청을 canonical backlog preview로 정규화하고 안전하면 바로 queue/run까지 진행한다. `watch`는 Telegram relay와 queued backlog를 계속 감시하는 기본 운영 명령이다.
 
 ## 상태 확인
 
@@ -30,10 +29,16 @@
 
 ## 실행
 
-초보자 경로:
+기본 일회성 경로:
 
 ```bash
-./harness run
+./harness do "요청"
+```
+
+기본 장기 운영:
+
+```bash
+./harness watch
 ```
 
 고급 target 명시:
@@ -44,26 +49,26 @@
 
 기본 구현 gate는 Codex managed latest/default 모델과 `xhigh` reasoning을 사용한다. 다른 모델이 필요할 때만 `--runner-model <model-id>`를 명시한다.
 
-기본 실행은 현재 queued auto backlog를 처리한 뒤 queue가 비면 종료한다. 각 transaction은 다음 순서로 기존 gate를 재사용한다.
+각 transaction은 다음 순서로 기존 gate를 재사용한다.
 
 - implementation
 - sidecar backlog completed 전환
 - product local commit
 - product push gate
 
-push preflight가 맞지 않으면 commit까지만 끝내고 멈춘다. 한 작업만 확인하려면:
+push preflight가 맞지 않으면 commit까지만 끝내고 멈춘다. 하위 실행을 직접 확인하려면:
 
 ```bash
 ./harness run --once
 ```
 
-새 작업을 계속 감시하는 운영이 필요할 때만:
+하위 run 명령으로 감시할 수도 있지만, 일반 운영은 `watch`를 쓴다.
 
 ```bash
 ./harness run --watch
 ```
 
-Telegram/Redis는 operator instruction transport이고 product-changing 실행기는 아니다.
+Telegram/Redis는 operator instruction transport이고 product-changing 실행기는 아니다. `/harness task <target> ...`는 controller가 drain한 뒤 `watch`가 task intake gate를 통과시킬 때만 실행된다.
 `./harness telegram setup --target-id my-app --repo-id my-app --dry-run`은 readiness dry-run만 수행하며 env/provider/webhook/deploy를 바꾸지 않는다.
 
 ## 마무리
@@ -108,6 +113,16 @@ controller-owned smoke/temp sidecar 정리 후보:
 ```
 
 cleanup은 product repo 파일을 삭제하지 않는다.
+
+특정 target의 누적 sidecar 상태를 audit/archive한다.
+
+```bash
+./harness target archive audit my-app
+./harness target archive plan my-app
+./harness target archive apply my-app --plan <plan.json>
+```
+
+target archive는 `targets/<target-id>/` 안의 inactive draft, 처리된 operator inbox task/note, report cache 같은 controller-owned artifact만 다룬다. apply는 저장된 plan의 exact path만 처리하고 receipt를 남긴다. product repo 파일, `.env`, target registry, backlog source of truth, transition/commit/push receipt는 archive 대상이 아니다.
 
 target을 건드리지 않는 read-only/no-op smoke:
 

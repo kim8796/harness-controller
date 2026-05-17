@@ -1,33 +1,41 @@
-# Controller CI YAML Correction Plan
+# Autopilot Happy Path Simplification Plan
 
 ## Goal
 
-`main` merge 후 GitHub Actions가 job/log 없이 실패하는 원인을 고친다. 실패 원인은 `.github/workflows/harness-controller-ci.yml` 안의 tab indentation 때문에 workflow YAML이 파싱 전에 실패하는 것이다.
+Make the default harness UX match the product intent: one command for one task, and one command for long-running autonomous operation. Keep the strict review/queue/run/finish/archive gates as internal and recovery primitives, but stop making a normal user drive them manually.
 
-## Scope
+## User-Facing Contract
 
-- Change-Class: kernel-internal
-- Fix `.github/workflows/harness-controller-ci.yml` so it contains no tab characters and parses as YAML.
-- Add a lightweight repository regression check so tracked workflow files cannot contain tab characters again.
-- Wire the check into the pre-push guard.
-- Keep the change independent of product repos and Telegram runtime state.
+- `./harness do "request"` creates a task packet, normalizes it, queues it when safe, and runs the autopilot transaction by default.
+- `./harness watch` is the simple long-running loop. It drains Telegram relay when configured, converts `/harness task <target> ...` inbox instructions into task packets, runs queued work, records compact memory, and performs safe sidecar cleanup.
+- Beginner docs show only install, do, watch, and status.
+- `install` exposes only the product repo path in beginner help. Advanced flags stay supported for scripts/recovery but are hidden from normal help.
+- The first valid installed target becomes `@default` automatically so the happy path is `install /path -> do "request"`.
+- `do` must not force manual file-scope input for common product requests. Deterministic normalization should infer safe target-local scope for gameplay/player-count wording such as Korean "1인/2인/플레이/최소".
+- Existing `task review`, `task queue`, `finish`, and `target archive` commands remain available as advanced/recovery commands.
 
-## Agent Review
+## Safety Rules
 
-- Explorer/reviewer runs read-only and verifies the root cause, the minimal patch, and the regression check.
-- If reviewer finds a blocker, patch again and rerun the focused checks.
+- `do` may only auto queue when the normalized contract passes the existing canonical task gate.
+- `watch` may only convert explicit `Action: task` owner instructions into tasks. Notes remain notes.
+- Any missing scope, missing validation, secret/env scope, deploy, DB mutation, destructive command, or broad unsafe request stops as manual-review.
+- Git commit/push gates stay unchanged. Remote drift, dirty state, or push preflight failures still stop instead of forcing changes.
+- Automatic cleanup may touch only controller-owned sidecar data and product repo files are never archive/delete targets.
 
-## Implementation Steps
+## Implementation Scope
 
-1. Create a correction branch from `origin/main`.
-2. Replace the workflow tab indentation with spaces.
-3. Add a guard helper that rejects tab characters in `.github/workflows/*.yml` and `.yaml`.
-4. Add a focused unit test for the guard helper.
-5. Run YAML parse and focused tests.
-6. Run pre-push guard, then commit and push.
+- Add task text intake helper for inline natural-language requests.
+- Add top-level `do` command.
+- Add top-level `watch` command as the simple long-running path.
+- Add `/harness task` owner instruction support in control/bridge parsing and target selector resolution.
+- Add inbox task conversion from `targets/<id>/operator-inbox` to task packets.
+- Add compact autopilot memory entries for task intake, queue, transaction success/failure, and maintenance.
+- Add safe automatic target-sidecar archive/cleanup after successful work or watch idle maintenance.
+- Update docs/help/export tests so beginner surface is short and advanced commands are not the primary path.
 
 ## Verification
 
-- `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/harness-controller-ci.yml"); puts "yaml ok"'`
-- `python3 -m pytest tests/test_harness_guard.py -q`
-- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+- Focused tests:
+  - `python3 -m pytest tests/test_harness_task_intake.py tests/test_harness_cli.py tests/test_harness_telegram_bridge.py tests/test_harness_export.py`
+- Full guard before completion:
+  - `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`

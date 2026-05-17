@@ -32,9 +32,9 @@ python3 -m venv .venv
 제품 repo를 controller에 등록한다.
 
 ```bash
-./harness install /path/to/my-app --id my-app --branch main --default
-./harness task
-./harness run
+./harness install /path/to/my-app
+./harness do "README에 설치 방법을 간단히 추가해"
+./harness watch
 ```
 
 이 흐름에서 product repo에는 `HARNESS.md`, `harness`, `scripts/harness*`, `runs/**`, `reports/**`, `backlog/**`, `targets/**`, `.env*`를 쓰지 않는다. 하네스 상태와 실행 증거는 controller의 `targets/<id>/` 아래에 남는다.
@@ -55,40 +55,34 @@ Telegram/Redis relay를 새 컴퓨터에서 붙일 때는 controller local runti
 2. 제품 repo를 등록한다.
 
 ```bash
-./harness install /path/to/my-app --id my-app --branch main --default
+./harness install /path/to/my-app
 ```
 
-3. 요구사항을 만든다.
+3. 자연어로 바로 작업시킨다.
 
 ```bash
-./harness task
+./harness do "맵이 너무 둥글고 캐릭터가 커서 줄여줘"
 ```
 
-출력된 `request.md`는 외부 에디터로 자유롭게 수정해도 된다. 이미지 참고가 필요하면 `./harness task from <file> --image <path>`를 쓴다. 자세한 방식은 [TASK_INTAKE.md](TASK_INTAKE.md)에 있다.
+`do`는 task 생성, 자연어 정규화, auto queue, run을 한 번에 진행한다. 안전한 실행 계약을 만들 수 없으면 필요한 질문만 보여주고 멈춘다. 이미지 참고가 필요하면 `./harness do "요청" --image <path>`를 쓴다.
 
-4. 필요하면 검토하고 실행 가능한 backlog로 넣는다.
+4. 계속 감시하는 loop를 켠다.
+
+```bash
+./harness watch
+```
+
+`watch`는 Telegram relay, `/harness task` inbox, queued auto backlog를 계속 감시한다. 실패하면 compact incident/memory를 남기고, 반복 실패는 사람 확인으로 멈춘다. 성공하면 complete, product commit, push gate까지 진행한다.
+
+5. 필요할 때만 고급 명령을 본다.
 
 ```bash
 ./harness task list
-./harness task review <packet-id>
-./harness task queue <packet-id> --auto
-```
-
-`queue --auto`는 acceptance, file scope, validation command가 명확할 때만 통과한다. `task review`가 `vite.config.*` 같은 안전한 config scope를 자동 보정하면 그대로 `queue --auto`를 쓰면 된다. 이미 `manual-review`로 queue한 뒤 보정 가능하다고 나오면:
-
-```bash
-./harness task fix-scope <packet-id> --apply
-```
-
-모호한 broad glob, `.env*` File Scope, secret path, 수동 smoke가 필요한 작업은 `manual-review`로 남기는 것이 정상이다.
-
-5. autopilot을 실행한다.
-
-```bash
 ./harness run
+./harness finish
 ```
 
-기본 실행은 현재 queued auto backlog를 처리한 뒤 queue가 비면 종료한다. 각 backlog가 성공하면 `implement → complete → product commit → push gate` 순서로 닫는다. remote/upstream/branch/dirty/remote drift preflight가 맞지 않으면 commit까지만 끝내고 멈춘다. 새 작업을 계속 감시하는 운영은 명시적으로 `./harness run --watch`를 사용한다.
+`task review/queue`, `run --once`, `finish`, `target archive`는 정상 사용 경로가 아니라 복구/디버깅용이다.
 
 6. 복구가 필요할 때만 finish를 쓴다.
 
@@ -113,13 +107,23 @@ Telegram/Redis relay를 새 컴퓨터에서 붙일 때는 controller local runti
 
 cleanup apply는 controller-owned delete-safe smoke/temp sidecar만 지우며 product repo 파일은 지우지 않는다.
 
+특정 target의 draft, operator inbox note, 오래된 report cache를 정리할 때는 target-scoped archive 흐름을 쓴다.
+
+```bash
+./harness target archive audit my-app
+./harness target archive plan my-app
+./harness target archive apply my-app --plan <plan.json>
+```
+
+archive apply는 저장된 plan에 들어 있는 `targets/<target-id>/` 경로만 처리하고 receipt를 남긴다. product repo 파일은 archive 대상이 아니다.
+
 ## 자주 쓰는 명령
 
 ```bash
 ./harness status
 ./harness dashboard
-./harness task list
-./harness run
+./harness do "요청"
+./harness watch
 ./harness controller audit-size
 ```
 
@@ -137,6 +141,8 @@ Telegram은 실행기가 아니라 operator instruction transport다. 상태 변
 
 ```text
 /harness status my-app
+/harness task my-app 맵이 너무 둥글고 캐릭터가 커서 줄여줘
+/harness task @app README에 설치 방법을 간단히 추가해
 /harness note my-app latest 다음 방향...
 /harness answer my-app latest 진행해
 ```

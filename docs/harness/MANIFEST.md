@@ -1,5 +1,7 @@
 # Harness Manifest
 
+현재 beginner surface 는 `install`, `do`, `watch`, `status` 중심이다. task/review/queue/run/finish/archive 하위 명령은 내부 strict 계약과 복구/디버깅을 위해 계속 export한다.
+
 `v1.8.26` 기준 controller-safe export surface 에 root-link-safe routed `START_HERE.md`, beginner help home, shorter beginner install prompt, beginner `install/task/list/run/finish` UX, guided task interview, advisory AI review artifacts, task intake draft/review/list/queue/fix-scope, controller `release-check`, secret-safe `telegram setup` wizard, external autopilot run, external backlog-bound product commit/push gates, controller smoke retention cleanup, controller-owned Upstash relay drain adapter, target-aware relay env readiness, managed-latest/xhigh implementation defaults, v1.8+ release note 이력 보존, generated coverage artifact exclusion 이 포함된다. Bare `./harness` 와 `./harness help` 는 한국어 quick-start home 이고, `./harness --help` 는 advanced argparse reference 다. `task review` 의 scope 보정은 named config alias 에만 적용되고 canonical backlog parser 는 계속 strict 하다. Bare `./harness run` 은 현재 queued auto backlog 를 drain 하고 queue 가 비면 종료하는 autopilot wrapper 다. Continuous polling 은 `./harness run --watch` 로만 켠다. `finish` 는 autopilot 복구/고급 wrapper 로 유지된다.
 
 ## Canonical Files
