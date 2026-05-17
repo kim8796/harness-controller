@@ -42,7 +42,7 @@ RESULT_MEANING_KOR = {
 }
 HARNESS_OWNER_CANONICAL_COMMAND = "/harness"
 HARNESS_OWNER_READ_ONLY_ACTIONS = frozenset({"help", "status"})
-HARNESS_OWNER_STATE_ACTIONS = frozenset({"note", "veto", "pause", "resume", "retry", "answer", "salvage"})
+HARNESS_OWNER_STATE_ACTIONS = frozenset({"note", "task", "veto", "pause", "resume", "retry", "answer", "salvage"})
 HARNESS_OWNER_ACTIONS = HARNESS_OWNER_READ_ONLY_ACTIONS | HARNESS_OWNER_STATE_ACTIONS
 LEGACY_LOOP_COMMAND_ALIASES = {
     "/loop_status": "status",
@@ -180,6 +180,8 @@ def render_harness_owner_help() -> str:
             "- `/harness note <target-id> <메모>`: external controller target에 메모를 남깁니다.",
             "- `/harness note @alias <메모>`: target alias 를 canonical target id 로 해석해 external inbox 에 남깁니다.",
             "- `/harness note @default <메모>`: 설정된 기본 대상(`HARNESS_RELAY_TARGET_ID` 또는 controller default target)으로 external inbox 에 남깁니다.",
+            "- `/harness task <target-id> <요청>`: external controller가 safe gate에서 backlog task로 정규화할 요청을 남깁니다.",
+            "- `/harness task @alias <요청>`: target alias 를 canonical target id 로 해석해 task 요청을 남깁니다.",
             "- `/harness answer <대상> <답변>`: 최신 decision packet 또는 지정 대상에 답변합니다.",
             "- `/harness answer <target-id> <대상> <답변>`: external controller target의 decision packet에 답변합니다.",
             "- `/harness pause <이유>`: 다음 safe point에서 pause하도록 지시합니다.",
@@ -200,6 +202,7 @@ def render_harness_owner_help() -> str:
             "답장 예시",
             "- `/harness note my-app latest 다음 safe point에서 이 방향으로 진행해`",
             "- `/harness note @app latest 다음 safe point에서 이 방향으로 진행해`",
+            "- `/harness task @app 맵이 너무 둥글고 캐릭터가 커서 줄여줘`",
             "- `/harness answer @default latest 진행해`",
             "- `/harness answer latest salvage 진행해. 코드 변경 없이 evidence만 정리해`",
             "- `/harness answer my-app latest salvage 진행해. 코드 변경 없이 evidence만 정리해`",

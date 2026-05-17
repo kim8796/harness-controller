@@ -6,6 +6,8 @@
 
 원샷으로 쓰고 싶으면 [START_HERE.md](START_HERE.md) 하나만 AI에게 넘기면 된다.
 
+현재 controller bundle 의 기본 운영 UX는 `./harness install ...`, `./harness do "요청"`, `./harness watch`다. 기존 세부 명령은 starter/export 호환성과 복구를 위해 포함하지만 초보 경로에서는 숨긴다.
+
 기본 대상은 Codex + Claude 워크플로다. 다른 도구 adapter 는 선택형 확장으로 본다.
 
 실사용자는 대부분 [START_HERE.md](START_HERE.md)의 `초간단 사용법`만 보면 된다. 이 문서는 export 범위와 세부 계약을 확인할 때 읽는다.

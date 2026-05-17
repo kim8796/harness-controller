@@ -71,6 +71,362 @@ def test_task_intake_draft_review_and_queue_auto(tmp_path: Path) -> None:
     assert [item.item_id for item in discovered] == [queued.backlog_id]
 
 
+def test_task_review_normalizes_natural_language_request_to_canonical_preview(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    request = module.create_draft(
+        state_root=state_root,
+        target_id="demo",
+        title="Add support note",
+        packet_id="task-natural-language",
+    )
+    request.write_text(
+        "\n".join(
+            [
+                "# Add support note",
+                "",
+                "Please update README.md with a short support note for operators. "
+                "The change is accepted when README.md contains the support note. "
+                "Only README.md should change. Validate it with `git diff -- README.md`.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    review = module.review_packet(state_root=state_root, packet_id="task-natural-language")
+    preview = review.preview_path.read_text(encoding="utf-8")
+
+    assert review.auto_eligible is True
+    assert review.open_questions == ()
+    assert review.risk_flags == ()
+    assert "Autonomy-Execute: auto" in preview
+    assert "## Acceptance" in preview
+    assert "README.md contains the support note" in preview
+    assert "## File Scope" in preview
+    assert "- README.md" in preview
+    assert "## Validation" in preview
+    assert "- `git diff -- README.md`" in preview
+    assert not (state_root / "backlog" / "queued").exists()
+
+    queued = module.queue_packet(state_root=state_root, packet_id="task-natural-language", auto=True)
+    body = queued.backlog_path.read_text(encoding="utf-8")
+    assert queued.autonomy_execute == "auto"
+    assert "Source: task-intake" in body
+    assert "Intake-Packet: task-natural-language" in body
+
+
+def test_task_review_infers_gameplay_scope_for_korean_player_count_request(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "racegame"
+    repo = tmp_path / "racegame"
+    for relative in ("client/main.js", "client/styles.css", "server/game.js", "tests/game.test.js"):
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("// smoke\n", encoding="utf-8")
+    (repo / "package.json").write_text(
+        '{"scripts":{"lint":"eslint .","test":"node --test","build":"node --check server/game.js"}}\n',
+        encoding="utf-8",
+    )
+    request = module.create_draft(
+        state_root=state_root,
+        target_id="racegame",
+        title="1인 플레이 허용",
+        packet_id="task-korean-player-count",
+    )
+    request.write_text("# 1인 플레이 허용\n\n지금 2인이 최소 인데 1인으로 플레이 가능하게 해\n", encoding="utf-8")
+
+    review = module.review_packet(state_root=state_root, packet_id="task-korean-player-count", target_repo=repo)
+    preview = review.preview_path.read_text(encoding="utf-8")
+
+    assert review.auto_eligible is True
+    assert review.open_questions == ()
+    assert review.risk_flags == ()
+    assert "## File Scope" in preview
+    assert "- server/**" in preview
+    assert "- client/**" in preview
+    assert "- tests/**" in preview
+    assert "Autonomy-Execute: auto" in preview
+    assert "inferred-file-scope" in review.normalization_actions
+
+
+def test_task_review_normalization_does_not_make_unsafe_natural_language_auto(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    request = module.create_draft(
+        state_root=state_root,
+        target_id="demo",
+        title="Rotate env token",
+        packet_id="task-unsafe-natural-language",
+    )
+    request.write_text(
+        "\n".join(
+            [
+                "# Rotate env token",
+                "",
+                "Please update .env.local with the new API token and verify by running `cat .env.local`. "
+                "The change is accepted when the token is present.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    review = module.review_packet(state_root=state_root, packet_id="task-unsafe-natural-language")
+
+    assert review.auto_eligible is False
+    assert review.risk_flags
+    assert "Autonomy-Execute: manual-review" in review.preview_path.read_text(encoding="utf-8")
+    with pytest.raises(module.TaskIntakeError, match="auto queue 불가"):
+        module.queue_packet(state_root=state_root, packet_id="task-unsafe-natural-language", auto=True)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "`rm -fr .`",
+        "`git clean -fd`",
+        "`vercel --prod`",
+        "`fly deploy`",
+        "`wrangler deploy`",
+        "`drizzle-kit push`",
+        "`supabase db reset`",
+        "`rm -rf README.md`",
+        "`rm --recursive --force .`",
+        "`python manage.py migrate`",
+        "`npm run migrate`",
+        "`python ./manage.py migrate`",
+        "`python backend/manage.py migrate`",
+        "`kubectl apply -f deployment.yaml`",
+        "`gh workflow run deploy.yml`",
+        "`python -m django migrate`",
+        "`kubectl create -f deployment.yaml`",
+        "`kubectl set image deployment/app app=image`",
+        "`helm upgrade app chart/`",
+        "`terraform apply -auto-approve`",
+        "`npm run build:deploy`",
+        "`npm run test:migrate`",
+        "`pnpm run lint:db-reset`",
+        "`yarn run check:publish`",
+        "`make build-deploy`",
+        "`just test-migrate`",
+    ],
+)
+def test_task_review_rejects_validation_command_bypasses(tmp_path: Path, command: str) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-dangerous-validation")
+    request.write_text(_safe_request().replace("`git diff -- README.md`", command), encoding="utf-8")
+
+    review = module.review_packet(state_root=state_root, packet_id="task-dangerous-validation")
+
+    assert review.auto_eligible is False
+    assert review.risk_flags
+
+
+def test_task_review_rejects_package_script_body_mutation(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    product = tmp_path / "product"
+    product.mkdir()
+    (product / "package.json").write_text(
+        module.json.dumps({"scripts": {"build": "vercel deploy --prod", "test": "prisma migrate deploy"}}),
+        encoding="utf-8",
+    )
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-package-script")
+    request.write_text(_safe_request().replace("`git diff -- README.md`", "`npm run build`"), encoding="utf-8")
+
+    review = module.review_packet(state_root=state_root, packet_id="task-package-script", target_repo=product)
+
+    assert review.auto_eligible is False
+    assert "package script" in " ".join(review.risk_flags)
+
+
+@pytest.mark.parametrize(
+    ("scripts", "validation"),
+    [
+        ({"build": "npm run prod", "prod": "vercel deploy --prod"}, "`npm run build`"),
+        ({"test": "npm run release", "release": "prisma migrate deploy"}, "`npm test`"),
+        ({"lint": "yarn ship", "ship": "terraform apply -auto-approve"}, "`npm run lint`"),
+    ],
+)
+def test_task_review_rejects_package_script_delegation(tmp_path: Path, scripts: dict[str, str], validation: str) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    product = tmp_path / "product"
+    product.mkdir()
+    (product / "package.json").write_text(module.json.dumps({"scripts": scripts}), encoding="utf-8")
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-package-delegation")
+    request.write_text(_safe_request().replace("`git diff -- README.md`", validation), encoding="utf-8")
+
+    review = module.review_packet(state_root=state_root, packet_id="task-package-delegation", target_repo=product)
+
+    assert review.auto_eligible is False
+    assert "delegates" in " ".join(review.risk_flags)
+
+
+def test_task_review_rejects_package_script_when_body_unavailable(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-package-unknown")
+    request.write_text(_safe_request().replace("`git diff -- README.md`", "`npm run build`"), encoding="utf-8")
+
+    review = module.review_packet(state_root=state_root, packet_id="task-package-unknown")
+
+    assert review.auto_eligible is False
+    assert "package script" in " ".join(review.risk_flags)
+
+
+def test_task_review_ai_response_rejects_symlink(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-ai-symlink")
+    request.write_text("# Task\n\nUpdate README.md\n", encoding="utf-8")
+    real_response = tmp_path / "normalizer.json"
+    real_response.write_text("{}", encoding="utf-8")
+    symlink = tmp_path / "normalizer-link.json"
+    symlink.symlink_to(real_response)
+
+    with pytest.raises(module.TaskIntakeError, match="symlink"):
+        module.review_packet(state_root=state_root, packet_id="task-ai-symlink", ai_response=symlink)
+
+
+def test_task_review_normalize_off_rejects_ai_response(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-ai-off")
+    request.write_text(_safe_request(), encoding="utf-8")
+    response = tmp_path / "normalizer-response.json"
+    response.write_text(module.json.dumps({"goal": ["x"], "summary": ["x"]}), encoding="utf-8")
+
+    with pytest.raises(module.TaskIntakeError, match="requires normalize mode"):
+        module.review_packet(state_root=state_root, packet_id="task-ai-off", normalize="off", ai_response=response)
+
+
+def test_task_review_ai_response_schema_fails_closed(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-ai-schema")
+    request.write_text("# Task\n\nUpdate README.md\n", encoding="utf-8")
+    missing = tmp_path / "missing.json"
+    missing.write_text(module.json.dumps({"goal": ["x"]}), encoding="utf-8")
+    unsupported = tmp_path / "unsupported.json"
+    unsupported.write_text(
+        module.json.dumps(
+            {
+                "goal": ["x"],
+                "summary": ["x"],
+                "acceptance": ["x"],
+                "file_scope": ["README.md"],
+                "validation": ["`git diff -- README.md`"],
+                "extra": ["nope"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(module.TaskIntakeError, match="missing required fields"):
+        module.review_packet(state_root=state_root, packet_id="task-ai-schema", ai_response=missing)
+    with pytest.raises(module.TaskIntakeError, match="unsupported fields"):
+        module.review_packet(state_root=state_root, packet_id="task-ai-schema", ai_response=unsupported)
+
+
+def test_task_review_ai_response_rejects_secret_payload(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-ai-secret")
+    request.write_text("# Task\n\nUpdate README.md\n", encoding="utf-8")
+    response = tmp_path / "secret.json"
+    response.write_text(
+        module.json.dumps(
+            {
+                "goal": ["x"],
+                "summary": ["x"],
+                "acceptance": ['{"api_key": "abcdef12345678901234567890"}'],
+                "file_scope": ["README.md"],
+                "validation": ["`git diff -- README.md`"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(module.TaskIntakeError, match="secret-like"):
+        module.review_packet(state_root=state_root, packet_id="task-ai-secret", ai_response=response)
+
+
+def test_task_review_ai_response_dangerous_validation_is_manual_review(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-ai-danger")
+    request.write_text("# Task\n\nUpdate README.md\n", encoding="utf-8")
+    response = tmp_path / "danger.json"
+    response.write_text(
+        module.json.dumps(
+            {
+                "goal": ["x"],
+                "summary": ["x"],
+                "acceptance": ["README.md changes are present."],
+                "file_scope": ["README.md"],
+                "validation": ["`git clean -fd`"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    review = module.review_packet(state_root=state_root, packet_id="task-ai-danger", ai_response=response)
+
+    assert review.auto_eligible is False
+    assert review.risk_flags
+
+
+def test_task_queue_preserves_authoritative_normalized_contract(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    request = module.create_draft(
+        state_root=state_root,
+        target_id="demo",
+        title="Vague request",
+        packet_id="task-ai-normalized",
+    )
+    request.write_text("# Vague request\n\nMake the operator README clearer.\n", encoding="utf-8")
+    response = tmp_path / "normalizer-response.json"
+    response.write_text(
+        module.json.dumps(
+            {
+                "goal": ["Clarify the operator README."],
+                "summary": ["Update README.md with clearer operator wording."],
+                "acceptance": ["README.md includes the clarified operator wording."],
+                "file_scope": ["README.md"],
+                "validation": ["`git diff -- README.md`"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    review = module.review_packet(state_root=state_root, packet_id="task-ai-normalized", ai_response=response)
+    queued = module.queue_packet(state_root=state_root, packet_id="task-ai-normalized", auto=True)
+    body = queued.backlog_path.read_text(encoding="utf-8")
+
+    assert review.auto_eligible is True
+    assert review.normalization_used_ai is True
+    assert "README.md includes the clarified operator wording." in body
+    assert "Autonomy-Execute: auto" in body
+
+
+def test_task_queue_requires_stored_normalized_contract(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-legacy-review")
+    request.write_text(_safe_request(), encoding="utf-8")
+    review = module.review_packet(state_root=state_root, packet_id="task-legacy-review")
+    payload = module.json.loads(review.review_path.read_text(encoding="utf-8"))
+    payload.pop("normalized_contract_path", None)
+    review.review_path.write_text(module.json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(module.TaskIntakeError, match="missing normalized contract"):
+        module.queue_packet(state_root=state_root, packet_id="task-legacy-review", auto=True)
+
+
 def test_task_intake_normalizes_safe_config_aliases_for_auto_queue(tmp_path: Path) -> None:
     module = _load_module()
     state_root = tmp_path / "targets" / "demo"

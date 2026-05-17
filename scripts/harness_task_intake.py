@@ -81,6 +81,108 @@ SAFE_CONFIG_SCOPE_ALIASES = {
     )
 }
 AI_REVIEW_SCHEMA_VERSION = 1
+NORMALIZED_CONTRACT_SCHEMA_VERSION = 1
+NORMALIZE_MODES = frozenset({"auto", "deterministic", "off"})
+INTERNAL_NORMALIZE_MODES = frozenset((*NORMALIZE_MODES, "stored"))
+NORMALIZATION_MODES = NORMALIZE_MODES
+INTERNAL_NORMALIZATION_MODES = frozenset((*NORMALIZE_MODES, "stored"))
+SECTION_HEADINGS = (
+    "Summary",
+    "요약",
+    "Goal",
+    "목표",
+    "Acceptance",
+    "완료 조건",
+    "수용 기준",
+    "File Scope",
+    "변경 범위",
+    "Forbidden Scope",
+    "금지 범위",
+    "Validation",
+    "검증",
+    "Manual Checks",
+    "수동 확인",
+    "Notes",
+    "메모",
+)
+NATURAL_LANGUAGE_SCOPE_KEYWORDS = {
+    "readme": ("README.md",),
+    "문서": ("README.md", "docs/**"),
+    "docs": ("docs/**",),
+    "맵": ("client/**", "src/**", "public/**"),
+    "map": ("client/**", "src/**", "public/**"),
+    "캐릭터": ("client/**", "src/**", "public/**"),
+    "character": ("client/**", "src/**", "public/**"),
+    "player": ("client/**", "src/**", "public/**"),
+    "ui": ("client/**", "src/**"),
+    "화면": ("client/**", "src/**"),
+}
+GAMEPLAY_SCOPE_PATTERN = re.compile(
+    r"(?i)\b(?:game|gameplay|player|players|multiplayer|single[- ]?player|lobby|room|match|min(?:imum)?|max(?:imum)?)\b"
+    r"|게임|플레이|플레이어|인원|혼자|[12]\s*인|한\s*명|두\s*명|최소|로비|매치"
+)
+GAMEPLAY_SCOPE_CANDIDATES = ("server/**", "client/**", "src/**", "tests/**", "public/**")
+VALIDATION_DENY_PATTERNS = (
+    re.compile(r"(^|\s)rm\b", re.IGNORECASE),
+    re.compile(r"(^|\s)rm\s+-[A-Za-z]*[rf][A-Za-z]*\s+(?:/|\*|\.|\.\.|[^\n]*\*)", re.IGNORECASE),
+    re.compile(r"\bgit\s+reset\s+--hard\b", re.IGNORECASE),
+    re.compile(r"\bgit\s+clean\s+-[A-Za-z]*[dfx][A-Za-z]*\b", re.IGNORECASE),
+    re.compile(r"\bgit\s+push\b", re.IGNORECASE),
+    re.compile(r"\bvercel\b(?=.*(?:deploy|--prod))", re.IGNORECASE),
+    re.compile(r"\bvercel\s+env\s+(add|rm|remove|pull|push)\b", re.IGNORECASE),
+    re.compile(r"\b(?:firebase|supabase|netlify|fly|railway|wrangler|sst|serverless)\s+deploy\b", re.IGNORECASE),
+    re.compile(r"\bkubectl\s+(?:apply|delete|replace|rollout|scale|patch)\b", re.IGNORECASE),
+    re.compile(r"\bgh\s+workflow\s+run\b", re.IGNORECASE),
+    re.compile(r"\bgh\s+release\s+(?:create|upload|delete)\b", re.IGNORECASE),
+    re.compile(r"\b(?:prisma|sequelize|knex|drizzle-kit)\s+(?:migrate|db|push)\b", re.IGNORECASE),
+    re.compile(r"\bsupabase\s+db\s+(?:reset|push|migrate)\b", re.IGNORECASE),
+    re.compile(r"\bpython3?\s+(?:\./)?(?:[A-Za-z0-9_.-]+/)*manage\.py\s+(?:migrate|flush|sqlflush)\b", re.IGNORECASE),
+    re.compile(r"\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:migrate|db(?::|-)?(?:migrate|reset|push|drop)?|deploy|publish)\b", re.IGNORECASE),
+    re.compile(r"\balembic\s+(?:upgrade|downgrade)\b", re.IGNORECASE),
+    re.compile(r"\bdb:(?:migrate|reset|drop)\b", re.IGNORECASE),
+    re.compile(r"\bdrop\s+database\b", re.IGNORECASE),
+    re.compile(r"\b(?:sh|bash|zsh)\s+-c\b", re.IGNORECASE),
+    re.compile(r"\b(secret|token|password|credential)s?\b.*=", re.IGNORECASE),
+)
+SAFE_VALIDATION_COMMAND_PATTERNS = (
+    re.compile(r"^git\s+diff\s+--(?:\s+[^;&|<>`]+)+$", re.IGNORECASE),
+    re.compile(r"^git\s+status\s+--short(?:\s+--\s+[^;&|<>`]+)?$", re.IGNORECASE),
+    re.compile(r"^(?:python3?|uv\s+run\s+python3?|poetry\s+run\s+python3?)\s+-m\s+pytest(?:\s|$)", re.IGNORECASE),
+    re.compile(r"^(?:pytest|py\.test)(?:\s|$)", re.IGNORECASE),
+    re.compile(r"^(?:uv|poetry|pipenv)\s+run\s+(?:pytest(?:\s|$)|ruff\s+check(?:\s|$)|python3?\s+-m\s+pytest(?:\s|$))", re.IGNORECASE),
+    re.compile(r"^(?:npm|pnpm|yarn|bun)\s+(?:test(?:\s|$)|run\s+(?:test|tests|lint|build|typecheck|check)(?:\s|$))", re.IGNORECASE),
+    re.compile(r"^npx\s+(?:vitest(?:\s|$)|playwright\s+test(?:\s|$)|eslint(?:\s|$)|tsc(?:\s|$))", re.IGNORECASE),
+    re.compile(r"^node\s+--test(?:\s|$)", re.IGNORECASE),
+    re.compile(r"^go\s+test(?:\s|$)", re.IGNORECASE),
+    re.compile(r"^cargo\s+(?:test|clippy|build)(?:\s|$)", re.IGNORECASE),
+    re.compile(r"^ruff\s+check(?:\s|$)", re.IGNORECASE),
+)
+VALIDATION_SHELL_CONTROL_TOKENS = ("&&", "||", ";", "|", "$(", ">", "<")
+PATH_LIKE_RE = re.compile(
+    r"(?<![A-Za-z0-9_./-])"
+    r"(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9][A-Za-z0-9_.-]*"
+    r"(?![A-Za-z0-9_./-])"
+)
+DIR_SCOPE_RE = re.compile(
+    r"(?<![A-Za-z0-9_./-])"
+    r"(?P<path>(?:src|app|pages|components|lib|docs|test|tests|scripts|public|styles|api|server|client|config)/)"
+    r"(?![A-Za-z0-9_.-])",
+    re.IGNORECASE,
+)
+COMMAND_START_RE = re.compile(
+    r"^(?:python3?|pytest|uv|poetry|pipenv|npm|pnpm|yarn|bun|node|npx|deno|go|cargo|git|make|just|./)"
+)
+VALIDATION_HINT_RE = re.compile(r"(?i)\b(?:validate|verify|test|check|run|검증|테스트|확인)\b")
+DESTRUCTIVE_COMMAND_PATTERNS = (VALIDATION_DENY_PATTERNS[0], VALIDATION_DENY_PATTERNS[1], VALIDATION_DENY_PATTERNS[2])
+DEPLOY_COMMAND_PATTERNS = (
+    re.compile(r"(?i)\bvercel\b.*\b--prod\b"),
+    re.compile(r"(?i)\b(?:firebase|netlify|fly|railway|wrangler|sst|serverless)\s+deploy\b"),
+    re.compile(r"(?i)\bgit\s+push\b"),
+)
+DB_MUTATION_COMMAND_PATTERNS = (
+    re.compile(r"(?i)\b(?:prisma|sequelize|knex|drizzle-kit|alembic)\b.*\b(?:migrate|migration|push|upgrade|reset)\b"),
+    re.compile(r"(?i)\brails\s+db:(?:migrate|reset|drop|setup)\b"),
+)
 
 
 class TaskIntakeError(RuntimeError):
@@ -106,6 +208,10 @@ class ReviewResult:
     risk_flags: tuple[str, ...]
     title: str
     scope_adjustments: tuple[ScopeAdjustment, ...]
+    normalization_status: str = "off"
+    normalized_contract_path: Path | None = None
+    normalization_actions: tuple[str, ...] = ()
+    normalization_used_ai: bool = False
 
 
 @dataclass(frozen=True)
@@ -504,6 +610,65 @@ def create_from_file(
     return request_path
 
 
+def create_from_text(
+    *,
+    state_root: Path,
+    target_id: str,
+    text: str,
+    images: Sequence[Path] = (),
+    image_captions: Sequence[str] = (),
+    title: str | None = None,
+    packet_id: str | None = None,
+    source: str = "inline",
+) -> Path:
+    raw_text = str(text or "").strip()
+    if not raw_text:
+        raise TaskIntakeError("task request text is required")
+    if len(raw_text.encode("utf-8")) > MAX_REQUIREMENT_BYTES:
+        raise TaskIntakeError("task request text is too large")
+    if any((ord(char) < 32 and char not in "\n\r\t") or ord(char) == 127 for char in raw_text):
+        raise TaskIntakeError("task request text must not contain unsafe control characters")
+    _reject_secretish_text(raw_text)
+    safe_title = _validate_inline_text(title, field_name="title") if title else None
+    fallback_title = safe_title or _first_heading(raw_text)
+    if fallback_title == "Task intake request":
+        fallback_title = _first_plain_request_line(raw_text)[:80] or "새 작업 요청"
+    resolved_packet_id = validate_packet_id(packet_id) if packet_id else make_packet_id(fallback_title)
+    packet_dir = _packet_dir(state_root, resolved_packet_id)
+    _ensure_new_packet_dir(packet_dir)
+    request_path = _request_path(state_root, resolved_packet_id)
+    attachments_dir = packet_dir / "attachments"
+    source_label = _validate_inline_text(source, field_name="source", max_chars=120) or "inline"
+    try:
+        body = raw_text if raw_text.lstrip().startswith("#") else f"# {fallback_title}\n\n{raw_text}\n"
+        _write_text(request_path, body)
+        attachment_meta = _copy_image_attachments(
+            images=images,
+            captions=image_captions,
+            attachments_dir=attachments_dir,
+            state_root=state_root,
+        )
+    except Exception:
+        shutil.rmtree(packet_dir, ignore_errors=True)
+        raise
+    now = utc_timestamp()
+    _write_json(
+        _packet_json_path(state_root, resolved_packet_id),
+        {
+            "schema_version": TASK_PACKET_SCHEMA_VERSION,
+            "packet_id": resolved_packet_id,
+            "target_id": target_id,
+            "created_at": now,
+            "updated_at": now,
+            "request_path": request_path.relative_to(packet_dir).as_posix(),
+            "source": source_label,
+            "attachments": attachment_meta,
+            "queued_backlog_path": "",
+        },
+    )
+    return request_path
+
+
 def _interview_request_text(
     *,
     title: str | None,
@@ -768,6 +933,488 @@ def _request_model(state_root: Path, packet_id: str) -> dict[str, object]:
     }
 
 
+def _plain_request_lines(text: str) -> tuple[str, ...]:
+    lines: list[str] = []
+    skip_section_body = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        heading = line.lstrip("#").strip().rstrip(":")
+        if any(heading.lower() == item.lower() for item in SECTION_HEADINGS):
+            skip_section_body = True
+            continue
+        if line.startswith("## "):
+            skip_section_body = True
+            continue
+        if line.startswith("# "):
+            title = line.removeprefix("# ").strip()
+            if title:
+                lines.append(title)
+            skip_section_body = False
+            continue
+        if skip_section_body and line.startswith(("-", "*")):
+            continue
+        cleaned = line.lstrip("-*").strip()
+        if cleaned and cleaned.lower() not in BLANKISH:
+            lines.append(cleaned)
+    return tuple(dict.fromkeys(lines))
+
+
+def _first_sentence(text: str, *, limit: int = 160) -> str:
+    compact = re.sub(r"\s+", " ", text or "").strip()
+    if not compact:
+        return ""
+    match = re.search(r"(.+?[.!?。！？])(?:\s|$)", compact)
+    sentence = match.group(1) if match else compact
+    return sentence[:limit].strip()
+
+
+def _repo_files(target_repo: Path | None) -> tuple[str, ...]:
+    if target_repo is None:
+        return ()
+    root = Path(target_repo).resolve()
+    if not root.exists() or not root.is_dir():
+        return ()
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["git", "-C", root.as_posix(), "ls-files"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return tuple(
+                line.strip()
+                for line in result.stdout.splitlines()
+                if line.strip() and not _is_path_boundary_unsafe(line.strip())
+            )
+    except Exception:
+        pass
+    files: list[str] = []
+    for path in sorted(root.rglob("*")):
+        if len(files) >= 500:
+            break
+        if not path.is_file() or path.is_symlink():
+            continue
+        rel = path.relative_to(root).as_posix()
+        if rel.startswith((".git/", "node_modules/", ".venv/", "dist/", "build/")):
+            continue
+        if _is_path_boundary_unsafe(rel):
+            continue
+        files.append(rel)
+    return tuple(files)
+
+
+def _repo_dirs(files: Sequence[str]) -> set[str]:
+    dirs: set[str] = set()
+    for item in files:
+        parts = Path(item).parts
+        for index in range(1, len(parts)):
+            dirs.add(Path(*parts[:index]).as_posix())
+    return dirs
+
+
+def _path_exists_in_profile(candidate: str, *, files: Sequence[str], dirs: set[str]) -> bool:
+    text = _scope_item_text(candidate)
+    if text.endswith("/**"):
+        return text[:-3].rstrip("/") in dirs
+    return text in files
+
+
+def _infer_file_scope_from_text(text: str, *, files: Sequence[str]) -> tuple[str, ...]:
+    candidates: list[str] = []
+    file_set = set(files)
+    dirs = _repo_dirs(files)
+    for match in re.finditer(r"(?<![\w./-])([A-Za-z0-9_.@-]+(?:/[A-Za-z0-9_.@-]+)*\.[A-Za-z0-9]{1,12})(?![\w/-])", text):
+        candidate = match.group(1).strip()
+        if _is_path_boundary_unsafe(candidate):
+            continue
+        if not files or candidate in file_set:
+            candidates.append(candidate)
+    lowered = text.lower()
+    for keyword, keyword_candidates in NATURAL_LANGUAGE_SCOPE_KEYWORDS.items():
+        if keyword.lower() not in lowered:
+            continue
+        for candidate in keyword_candidates:
+            if not files:
+                if candidate == "README.md":
+                    candidates.append(candidate)
+                continue
+            if _path_exists_in_profile(candidate, files=files, dirs=dirs):
+                candidates.append(candidate)
+                break
+    if files and GAMEPLAY_SCOPE_PATTERN.search(text):
+        for candidate in GAMEPLAY_SCOPE_CANDIDATES:
+            if _path_exists_in_profile(candidate, files=files, dirs=dirs):
+                candidates.append(candidate)
+    return tuple(dict.fromkeys(candidates))
+
+
+def _package_json_scripts(target_repo: Path | None) -> Mapping[str, object]:
+    if target_repo is None:
+        return {}
+    package_json = Path(target_repo).resolve() / "package.json"
+    if not package_json.exists() or package_json.is_symlink():
+        return {}
+    try:
+        payload = json.loads(_read_text(package_json))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, TaskIntakeError):
+        return {}
+    scripts = payload.get("scripts")
+    return scripts if isinstance(scripts, Mapping) else {}
+
+
+def _package_validation_script_name(command: str) -> str | None:
+    match = re.match(r"^(?:npm|pnpm|bun)\s+test(?:\s|$)", command, flags=re.IGNORECASE)
+    if match:
+        return "test"
+    match = re.match(r"^yarn\s+test(?:\s|$)", command, flags=re.IGNORECASE)
+    if match:
+        return "test"
+    match = re.match(
+        r"^(?:npm|pnpm|yarn|bun)\s+run\s+(test|tests|lint|build|typecheck|check)(?:\s|$)",
+        command,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return match.group(1)
+    return None
+
+
+def _package_script_body_risk(script_body: object) -> str | None:
+    if not isinstance(script_body, str) or not script_body.strip():
+        return "package validation script body is unavailable."
+    body = script_body.strip()
+    for pattern in VALIDATION_DENY_PATTERNS:
+        if pattern.search(body):
+            return "package validation script contains destructive/deploy/env/DB/remote-write command."
+    if re.search(r"(?i)\b(?:npm|pnpm|bun)\s+(?:run\s+)?[A-Za-z0-9:_-]+\b", body) or re.search(
+        r"(?i)\byarn\s+(?:run\s+)?[A-Za-z0-9:_-]+\b",
+        body,
+    ):
+        return "package validation script delegates to another package script."
+    if re.search(r"(?i)\b(deploy|migrate|migration|kubectl|terraform|helm|workflow\s+run)\b", body):
+        return "package validation script contains mutation/deploy keywords."
+    return None
+
+
+def _looks_like_docs_scope(scope: Sequence[str]) -> bool:
+    if not scope:
+        return False
+    for item in scope:
+        text = _scope_item_text(item)
+        if text.endswith("/**"):
+            if text not in {"docs/**"}:
+                return False
+            continue
+        if Path(text).suffix.lower() not in {".md", ".mdx", ".txt", ".rst"}:
+            return False
+    return True
+
+
+def _infer_acceptance_from_text(text: str) -> tuple[str, ...]:
+    patterns = (
+        r"(?i)(?:accepted|acceptance|done|complete)\s+when\s+(.+?)(?:\.\s|$)",
+        r"(?i)(?:완료|성공|수용)\s*(?:조건은|기준은|되려면)?\s*(.+?)(?:\.\s|$)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        candidate = re.sub(r"\s+", " ", match.group(1)).strip(" .")
+        if candidate:
+            _reject_secretish_text(candidate)
+            return (candidate[:240],)
+    return ()
+
+
+def _extract_validation_commands_from_text(text: str) -> tuple[str, ...]:
+    commands: list[str] = []
+    for match in re.finditer(r"`([^`\n]+)`", text):
+        command = match.group(1).strip()
+        if not command:
+            continue
+        if re.match(r"^(python3?|pytest|npm|pnpm|yarn|bun|node|npx|git|make|just|go|cargo|ruby|bundle|./)", command):
+            commands.append(f"`{command}`")
+    return tuple(dict.fromkeys(commands))
+
+
+def _infer_validation(*, file_scope: Sequence[str], target_repo: Path | None, request_text: str = "") -> tuple[str, ...]:
+    explicit_commands = _extract_validation_commands_from_text(request_text)
+    if explicit_commands:
+        return explicit_commands
+    scripts = _package_json_scripts(target_repo)
+    commands: list[str] = []
+    if "lint" in scripts and _package_script_body_risk(scripts.get("lint")) is None:
+        commands.append("`npm run lint`")
+    if "test" in scripts and _package_script_body_risk(scripts.get("test")) is None:
+        commands.append("`npm test`")
+    if "build" in scripts and _package_script_body_risk(scripts.get("build")) is None:
+        commands.append("`npm run build`")
+    if commands:
+        return tuple(dict.fromkeys(commands))
+    if target_repo is not None:
+        root = Path(target_repo).resolve()
+        if (root / "pyproject.toml").exists() or (root / "pytest.ini").exists() or (root / "tests").exists():
+            return ("`python3 -m pytest`",)
+    if _looks_like_docs_scope(file_scope):
+        joined = " ".join(_scope_item_text(item) for item in file_scope)
+        if joined:
+            return (f"`git diff -- {joined}`",)
+    return ()
+
+
+def _validation_risk(command_item: str, *, package_scripts: Mapping[str, object] | None = None) -> str | None:
+    text = str(command_item or "").strip()
+    command = text[1:-1].strip() if text.startswith("`") and text.endswith("`") else text
+    lowered = command.lower()
+    for token in VALIDATION_SHELL_CONTROL_TOKENS:
+        if token in command:
+            return f"검증 명령에 shell control token이 포함되어 있습니다: {token}"
+    for pattern in VALIDATION_DENY_PATTERNS:
+        if pattern.search(command):
+            return "검증 명령에 destructive/deploy/env/DB/remote-write command가 포함되어 있습니다."
+    script_name = _package_validation_script_name(command)
+    if script_name is not None:
+        script_risk = _package_script_body_risk((package_scripts or {}).get(script_name))
+        if script_risk is not None:
+            return "검증 명령의 package script가 auto-safe하지 않습니다: " + script_risk
+    if not any(pattern.match(command) for pattern in SAFE_VALIDATION_COMMAND_PATTERNS):
+        return "검증 명령이 auto validation allowlist에 없습니다."
+    if lowered.startswith(("curl ", "wget ")) and any(word in lowered for word in ("webhook", "deploy", "token", "secret")):
+        return "검증 명령에 외부 상태 변경 가능성이 있는 HTTP command가 포함되어 있습니다."
+    return None
+
+
+def _normalizer_payload_to_model(
+    *,
+    model: Mapping[str, object],
+    payload: Mapping[str, object],
+) -> tuple[dict[str, object], tuple[str, ...], tuple[str, ...]]:
+    actions: list[str] = []
+    risk_flags: list[str] = []
+    normalized = dict(model)
+    field_map = {
+        "goal": "goal",
+        "summary": "summary",
+        "acceptance": "acceptance",
+        "file_scope": "file_scope",
+        "forbidden_scope": "forbidden_scope",
+        "validation": "validation",
+        "manual_checks": "manual_checks",
+        "notes": "notes",
+    }
+    required = ("goal", "summary", "acceptance", "file_scope", "validation")
+    missing = [field for field in required if field not in payload]
+    if missing:
+        raise TaskIntakeError("normalized task contract missing required fields: " + ", ".join(missing))
+    unsupported = sorted(set(str(key) for key in payload) - set(field_map) - {"risk_flags", "confidence", "normalization_actions"})
+    if unsupported:
+        raise TaskIntakeError("normalized task contract has unsupported fields: " + ", ".join(unsupported))
+    for source_field, target_field in field_map.items():
+        if source_field not in payload:
+            continue
+        values = _string_list(payload.get(source_field), field_name=source_field)
+        if source_field in {"file_scope", "forbidden_scope"}:
+            values, adjustments = _normalize_scope_items(values, field=source_field)
+            normalized["scope_adjustments"] = (*tuple(normalized.get("scope_adjustments") or ()), *adjustments)
+        normalized[target_field] = values
+        actions.append(f"ai:{source_field}")
+    risk_flags.extend(_string_list(payload.get("risk_flags"), field_name="risk_flags"))
+    return normalized, tuple(actions), tuple(risk_flags)
+
+
+def _load_normalizer_response(response: Path) -> Mapping[str, object]:
+    try:
+        response_file = _validate_input_file(response, max_bytes=MAX_AI_RESPONSE_BYTES)
+    except TaskIntakeError:
+        raise
+    try:
+        raw = response_file.read_bytes()
+    except OSError as exc:
+        raise TaskIntakeError(f"normalized task response cannot be read: {response}") from exc
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise TaskIntakeError("normalized task response must be UTF-8") from exc
+    _reject_secretish_text(text)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise TaskIntakeError("normalized task response is not valid JSON") from exc
+    if not isinstance(payload, Mapping):
+        raise TaskIntakeError("normalized task response must be a JSON object")
+    return payload
+
+
+def _normalize_task_model(
+    *,
+    state_root: Path,
+    packet_id: str,
+    target_id: str,
+    model: Mapping[str, object],
+    mode: str,
+    target_repo: Path | None = None,
+    ai_response: Path | None = None,
+) -> tuple[dict[str, object], dict[str, object]]:
+    if mode not in INTERNAL_NORMALIZE_MODES:
+        raise TaskIntakeError("normalize mode must be one of: auto, deterministic, off")
+    if mode == "stored":
+        stored = _load_stored_normalized_model(state_root, packet_id, model=model, target_id=target_id)
+        stored["package_scripts"] = _package_json_scripts(target_repo)
+        metadata = {
+            "status": "stored",
+            "path": _sidecar_path(state_root, DRAFTS_DIR, packet_id, "normalized-contract.json"),
+            "actions": tuple(str(item) for item in stored.get("normalization_actions") or ("stored-contract",)),
+            "risk_flags": tuple(str(item) for item in stored.get("normalization_risk_flags") or ()),
+            "used_ai": bool(stored.get("normalization_used_ai")),
+        }
+        return stored, metadata
+    if ai_response is not None and mode == "off":
+        raise TaskIntakeError("AI normalizer response requires normalize mode auto or deterministic")
+    normalized = dict(model)
+    normalized["package_scripts"] = _package_json_scripts(target_repo)
+    actions: list[str] = []
+    risk_flags: list[str] = []
+    used_ai = False
+    request_text = str(model["text"])
+    plain_lines = _plain_request_lines(request_text)
+    repo_files = _repo_files(target_repo)
+    if mode != "off":
+        if not normalized.get("goal"):
+            inferred = _first_sentence(str(model.get("title") or "")) or (plain_lines[0] if plain_lines else "")
+            if inferred:
+                normalized["goal"] = (inferred,)
+                actions.append("inferred-goal")
+        if not normalized.get("summary"):
+            summary = tuple(line for line in plain_lines[:3] if line)
+            if summary:
+                normalized["summary"] = summary
+                actions.append("inferred-summary")
+        if not normalized.get("acceptance") and (normalized.get("goal") or normalized.get("summary")):
+            source = " ".join(str(item) for item in (*(normalized.get("goal") or ()), *(normalized.get("summary") or ())))
+            packet_value = normalized.get("packet")
+            has_attachments = isinstance(packet_value, Mapping) and bool(packet_value.get("attachments"))
+            if re.search(r"(?i)\b(make it better|improve|better|대충|좋게|개선)\b", source) and len(source) < 80:
+                risk_flags.append("완료 조건이 주관적이라 사람 확인이 필요합니다.")
+            elif has_attachments and not normalized.get("file_scope"):
+                pass
+            else:
+                inferred_acceptance = _infer_acceptance_from_text(request_text)
+                normalized["acceptance"] = inferred_acceptance or (
+                    "요청한 변경이 지정된 파일 범위 안에서 반영됩니다.",
+                    "관련 화면/동작에서 요청한 문제 상태가 재발하지 않습니다.",
+                )
+                actions.append("inferred-acceptance")
+        if not normalized.get("file_scope"):
+            inferred_scope = _infer_file_scope_from_text(request_text, files=repo_files)
+            if inferred_scope:
+                normalized["file_scope"] = inferred_scope
+                actions.append("inferred-file-scope")
+        if not normalized.get("validation"):
+            inferred_validation = _infer_validation(
+                file_scope=tuple(str(item) for item in normalized.get("file_scope") or ()),
+                target_repo=target_repo,
+                request_text=request_text,
+            )
+            if inferred_validation:
+                normalized["validation"] = inferred_validation
+                actions.append("inferred-validation")
+    if ai_response is not None:
+        payload = _load_normalizer_response(ai_response)
+        normalized, ai_actions, ai_risks = _normalizer_payload_to_model(model=normalized, payload=payload)
+        actions.extend(ai_actions)
+        risk_flags.extend(ai_risks)
+        used_ai = True
+    contract_path = _sidecar_path(state_root, DRAFTS_DIR, packet_id, "normalized-contract.json")
+    payload = {
+        "schema_version": NORMALIZED_CONTRACT_SCHEMA_VERSION,
+        "packet_id": packet_id,
+        "target_id": target_id,
+        "status": "normalized" if mode != "off" or used_ai else "off",
+        "mode": mode,
+        "used_ai": used_ai,
+        "normalization_actions": list(dict.fromkeys(actions)),
+        "risk_flags": list(dict.fromkeys(risk_flags)),
+        "goal": list(normalized.get("goal") or ()),
+        "summary": list(normalized.get("summary") or ()),
+        "acceptance": list(normalized.get("acceptance") or ()),
+        "file_scope": list(normalized.get("file_scope") or ()),
+        "forbidden_scope": list(normalized.get("forbidden_scope") or ()),
+        "validation": list(normalized.get("validation") or ()),
+        "manual_checks": list(normalized.get("manual_checks") or ()),
+        "notes": list(normalized.get("notes") or ()),
+        "request_sha256": sha256_text(request_text),
+        "created_at": utc_timestamp(),
+    }
+    _write_json(contract_path, payload)
+    metadata = {
+        "status": str(payload["status"]),
+        "path": contract_path,
+        "actions": tuple(dict.fromkeys(actions)),
+        "risk_flags": tuple(dict.fromkeys(risk_flags)),
+        "used_ai": used_ai,
+    }
+    return normalized, metadata
+
+
+def _load_stored_normalized_model(
+    state_root: Path,
+    packet_id: str,
+    *,
+    model: Mapping[str, object],
+    target_id: str,
+) -> dict[str, object]:
+    contract_path = _sidecar_path(state_root, DRAFTS_DIR, packet_id, "normalized-contract.json")
+    if not contract_path.exists():
+        raise TaskIntakeError("stored normalized contract is missing; run `./harness task review` again")
+    try:
+        payload = json.loads(_read_text(contract_path))
+    except json.JSONDecodeError as exc:
+        raise TaskIntakeError("stored normalized contract is invalid") from exc
+    if payload.get("schema_version") != NORMALIZED_CONTRACT_SCHEMA_VERSION:
+        raise TaskIntakeError("stored normalized contract schema is unsupported")
+    if payload.get("packet_id") != packet_id or payload.get("target_id") != target_id:
+        raise TaskIntakeError("stored normalized contract target mismatch")
+    if payload.get("request_sha256") != sha256_text(str(model["text"])):
+        raise TaskIntakeError("stored normalized contract is stale; run `./harness task review` again")
+    normalized = dict(model)
+    for field in ("goal", "summary", "acceptance", "file_scope", "forbidden_scope", "validation", "manual_checks", "notes"):
+        values = _string_list(payload.get(field), field_name=field)
+        if field in {"file_scope", "forbidden_scope"}:
+            values, adjustments = _normalize_scope_items(values, field=field)
+            normalized["scope_adjustments"] = (*tuple(normalized.get("scope_adjustments") or ()), *adjustments)
+        normalized[field] = values
+    normalized["normalization_actions"] = tuple(str(item) for item in payload.get("normalization_actions") or ())
+    normalized["normalization_risk_flags"] = tuple(str(item) for item in payload.get("risk_flags") or ())
+    normalized["normalization_used_ai"] = bool(payload.get("used_ai"))
+    return normalized
+
+
+def _load_review_model(state_root: Path, packet_id: str) -> dict[str, object]:
+    model = _request_model(state_root, packet_id)
+    contract_path = _sidecar_path(state_root, DRAFTS_DIR, packet_id, "normalized-contract.json")
+    if not contract_path.exists():
+        return model
+    try:
+        payload = json.loads(_read_text(contract_path))
+    except json.JSONDecodeError:
+        return model
+    if payload.get("request_sha256") != sha256_text(str(model["text"])):
+        return model
+    if not isinstance(payload, Mapping):
+        return model
+    normalized = dict(model)
+    for field in ("goal", "summary", "acceptance", "file_scope", "forbidden_scope", "validation", "manual_checks", "notes"):
+        normalized[field] = tuple(str(item) for item in payload.get(field) or () if str(item).strip())
+    return normalized
+
+
 def _review_findings(model: Mapping[str, object]) -> tuple[tuple[str, ...], tuple[str, ...]]:
     open_questions: list[str] = []
     risk_flags: list[str] = []
@@ -805,8 +1452,13 @@ def _review_findings(model: Mapping[str, object]) -> tuple[tuple[str, ...], tupl
     for item in tuple(model["validation"]):
         if not (item.startswith("`") and item.endswith("`") and item[1:-1].strip()):
             open_questions.append("검증 명령은 backtick으로 감싼 실행 명령이어야 합니다.")
-        if any(token in item for token in ("rm -rf", "reset --hard", "git clean -xfd")):
-            risk_flags.append("검증 명령에 destructive command가 포함되어 있습니다.")
+        package_scripts = model.get("package_scripts")
+        validation_risk = _validation_risk(
+            item,
+            package_scripts=package_scripts if isinstance(package_scripts, Mapping) else None,
+        )
+        if validation_risk:
+            risk_flags.append(validation_risk)
     return tuple(dict.fromkeys(open_questions)), tuple(dict.fromkeys(risk_flags))
 
 
@@ -1156,6 +1808,502 @@ def _parse_ai_review_payload(payload: object) -> tuple[str, tuple[str, ...], tup
     return summary, open_questions, risk_notes, suggested_acceptance, suggested_validation
 
 
+def _normalized_contract_path(state_root: Path, packet_id: str) -> Path:
+    return _sidecar_path(state_root, DRAFTS_DIR, validate_packet_id(packet_id), "normalized-contract.json")
+
+
+def _normalize_mode(value: str | None) -> str:
+    mode = str(value or "auto").strip().lower()
+    if mode not in INTERNAL_NORMALIZATION_MODES:
+        raise TaskIntakeError("task review normalize mode must be auto, deterministic, or off")
+    return mode
+
+
+def _unused_worker_plain_request_lines(text: str) -> tuple[str, ...]:
+    lines: list[str] = []
+    in_fence = False
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence or not stripped:
+            continue
+        if stripped.startswith("#"):
+            stripped = stripped.lstrip("#").strip()
+        if stripped.startswith(("- ", "* ")):
+            stripped = stripped[2:].strip()
+        if not stripped or stripped.casefold() in BLANKISH or stripped.casefold().startswith("todo:"):
+            continue
+        if re.match(r"(?i)^(goal|summary|acceptance|file scope|forbidden scope|validation|manual checks|notes)\s*:?\s*$", stripped):
+            continue
+        lines.append(stripped)
+    return tuple(lines)
+
+
+def _first_plain_request_line(text: str) -> str:
+    for line in _plain_request_lines(text):
+        if line and not line.startswith("TODO:"):
+            return line[:240]
+    return ""
+
+
+def _is_generic_title(title: str) -> bool:
+    return title.strip().casefold() in {"task intake request", "새 작업 요청", "task", "request"}
+
+
+def _candidate_sentence(text: str) -> str:
+    line = _first_plain_request_line(text)
+    if not line:
+        return ""
+    sentence = re.split(r"(?<=[.!?])\s+", line, maxsplit=1)[0].strip()
+    return sentence[:240]
+
+
+def _scope_candidate_allowed(text: str) -> bool:
+    item = _scope_item_text(text)
+    if not item:
+        return False
+    lowered = item.lower()
+    if lowered.startswith(("http://", "https://", "mailto:")):
+        return False
+    if _is_path_boundary_unsafe(item):
+        return False
+    if _scope_contains_unsafe_wildcard(item):
+        return False
+    if item in {"*", "**", "**/*", ".", "./", "/"}:
+        return False
+    return True
+
+
+def _unused_worker_infer_file_scope_from_text(text: str) -> tuple[str, ...]:
+    candidates: list[str] = []
+    for match in PATH_LIKE_RE.finditer(text):
+        candidate = match.group(0).strip(".,;:()[]{}<>\"'")
+        if candidate.casefold() in {"package-lock.json"}:
+            candidates.append(candidate)
+            continue
+        if "." not in Path(candidate).name:
+            continue
+        if _scope_candidate_allowed(candidate):
+            candidates.append(candidate)
+    if re.search(r"(?i)\breadme(?:\.md)?\b", text) and "README.md" not in candidates:
+        candidates.append("README.md")
+    for match in DIR_SCOPE_RE.finditer(text):
+        candidate = match.group("path").strip("/")
+        if candidate:
+            scope = f"{candidate}/**"
+            if _scope_candidate_allowed(scope):
+                candidates.append(scope)
+    return tuple(dict.fromkeys(candidates))
+
+
+def _command_like(value: str) -> bool:
+    text = value.strip().strip("`").strip()
+    if not text or "\n" in text:
+        return False
+    if re.match(r"(?i)^(?:manual|inspect|review|open|check manually|수동)\b", text):
+        return False
+    return COMMAND_START_RE.match(text) is not None
+
+
+def _command_code_spans(text: str) -> tuple[str, ...]:
+    commands: list[str] = []
+    for match in re.finditer(r"`([^`\n]+)`", text):
+        candidate = match.group(1).strip()
+        if _command_like(candidate):
+            commands.append(candidate)
+    return tuple(dict.fromkeys(commands))
+
+
+def _infer_validation_from_text(text: str, file_scope: Sequence[str]) -> tuple[str, ...]:
+    commands = list(_command_code_spans(text))
+    for line in _plain_request_lines(text):
+        if not VALIDATION_HINT_RE.search(line):
+            continue
+        candidate = line.split(":", 1)[-1].strip()
+        candidate = re.sub(r"(?i)^(?:run|validate with|verify with|test with|check with)\s+", "", candidate).strip()
+        if _command_like(candidate):
+            commands.append(candidate)
+    if commands:
+        return tuple(f"`{command}`" for command in dict.fromkeys(commands))
+    diffable_scope = tuple(
+        item
+        for item in file_scope
+        if item
+        and not item.endswith("/**")
+        and not any(char in item for char in "*?[]")
+        and _scope_candidate_allowed(item)
+    )
+    if diffable_scope:
+        return (f"`git diff -- {' '.join(diffable_scope)}`",)
+    return ()
+
+
+def _normalize_validation_items(items: Sequence[str]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for item in items:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        if text.startswith("`") and text.endswith("`"):
+            normalized.append(text)
+            continue
+        if _command_like(text):
+            normalized.append(f"`{text}`")
+            continue
+        normalized.append(text)
+    return tuple(dict.fromkeys(normalized))
+
+
+def _infer_acceptance_from_contract(goal: Sequence[str], file_scope: Sequence[str]) -> tuple[str, ...]:
+    if file_scope:
+        target = ", ".join(file_scope[:3])
+        suffix = " and related scoped files" if len(file_scope) > 3 else ""
+        return (f"{target}{suffix} reflect the requested change.",)
+    if goal:
+        return (f"Requested outcome is implemented: {goal[0]}",)
+    return ()
+
+
+def _command_matches(patterns: Sequence[re.Pattern[str]], command: str) -> bool:
+    return any(pattern.search(command) for pattern in patterns)
+
+
+def _validation_command_risk(command: str) -> str:
+    if _command_matches(DESTRUCTIVE_COMMAND_PATTERNS, command):
+        return "검증 명령에 destructive command가 포함되어 있습니다."
+    if _command_matches(DEPLOY_COMMAND_PATTERNS, command):
+        return "검증 명령에 deploy/publish command가 포함되어 있습니다."
+    if _command_matches(DB_MUTATION_COMMAND_PATTERNS, command):
+        return "검증 명령에 DB migration/reset command가 포함되어 있습니다."
+    if re.search(r"(?i)\bcurl\b.*\|\s*(?:sh|bash)\b", command):
+        return "검증 명령에 remote shell execution이 포함되어 있습니다."
+    if re.search(r"(?i)(?:^|[;&|]\s*)sudo\b", command):
+        return "검증 명령에 sudo command가 포함되어 있습니다."
+    return ""
+
+
+def _normalized_contract_schema() -> dict[str, object]:
+    array_of_strings: dict[str, object] = {"type": "array", "items": {"type": "string"}}
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "title": {"type": "string"},
+            "goal": array_of_strings,
+            "summary": array_of_strings,
+            "acceptance": array_of_strings,
+            "file_scope": array_of_strings,
+            "forbidden_scope": array_of_strings,
+            "validation": array_of_strings,
+            "manual_checks": array_of_strings,
+            "notes": array_of_strings,
+        },
+        "required": ["goal", "summary", "acceptance", "file_scope", "validation"],
+    }
+
+
+def _contract_list(value: object, *, field_name: str, required: bool = False) -> tuple[str, ...]:
+    if value is None:
+        if required:
+            raise TaskIntakeError(f"normalized contract field is required: {field_name}")
+        return ()
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, list):
+        values = value
+    else:
+        raise TaskIntakeError(f"normalized contract field must be a string or list: {field_name}")
+    items: list[str] = []
+    for item in values:
+        if not isinstance(item, str):
+            raise TaskIntakeError(f"normalized contract field items must be strings: {field_name}")
+        text = item.strip()
+        if not text:
+            continue
+        if len(text) > 1000:
+            raise TaskIntakeError(f"normalized contract field item is too long: {field_name}")
+        if any(ord(char) < 32 or ord(char) == 127 for char in text):
+            raise TaskIntakeError(f"normalized contract field contains control characters: {field_name}")
+        _reject_secretish_text(text)
+        items.append(text)
+    if required and not items:
+        raise TaskIntakeError(f"normalized contract field must not be empty: {field_name}")
+    return tuple(items)
+
+
+def _parse_normalized_contract_response(payload: object) -> dict[str, object]:
+    if not isinstance(payload, Mapping):
+        raise TaskIntakeError("normalized contract response must be a JSON object")
+    allowed = set(_normalized_contract_schema()["properties"])
+    extra = sorted(set(str(key) for key in payload) - allowed)
+    if extra:
+        raise TaskIntakeError("normalized contract response has unsupported fields: " + ", ".join(extra))
+    missing = [field for field in _normalized_contract_schema()["required"] if field not in payload]
+    if missing:
+        raise TaskIntakeError("normalized contract response missing required fields: " + ", ".join(missing))
+    title_value = payload.get("title")
+    title = ""
+    if title_value is not None:
+        if not isinstance(title_value, str):
+            raise TaskIntakeError("normalized contract field must be a string: title")
+        title = _validate_inline_text(title_value, field_name="normalized title", max_chars=200)
+    return {
+        "title": title,
+        "goal": _contract_list(payload.get("goal"), field_name="goal", required=True),
+        "summary": _contract_list(payload.get("summary"), field_name="summary", required=True),
+        "acceptance": _contract_list(payload.get("acceptance"), field_name="acceptance", required=True),
+        "file_scope": _contract_list(payload.get("file_scope"), field_name="file_scope", required=True),
+        "forbidden_scope": _contract_list(payload.get("forbidden_scope"), field_name="forbidden_scope"),
+        "validation": _normalize_validation_items(
+            _contract_list(payload.get("validation"), field_name="validation", required=True)
+        ),
+        "manual_checks": _contract_list(payload.get("manual_checks"), field_name="manual_checks"),
+        "notes": _contract_list(payload.get("notes"), field_name="notes"),
+    }
+
+
+def _unused_worker_load_normalizer_response(path: Path) -> dict[str, object]:
+    response_file = _validate_input_file(path, max_bytes=MAX_AI_RESPONSE_BYTES)
+    try:
+        raw_response = response_file.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise TaskIntakeError("normalized contract response must be UTF-8 JSON") from exc
+    _reject_secretish_text(raw_response)
+    try:
+        payload = json.loads(raw_response)
+    except json.JSONDecodeError as exc:
+        raise TaskIntakeError("normalized contract response is not valid JSON") from exc
+    return _parse_normalized_contract_response(payload)
+
+
+def _base_contract_model(model: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "packet_dir": model["packet_dir"],
+        "packet": model["packet"],
+        "text": model["text"],
+        "title": str(model["title"]),
+        "goal": tuple(model["goal"]),
+        "summary": tuple(model["summary"]),
+        "acceptance": tuple(model["acceptance"]),
+        "file_scope": tuple(model["file_scope"]),
+        "forbidden_scope": tuple(model["forbidden_scope"]),
+        "scope_adjustments": tuple(model["scope_adjustments"]),
+        "validation": _normalize_validation_items(tuple(model["validation"])),
+        "manual_checks": tuple(model["manual_checks"]),
+        "notes": tuple(model["notes"]),
+    }
+
+
+def _apply_contract_payload(
+    *,
+    model: Mapping[str, object],
+    payload: Mapping[str, object],
+    source: str,
+    inferred_fields: Sequence[str],
+) -> dict[str, object]:
+    contract = _base_contract_model(model)
+    if payload.get("title"):
+        contract["title"] = str(payload["title"])
+    for field in ("goal", "summary", "acceptance", "manual_checks", "notes"):
+        if field in payload:
+            contract[field] = tuple(payload[field])  # type: ignore[arg-type]
+    if "validation" in payload:
+        contract["validation"] = _normalize_validation_items(tuple(payload["validation"]))  # type: ignore[arg-type]
+    scope_adjustments = list(tuple(contract["scope_adjustments"]))
+    if "file_scope" in payload:
+        file_scope, file_adjustments = _normalize_scope_items(tuple(payload["file_scope"]), field="file_scope")  # type: ignore[arg-type]
+        contract["file_scope"] = file_scope
+        scope_adjustments.extend(file_adjustments)
+    if "forbidden_scope" in payload:
+        forbidden_scope, forbidden_adjustments = _normalize_scope_items(
+            tuple(payload["forbidden_scope"]), field="forbidden_scope"  # type: ignore[arg-type]
+        )
+        contract["forbidden_scope"] = forbidden_scope
+        scope_adjustments.extend(forbidden_adjustments)
+    contract["scope_adjustments"] = tuple(dict.fromkeys(scope_adjustments))
+    contract["normalization_source"] = source
+    contract["inferred_fields"] = tuple(dict.fromkeys(inferred_fields))
+    return contract
+
+
+def _deterministic_contract_model(model: Mapping[str, object]) -> dict[str, object]:
+    contract = _base_contract_model(model)
+    inferred: list[str] = []
+    request_text = str(model["text"])
+    if not contract["goal"]:
+        title = str(contract["title"])
+        goal = "" if _is_generic_title(title) else title
+        goal = goal or _candidate_sentence(request_text)
+        if goal:
+            contract["goal"] = (goal,)
+            inferred.append("goal")
+    if not contract["summary"] and contract["goal"]:
+        contract["summary"] = tuple(contract["goal"])
+        inferred.append("summary")
+    if not contract["file_scope"]:
+        inferred_scope = _infer_file_scope_from_text(request_text)
+        if inferred_scope:
+            file_scope, file_adjustments = _normalize_scope_items(inferred_scope, field="file_scope")
+            contract["file_scope"] = file_scope
+            contract["scope_adjustments"] = (*tuple(contract["scope_adjustments"]), *file_adjustments)
+            inferred.append("file_scope")
+    if not contract["acceptance"]:
+        acceptance = _infer_acceptance_from_contract(tuple(contract["goal"]), tuple(contract["file_scope"]))
+        if acceptance:
+            contract["acceptance"] = acceptance
+            inferred.append("acceptance")
+    if not contract["validation"]:
+        validation = _infer_validation_from_text(request_text, tuple(contract["file_scope"]))
+        if validation:
+            contract["validation"] = validation
+            inferred.append("validation")
+    contract["normalization_source"] = "deterministic"
+    contract["inferred_fields"] = tuple(dict.fromkeys(inferred))
+    return contract
+
+
+def _contract_artifact_payload(
+    *,
+    packet_id: str,
+    target_id: str,
+    model: Mapping[str, object],
+    mode: str,
+    request_sha256: str,
+) -> dict[str, object]:
+    return {
+        "schema_version": NORMALIZED_CONTRACT_SCHEMA_VERSION,
+        "packet_id": packet_id,
+        "target_id": target_id,
+        "mode": mode,
+        "source": str(model.get("normalization_source") or "off"),
+        "request_sha256": request_sha256,
+        "title": str(model["title"]),
+        "goal": list(tuple(model["goal"])),
+        "summary": list(tuple(model["summary"])),
+        "acceptance": list(tuple(model["acceptance"])),
+        "file_scope": list(tuple(model["file_scope"])),
+        "forbidden_scope": list(tuple(model["forbidden_scope"])),
+        "validation": list(tuple(model["validation"])),
+        "manual_checks": list(tuple(model["manual_checks"])),
+        "notes": list(tuple(model["notes"])),
+        "inferred_fields": list(tuple(model.get("inferred_fields") or ())),
+        "scope_adjustments": [
+            _scope_adjustment_payload(adjustment) for adjustment in tuple(model["scope_adjustments"])
+        ],
+        "created_at": utc_timestamp(),
+    }
+
+
+def _model_from_contract_artifact(
+    *,
+    state_root: Path,
+    packet_id: str,
+    base_model: Mapping[str, object],
+    target_id: str,
+    request_sha256: str,
+) -> dict[str, object]:
+    contract_path = _normalized_contract_path(state_root, packet_id)
+    if not contract_path.exists():
+        raise TaskIntakeError("stored normalized contract is missing; run `./harness task review` again")
+    try:
+        payload = json.loads(_read_text(contract_path))
+    except json.JSONDecodeError as exc:
+        raise TaskIntakeError("stored normalized contract is invalid") from exc
+    if payload.get("schema_version") != NORMALIZED_CONTRACT_SCHEMA_VERSION:
+        raise TaskIntakeError("stored normalized contract schema is unsupported")
+    if payload.get("packet_id") != packet_id or payload.get("target_id") != target_id:
+        raise TaskIntakeError("stored normalized contract target mismatch")
+    if payload.get("request_sha256") != request_sha256:
+        raise TaskIntakeError("stored normalized contract is stale; run `./harness task review` again")
+    contract_payload = _parse_normalized_contract_response(
+        {
+            "title": payload.get("title") or str(base_model["title"]),
+            "goal": payload.get("goal"),
+            "summary": payload.get("summary"),
+            "acceptance": payload.get("acceptance"),
+            "file_scope": payload.get("file_scope"),
+            "forbidden_scope": payload.get("forbidden_scope") or [],
+            "validation": payload.get("validation"),
+            "manual_checks": payload.get("manual_checks") or [],
+            "notes": payload.get("notes") or [],
+        }
+    )
+    contract = _apply_contract_payload(
+        model=base_model,
+        payload=contract_payload,
+        source=str(payload.get("source") or "stored"),
+        inferred_fields=tuple(str(item) for item in payload.get("inferred_fields") or ()),
+    )
+    contract["normalization_source"] = str(payload.get("source") or "stored")
+    return contract
+
+
+def _normalized_contract_model(
+    *,
+    state_root: Path,
+    packet_id: str,
+    model: Mapping[str, object],
+    target_id: str,
+    mode: str,
+    ai_response: Path | None,
+    request_sha256: str,
+) -> dict[str, object]:
+    normalized_mode = _normalize_mode(mode)
+    if normalized_mode == "stored":
+        return _model_from_contract_artifact(
+            state_root=state_root,
+            packet_id=packet_id,
+            base_model=model,
+            target_id=target_id,
+            request_sha256=request_sha256,
+        )
+    if ai_response is not None:
+        if normalized_mode == "off":
+            raise TaskIntakeError("AI normalizer response requires normalize mode auto or deterministic")
+        payload = _load_normalizer_response(ai_response)
+        return _apply_contract_payload(
+            model=model,
+            payload=payload,
+            source="ai-response",
+            inferred_fields=tuple(payload.keys()),
+        )
+    if normalized_mode == "off":
+        contract = _base_contract_model(model)
+        contract["normalization_source"] = "off"
+        contract["inferred_fields"] = ()
+        return contract
+    return _deterministic_contract_model(model)
+
+
+def _review_normalization_mode_from_payload(payload: Mapping[str, object]) -> str:
+    source = str(payload.get("normalization_source") or "")
+    if source == "ai-response":
+        return "stored"
+    mode = str(payload.get("normalization_mode") or "auto").strip().lower()
+    if mode not in NORMALIZATION_MODES:
+        return "auto"
+    return mode
+
+
+def _load_review_contract_model(
+    *,
+    state_root: Path,
+    packet_id: str,
+    target_id: str,
+    request_sha256: str,
+) -> dict[str, object]:
+    base_model = _request_model(state_root, packet_id)
+    return _model_from_contract_artifact(
+        state_root=state_root,
+        packet_id=packet_id,
+        base_model=base_model,
+        target_id=target_id,
+        request_sha256=request_sha256,
+    )
+
+
 def prepare_ai_review(
     *,
     state_root: Path,
@@ -1263,12 +2411,29 @@ def prepare_ai_review(
     )
 
 
-def review_packet(*, state_root: Path, packet_id: str, expected_target_id: str | None = None) -> ReviewResult:
+def review_packet(
+    *,
+    state_root: Path,
+    packet_id: str,
+    expected_target_id: str | None = None,
+    normalize: str = "auto",
+    target_repo: Path | None = None,
+    ai_response: Path | None = None,
+) -> ReviewResult:
     resolved_packet_id = validate_packet_id(packet_id)
     model = _request_model(state_root, resolved_packet_id)
     packet = model["packet"]
     target_id = _assert_expected_target(packet, expected_target_id)
     request_text = str(model["text"])
+    model, normalization = _normalize_task_model(
+        state_root=state_root,
+        packet_id=resolved_packet_id,
+        target_id=target_id,
+        model=model,
+        mode=normalize,
+        target_repo=target_repo,
+        ai_response=ai_response,
+    )
     backlog_id = _make_backlog_id(resolved_packet_id)
     preview = _backlog_markdown(
         backlog_id=backlog_id,
@@ -1314,6 +2479,8 @@ def review_packet(*, state_root: Path, packet_id: str, expected_target_id: str |
     validation_commands, _manual_checks, _setup_commands = parse_backlog_validation_commands(preview)
     if not validation_commands:
         open_questions = (*open_questions, "검증 섹션이 canonical parser에서 실행 명령으로 해석되지 않습니다.")
+    if normalization["risk_flags"]:
+        risk_flags = (*risk_flags, *tuple(str(item) for item in normalization["risk_flags"]))
     auto_eligible = not open_questions and not risk_flags
     if not auto_eligible:
         preview = _backlog_markdown(
@@ -1339,6 +2506,10 @@ def review_packet(*, state_root: Path, packet_id: str, expected_target_id: str |
             "scope_adjustments": [
                 _scope_adjustment_payload(adjustment) for adjustment in tuple(model["scope_adjustments"])
             ],
+            "normalization_status": normalization["status"],
+            "normalized_contract_path": Path(normalization["path"]).name,
+            "normalization_actions": list(normalization["actions"]),
+            "normalization_used_ai": bool(normalization["used_ai"]),
             "validation_commands": list(validation_commands),
             "preview_path": preview_path.name,
             "request_sha256": sha256_text(request_text),
@@ -1355,6 +2526,10 @@ def review_packet(*, state_root: Path, packet_id: str, expected_target_id: str |
         risk_flags=risk_flags,
         title=str(model["title"]),
         scope_adjustments=tuple(model["scope_adjustments"]),
+        normalization_status=str(normalization["status"]),
+        normalized_contract_path=Path(normalization["path"]),
+        normalization_actions=tuple(str(item) for item in normalization["actions"]),
+        normalization_used_ai=bool(normalization["used_ai"]),
     )
 
 
@@ -1518,6 +2693,8 @@ def queue_packet(
     packet_id: str,
     auto: bool = False,
     expected_target_id: str | None = None,
+    normalize: str = "auto",
+    target_repo: Path | None = None,
 ) -> QueueResult:
     resolved_packet_id = validate_packet_id(packet_id)
     packet = load_packet(state_root, resolved_packet_id)
@@ -1537,15 +2714,21 @@ def queue_packet(
     current_request_hash = sha256_file(_request_path(state_root, resolved_packet_id))
     if review_payload.get("request_sha256") != current_request_hash:
         raise TaskIntakeError("task review is stale; run `./harness task review` again")
+    contract_path = _sidecar_path(state_root, DRAFTS_DIR, resolved_packet_id, "normalized-contract.json")
+    if not review_payload.get("normalized_contract_path") or not contract_path.exists():
+        raise TaskIntakeError("task review is missing normalized contract; run `./harness task review` again")
+    review_normalize = "stored"
     review = review_packet(
         state_root=state_root,
         packet_id=resolved_packet_id,
         expected_target_id=expected_target_id,
+        normalize=review_normalize,
+        target_repo=target_repo,
     )
     if auto and not review.auto_eligible:
         detail = ", ".join((*review.open_questions, *review.risk_flags))
         raise TaskIntakeError("auto queue 불가: " + detail)
-    model = _request_model(state_root, resolved_packet_id)
+    model = _load_review_model(state_root, resolved_packet_id)
     autonomy_execute = "auto" if auto else "manual-review"
     backlog_id = _make_backlog_id(resolved_packet_id)
     queued_dir = _sidecar_path(state_root, "backlog", "queued")

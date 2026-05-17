@@ -5,14 +5,28 @@
 ## 기본 흐름
 
 ```bash
-./harness task
-./harness task list
-./harness task review <packet-id>
-./harness task queue <packet-id> --auto
-./harness run
+./harness do "맵이 너무 둥글고 캐릭터가 커서 줄여줘"
+./harness watch
 ```
 
-`task draft`와 `task from`도 쓸 수 있지만, 처음에는 bare `./harness task` 인터뷰를 권장한다.
+처음 쓰는 사람은 `do`와 `watch`만 알면 된다. `task draft/from/review/queue`는 실행 계약을 직접 보고 복구할 때 쓰는 고급 명령이다.
+
+`do`가 내부에서 수행하는 단계는 아래와 같다.
+
+- 자연어 요청을 task packet으로 저장한다.
+- `task review --normalize auto`와 같은 정규화를 수행한다.
+- canonical scope/validation gate가 통과하면 `task queue --auto`와 같은 queue를 수행한다.
+- 기본으로 `run`까지 이어서 complete, product commit, push gate를 시도한다.
+- 안전 계약이 부족하면 필요한 질문만 출력하고 manual-review로 멈춘다.
+
+Telegram에서는 다음처럼 실행 가능한 task 요청을 보낼 수 있다.
+
+```text
+/harness task my-app README에 설치 방법을 간단히 추가해
+/harness task @app 맵이 너무 둥글고 캐릭터가 커서 줄여줘
+```
+
+controller가 relay를 drain하면 `watch`가 이 task instruction을 task intake gate로 넘긴다. `/harness note`는 계속 메모일 뿐 실행 task가 아니다.
 
 ## Draft 작성
 
@@ -41,10 +55,30 @@
 출력된 `targets/<id>/backlog/drafts/<packet-id>/request.md`는 외부 에디터로 수정해도 된다. 수정 후에는 다시 review한다.
 
 ```bash
-./harness task review <packet-id>
+./harness task review <packet-id> --normalize auto
 ```
 
 `request.md`가 review 뒤 바뀌면 `task list`에서 `다시 검토 필요`로 표시된다.
+
+## Natural-language review normalization
+
+`task review`의 기본값은 `--normalize auto`다. 사람이 처음 적은 요청은 자연어여도 된다. review 단계가 안전하게 해석할 수 있으면 acceptance, file scope, validation을 canonical backlog preview로 정규화한다.
+
+```bash
+./harness task review <packet-id> --normalize auto
+```
+
+정규화는 review에만 적용된다. `task queue --auto`와 `./harness run`은 자연어를 다시 파싱하지 않고, review가 만든 canonical backlog 계약만 읽는다.
+
+모드를 명시할 수 있다.
+
+- `auto`: 기본값. deterministic parser로 먼저 보정하고, 허용된 offline AI response가 있으면 같은 safety gate를 통과한 결과만 반영한다.
+- `deterministic`: 로컬 규칙으로만 자연어와 안전한 alias를 보정한다.
+- `off`: 자연어 추론을 끄고 이미 canonical section으로 쓰인 요청만 review한다.
+
+`--ai-response <json>`은 네트워크 호출이 아니다. 외부에서 만든 JSON을 packet-local 입력으로 읽고, `goal`, `summary`, `acceptance`, `file_scope`, `validation` 필수 필드와 schema, secret scan, scope parser, validation parser, forbidden-scope policy, destructive-command deny policy를 모두 통과한 경우에만 정규화에 사용한다. AI가 만든 값도 trusted source가 아니며, 실패하면 auto queue는 막힌다. `--normalize off --ai-response` 조합은 거부된다.
+
+auto validation은 allowlist 기반이다. `git diff -- ...`, pytest, lint/test/build 같은 안전한 검증 계열만 통과하며, `npm run build`처럼 product repo의 package script를 부르는 명령은 `package.json`의 script body가 deploy/DB/env/destructive 동작을 포함하지 않을 때만 auto로 인정된다.
 
 ## AI advisory review
 
@@ -76,7 +110,7 @@
 - deterministic validation command
 - secret이나 credential 직접 입력 없음
 
-모호한 요구사항, 이미지 단독 요구사항, credential/manual smoke가 필요한 작업은 `manual-review`로 남기는 것이 정상이다.
+모호한 요구사항, broad product scope, deploy/DB migration/reset, destructive shell command, 이미지 단독 요구사항, credential/manual smoke가 필요한 작업은 `manual-review`로 남기는 것이 정상이다.
 
 ## Scope 자동 보정
 

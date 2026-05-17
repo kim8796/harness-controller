@@ -85,7 +85,7 @@ except Exception:  # pragma: no cover - bridge fallback when package imports are
         if command == "/harness":
             action, _, argument = rest.strip().partition(" ")
             action = (action or "help").lower()
-            if action in {"help", "status", "note", "answer", "pause", "resume", "retry", "salvage", "veto"}:
+            if action in {"help", "status", "note", "task", "answer", "pause", "resume", "retry", "salvage", "veto"}:
                 return {
                     "command": f"/harness {action}",
                     "action": action,
@@ -881,7 +881,7 @@ def _apply_known_target_to_parsed(
     if not known_targets:
         return parsed_for_write, None
     action = str(parsed_for_write.get("action", "")).strip()
-    if action not in {"note", "veto", "pause", "resume", "retry", "answer", "salvage"}:
+    if action not in {"note", "task", "veto", "pause", "resume", "retry", "answer", "salvage"}:
         return parsed_for_write, None
     argument = str(parsed_for_write.get("argument", "")).strip()
     first, separator, rest = argument.partition(" ")
