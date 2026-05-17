@@ -408,7 +408,13 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "runs" / "autonomy" / "inbox" / "README.md").exists()
     assert (bundle / "reports" / "harness-autonomy" / "README.md").exists()
     assert (bundle / "scripts" / "harness_task_intake.py").exists()
+    assert (bundle / "scripts" / "harness_goal.py").exists()
+    assert (bundle / "scripts" / "harness_publication.py").exists()
+    assert (bundle / "scripts" / "harness_incident.py").exists()
     assert (bundle / "tests" / "test_harness_task_intake.py").exists()
+    assert (bundle / "tests" / "test_harness_goal.py").exists()
+    assert (bundle / "tests" / "test_harness_publication.py").exists()
+    assert (bundle / "tests" / "test_harness_incident.py").exists()
     no_arg_help = subprocess.run(
         [str(bundle / "harness")],
         cwd=bundle,
@@ -427,7 +433,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     )
     assert no_arg_help.stdout == explicit_help.stdout
     assert "하네스 시작" in no_arg_help.stdout
-    assert './harness do "맵이 너무 둥글고 캐릭터가 커서 줄여줘"' in no_arg_help.stdout
+    assert './harness goal "이 프로젝트를 완성도 있는 MVP로 만든다"' in no_arg_help.stdout
     assert "./harness watch" in no_arg_help.stdout
     assert "./harness controller audit-size" in no_arg_help.stdout
     assert "./harness target archive plan my-app" not in no_arg_help.stdout
@@ -444,21 +450,21 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "private controller repo release 전용 검증" in readme
     assert "./harness install /path/to/product-repo" in readme
     assert "./harness install /path/to/product-repo --id" not in readme
-    assert './harness do "README에 설치 방법을 간단히 추가해"' in readme
+    assert './harness goal "이 프로젝트를 완성도 있는 MVP로 만든다"' in readme
     assert "./harness watch" in readme
     assert "./harness controller audit-size" in readme
-    assert '`./harness do "요청"` 은 자연어 요청을 task로 만들고' in readme
-    assert "`./harness watch` 는 Telegram relay" in readme
+    assert '`./harness do "요청"` 은 한 작업을 바로 처리하고 싶을 때' in readme
+    assert "`./harness watch` 는 Telegram relay, active goal" in readme
     assert "queued auto 요청을 반복 처리" not in readme
     assert "기본 autopilot 루프" not in readme
-    assert "완료 처리, product local commit, push gate" in readme
+    assert "완료 처리, product local commit, task branch push, PR publication receipt" in readme
     assert "`./harness task`, `./harness task review`" in readme
     assert "자동 원격 롤백은 없다" in readme
     assert "`./harness task` 는 요구사항 초안을 만든다" not in readme
     assert "`./harness task review --ai` 는 AI가 읽기 좋은 검토용 파일만 만들며" not in readme
     assert 'Bare `./harness do "request"` wraps task text intake' in readme
     assert "Bare `./harness watch` wraps Telegram relay drain" in readme
-    assert "Bare `./harness run` is an autopilot wrapper" in readme
+    assert "Bare `./harness run` is a lower-level one-shot autopilot wrapper" in readme
     assert "Bare `./harness finish` maps to a recovery summary" in readme
     assert "exact `--run <run-id>`" in readme
     assert "./harness smoke implementation" in readme

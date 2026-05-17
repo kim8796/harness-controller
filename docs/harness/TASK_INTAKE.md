@@ -5,18 +5,27 @@
 ## 기본 흐름
 
 ```bash
+./harness goal "이 프로젝트를 완성도 있는 MVP로 만든다"
+./harness watch
+```
+
+처음 쓰는 사람은 `install -> goal -> watch`만 알면 된다. `goal`은 제품 완성 목표이고, `watch`가 목표를 task로 나누어 처리한다.
+
+단일 작업만 바로 처리하고 싶으면 `do`를 쓴다.
+
+```bash
 ./harness do "맵이 너무 둥글고 캐릭터가 커서 줄여줘"
 ./harness watch
 ```
 
-처음 쓰는 사람은 `do`와 `watch`만 알면 된다. `task draft/from/review/queue`는 실행 계약을 직접 보고 복구할 때 쓰는 고급 명령이다.
+`task draft/from/review/queue`는 실행 계약을 직접 보고 복구할 때 쓰는 고급 명령이다.
 
 `do`가 내부에서 수행하는 단계는 아래와 같다.
 
 - 자연어 요청을 task packet으로 저장한다.
 - `task review --normalize auto`와 같은 정규화를 수행한다.
 - canonical scope/validation gate가 통과하면 `task queue --auto`와 같은 queue를 수행한다.
-- 기본으로 `run`까지 이어서 complete, product commit, push gate를 시도한다.
+- 기본으로 `run`까지 이어서 complete, product commit, task branch PR publication을 시도한다.
 - 안전 계약이 부족하면 필요한 질문만 출력하고 manual-review로 멈춘다.
 
 Telegram에서는 다음처럼 실행 가능한 task 요청을 보낼 수 있다.
@@ -149,4 +158,4 @@ scope 문법만 문제였던 요청을 이미 manual-review로 queue했다면 �
 
 draft는 source of truth가 아니다. 실제 실행 단위는 `task queue`가 만든 canonical sidecar backlog markdown이다.
 
-실행은 `./harness run` autopilot이 담당한다. 성공 transaction은 완료 처리, product commit, push gate까지 기존 gate로 닫는다. 중간에서 멈춘 구현 기록을 수동으로 복구할 때만 [OPERATOR_GUIDE.md](OPERATOR_GUIDE.md)의 `finish` 흐름을 따른다.
+장기 실행은 `./harness watch` goal autopilot이 담당한다. 성공 transaction은 완료 처리, product commit, task branch PR publication receipt까지 닫는다. `./harness run`과 `finish`는 중간에서 멈춘 구현 기록을 수동으로 복구하거나 한 작업만 디버깅할 때 쓰는 고급 경로다.

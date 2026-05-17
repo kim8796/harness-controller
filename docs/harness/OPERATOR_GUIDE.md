@@ -6,13 +6,13 @@
 
 ```bash
 ./harness install /path/to/my-app --id my-app --branch main --default
-./harness do "맵이 너무 둥글고 캐릭터가 커서 줄여줘"
+./harness goal "이 프로젝트를 완성도 있는 MVP로 만든다"
 ./harness watch
 ```
 
 `install`은 global wrapper 설치가 아니라 product repo를 controller target으로 등록하는 명령이다. global convenience wrapper는 `./harness self install`이다.
 
-`do`는 사람이 쓴 자연어 요청을 canonical backlog preview로 정규화하고 안전하면 바로 queue/run까지 진행한다. `watch`는 Telegram relay와 queued backlog를 계속 감시하는 기본 운영 명령이다.
+`goal`은 제품 완성 목표를 controller sidecar에 등록한다. `watch`는 Telegram relay, active goal, queued backlog를 계속 감시하는 기본 운영 명령이다. `do`는 한 작업을 즉시 처리하고 싶을 때 쓰는 보조 명령이다.
 
 ## 상태 확인
 
@@ -54,18 +54,19 @@
 - implementation
 - sidecar backlog completed 전환
 - product local commit
-- product push gate
+- task branch push
+- task PR create/update receipt
 
-push preflight가 맞지 않으면 commit까지만 끝내고 멈춘다. 하위 실행을 직접 확인하려면:
+publication이 막히면 해당 task의 receipt/incident로 격리하고 `watch`는 가능한 다음 task를 계속 찾는다. 하위 실행을 직접 확인하려면:
 
 ```bash
 ./harness run --once
 ```
 
-하위 run 명령으로 감시할 수도 있지만, 일반 운영은 `watch`를 쓴다.
+장기 감시는 일반 운영 명령인 `watch`를 쓴다.
 
 ```bash
-./harness run --watch
+./harness watch
 ```
 
 Telegram/Redis는 operator instruction transport이고 product-changing 실행기는 아니다. `/harness task <target> ...`는 controller가 drain한 뒤 `watch`가 task intake gate를 통과시킬 때만 실행된다.

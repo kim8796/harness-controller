@@ -8,18 +8,13 @@
 ```bash
 ./harness
 ./harness install /path/to/product-repo --id my-app --default
-./harness task
-./harness task list
-./harness task review <packet-id>
-./harness task queue <packet-id> --auto
-./harness run
-./harness finish
+./harness goal "이 프로젝트를 완성도 있는 MVP로 만든다"
+./harness watch
 ```
 
-`v1.8.26`부터 bare `./harness run`은 default target의 현재 queued auto backlog를 처리한 뒤 queue가 비면 종료하는 autopilot이고, Telegram/Redis relay drain은 controller-owned Upstash adapter를 사용한다.
-성공한 transaction은 기존 gate를 묶어 `implement -> complete -> commit -> push preflight/apply` 순서로 진행한다.
-원격 upstream, branch, dirty state, drift, secret-like diff, product pollution 중 하나라도 막히면 다음 backlog로 넘어가지 않고 이유와 다음 명령을 출력한다.
-한 항목만 점검하려면 `./harness run --once`, 새 작업을 계속 감시하려면 `./harness run --watch`를 사용한다.
+`v1.8.26`부터 beginner path는 제품 목표 단위다. `./harness goal`은 목표를 controller sidecar에 저장하고, `./harness watch`는 goal이 끝날 때까지 계획 생성, task 분해, 구현, 검증, product commit, task branch push, PR receipt를 반복한다.
+`./harness do "요청"`은 한 작업만 즉시 처리하는 helper다. `task review/queue`, `run`, `finish`, `target backlog push`는 복구와 디버깅용 고급 명령으로 남긴다.
+Telegram/Redis relay drain은 controller-owned Upstash adapter를 사용한다.
 relay smoke 는 target을 명시해 `python3 scripts/harness_telegram_bridge.py --drain-relay --target-id <target> --json` 으로 확인한다.
 Telegram/Redis setup readiness 는 `./harness telegram setup --target-id <id> --repo-id <repo> --dry-run` 으로 먼저 확인하며, dry-run 은 env/provider/webhook/deploy side effect 를 만들지 않는다.
 

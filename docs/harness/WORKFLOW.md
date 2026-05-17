@@ -4,7 +4,7 @@
 
 이 문서는 이 저장소에서 하네스 엔지니어링을 실제로 어떻게 굴릴지 정의한다.
 
-사용자-facing 운영은 가능한 한 `./harness do "요청"`과 `./harness watch`로 접고, 단계별 `task/review/queue/run/finish/archive` 명령은 구현 검증과 복구에서만 직접 사용한다.
+사용자-facing 운영은 가능한 한 `./harness install /path/to/product`, `./harness goal "제품 목표"`, `./harness watch` 세 단계로 접는다. `./harness do "요청"`은 단일 작업 helper이고, 단계별 `task/review/queue/run/finish/archive` 명령은 구현 검증과 복구에서만 직접 사용한다.
 
 ## 새 세션 recovery
 
