@@ -940,7 +940,12 @@ def command_install(args: argparse.Namespace) -> int:
                     sort_keys=True,
                 )
             )
-            return 0 if ready_for_run and runtime_status.controller_runtime_ready else 2
+            runtime_blocker = _runtime_install_blocker(
+                runtime_status,
+                interactive=False,
+                setup_receipt=setup_receipt,
+            )
+            return 0 if ready_for_run and runtime_blocker is None else 2
         print("하네스 install 완료")
         print(f"- 대상 ID: `{record.target_id}`")
         print(f"- 제품 저장소: `{record.repo.as_posix()}`")
@@ -1065,8 +1070,15 @@ def _runtime_install_blocker(status: harness_runtime_setup.RuntimeSetupStatus, *
     failed = [cap for cap in status.capabilities if cap.required and cap.status == "failed"]
     if failed:
         return "runtime setup failed: " + ", ".join(cap.name for cap in failed)
-    if not status.controller_runtime_ready:
-        return "controller runtime is not ready"
+    required_nonready = [
+        cap
+        for cap in status.capabilities
+        if cap.required and cap.name not in {"codex", "controller_venv"} and cap.status != "ready"
+    ]
+    if required_nonready:
+        return "runtime setup required: " + ", ".join(cap.name for cap in required_nonready)
+    if setup_receipt is not None and not status.controller_runtime_ready:
+        return "runtime setup was applied but is still not ready"
     return None
 
 
@@ -3304,7 +3316,8 @@ def command_controller_doctor(args: argparse.Namespace) -> int:
         print("- product repo 기본 정책: harness runtime 파일 커밋 안 함")
         print("- Telegram/Redis secret 위치: controller env only")
         print("다음 명령: `./harness install /path/to/product-repo`")
-    return 0 if not missing and targets_ignored and runtime_status.controller_runtime_ready else 2
+    runtime_blocker = _runtime_install_blocker(runtime_status, interactive=False, setup_receipt=None)
+    return 0 if not missing and targets_ignored and runtime_blocker is None else 2
 
 
 def _directory_size_bytes(path: Path) -> int:

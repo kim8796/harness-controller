@@ -1608,7 +1608,7 @@ def test_beginner_install_tty_prompt_registers_target(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(module, "repo_root", lambda: controller)
     monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.18")
     monkeypatch.setattr(module.sys.stdin, "isatty", lambda: True)
-    answers = iter([str(product)])
+    answers = iter([str(product), "n"])
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
 
     assert module.main(["install"]) == 0
@@ -1625,6 +1625,7 @@ def _runtime_status(
     controller: Path,
     *,
     actions: tuple[object, ...] = (),
+    venv_status: str = "ready",
     codex_status: str = "ready",
     gh_status: str = "ready",
     can_auto_install: bool = True,
@@ -1632,7 +1633,7 @@ def _runtime_status(
     caps = (
         module.harness_runtime_setup.Capability("git", "ready", "git ready", True),
         module.harness_runtime_setup.Capability("python", "ready", "python ready", True),
-        module.harness_runtime_setup.Capability("controller_venv", "ready", "venv ready", True),
+        module.harness_runtime_setup.Capability("controller_venv", venv_status, f"venv {venv_status}", True),
         module.harness_runtime_setup.Capability(
             "codex",
             codex_status,
@@ -1712,7 +1713,7 @@ def test_beginner_install_gh_auth_missing_does_not_block_target_registration(mon
     _assert_no_product_harness_pollution(product)
 
 
-def test_beginner_install_json_returns_nonzero_when_runtime_not_ready(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_beginner_install_codex_missing_is_advisory_for_registration(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_module()
     controller = tmp_path / "controller"
     product = tmp_path / "product"
@@ -1724,6 +1725,50 @@ def test_beginner_install_json_returns_nonzero_when_runtime_not_ready(monkeypatc
         module,
         "_evaluate_install_runtime_setup",
         lambda root, check_auth: _runtime_status(module, controller, codex_status="missing"),
+    )
+
+    assert module.main(["install", str(product), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["runtime_setup"]["controller_runtime_ready"] is False
+    assert payload["target"]["target_id"] == "product"
+    assert module.harness_controller.default_target(controller).target_id == "product"
+    _assert_no_product_harness_pollution(product)
+
+
+def test_beginner_install_controller_venv_missing_is_advisory_for_registration(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.28")
+    monkeypatch.setattr(
+        module,
+        "_evaluate_install_runtime_setup",
+        lambda root, check_auth: _runtime_status(module, controller, venv_status="missing"),
+    )
+
+    assert module.main(["install", str(product), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["runtime_setup"]["controller_runtime_ready"] is True
+    assert payload["target"]["target_id"] == "product"
+    assert module.harness_controller.default_target(controller).target_id == "product"
+    _assert_no_product_harness_pollution(product)
+
+
+def test_beginner_install_json_returns_nonzero_when_runtime_failed(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.28")
+    monkeypatch.setattr(
+        module,
+        "_evaluate_install_runtime_setup",
+        lambda root, check_auth: _runtime_status(module, controller, venv_status="failed"),
     )
 
     assert module.main(["install", str(product), "--json"]) == 2

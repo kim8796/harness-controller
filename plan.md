@@ -173,7 +173,7 @@ Reviewer blockers:
 - Controller `.venv` setup actions do not reject symlinked `.venv`, which could write outside the controller.
 - The `./harness` shim still runs under `/usr/bin/env python3` after `.venv` setup, so installed controller runtime dependencies may not be used by `watch`.
 - The `./harness` shim can follow a symlinked `.venv` before runtime setup safety checks run.
-- Non-TTY/json install can still exit success while required runtime readiness is missing.
+- Non-TTY/json install readiness must report missing runtime, but target registration should not be blocked by missing Codex on CI/fresh machines.
 
 Patch plan:
 
@@ -181,5 +181,5 @@ Patch plan:
 - Add safe controller-owned directory checks before receipt writes.
 - Mark symlinked controller `.venv` as failed and avoid setup actions that write through it.
 - Make the repo-local `harness` shim re-exec into controller `.venv/bin/python` when it exists.
-- Make the shim refuse symlinked `.venv` and keep runtime readiness in install/json exit codes.
+- Make the shim refuse symlinked `.venv`; keep unsafe runtime failures in install/json exit codes while reporting missing Codex as a next action.
 - Add focused regression tests and rerun focused pytest plus full guard.
