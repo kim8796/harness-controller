@@ -70,7 +70,8 @@ git clone <harness-controller-git-url> harness-controller
 cd harness-controller
 python3 -m venv .venv
 .venv/bin/python -m pip install -U pip
-.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install -r requirements-runtime.txt
+.venv/bin/python -m pip install -r requirements-telegram.txt
 ./harness controller doctor
 ```
 
@@ -220,7 +221,8 @@ Controller에서 Redis relay를 drain하려면 Upstash REST client가 설치된 
 ```bash
 cd /path/to/harness-controller
 python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install -r requirements-runtime.txt
+.venv/bin/python -m pip install -r requirements-telegram.txt
 ```
 
 확인은 secret 없이 import만 본다.

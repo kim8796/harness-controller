@@ -1,7 +1,7 @@
 # Harness Controller Bundle v1.8.26
 
 이 디렉토리는 product repo 밖에서 실행하는 external harness controller 배포 번들이다.
-product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는다.
+product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는다. Runtime 준비와 `.venv`는 controller checkout 안에서만 관리한다.
 
 처음이면 [START_HERE.md](START_HERE.md)부터 본다. 자세한 빠른 시작은 [docs/harness/START_HERE.md](docs/harness/START_HERE.md)에 있다.
 
@@ -23,7 +23,9 @@ product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는�
 
 - `./harness` 와 `./harness help` 는 한국어 시작 화면을 보여준다. 전체 명령 참조는 `./harness --help` 를 쓴다.
 - `./harness controller release-check --run-lint --run-pytest` 는 private controller repo release 전용 검증이다. source repo pre-push guard 와 달리 controller 배포에 필요한 금지 추적 파일, export source, focused lint/test 만 확인한다.
-- `./harness install /path/to/product-repo` 는 전역 설치가 아니라 제품 저장소를 하네스 관리 대상으로 등록하는 명령이다. 첫 유효 타겟은 자동으로 `@default`가 된다.
+- `./harness install /path/to/product-repo` 는 전역 설치가 아니라 제품 저장소를 하네스 관리 대상으로 등록하고 controller-local runtime readiness를 확인/준비하는 명령이다. 첫 유효 타겟은 자동으로 `@default`가 된다.
+- `.venv` 는 controller-local runtime이다. export/portability artifact도 아니고 product repo에 복사할 파일도 아니다.
+- macOS + Homebrew + TTY에서는 누락된 필수 도구 설치를 한 번 물어볼 수 있다. unsupported OS, Homebrew 없음, non-TTY에서는 자동 설치하지 않고 필요한 next action만 보여준다.
 - `./harness goal "제품 목표"` 는 단일 요청이 아니라 제품 완성 목표를 controller sidecar에 등록한다.
 - `./harness telegram setup --target-id my-app --repo-id my-app-relay --dry-run` 은 Telegram/Redis setup readiness 를 redacted 출력으로 점검한다. `--dry-run` 은 env/provider/webhook/deploy side effect 를 모두 막는다.
 - 터미널에서 인자 없이 `./harness install` 을 실행하면 제품 저장소 경로만 질문한다. 스크립트/CI에서는 `./harness install /path/to/product-repo`를 쓴다. 질문에 답할 수 없는 환경에서 인자 없이 실행하면 상태만 보여준다.
@@ -39,7 +41,7 @@ product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는�
 Advanced mapping:
 
 - `./harness target add my-app --repo /path/to/product-repo --branch main` is the lower-level form behind `install`.
-- `./harness target alias add my-app app` and `./harness target set-default my-app` are available when operators need shorter selectors.
+- `./harness target alias add my-app app` and `./harness target set my-app` are available when operators need shorter selectors. `set-default` remains as the long-form alias.
 - `./harness target verify my-app`, `./harness target dashboard my-app`, and `./harness target run my-app --once` remain the explicit inspection/smoke commands.
 - Bare `./harness goal "product outcome"` writes active goal state under `targets/<target-id>/goals/` only.
 - Bare `./harness do "request"` wraps task text intake, normalization, auto queue, and an autopilot run.

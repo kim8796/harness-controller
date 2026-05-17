@@ -7,12 +7,25 @@
 처음에는 external controller beginner path만 쓴다.
 
 ```bash
-./harness install /path/to/my-app --id my-app --default
-./harness task
-./harness run
+./harness install /path/to/my-app
+./harness goal "제품 목표"
+./harness watch
 ```
 
-고급 `target ...` 명령은 필요할 때만 본다.
+`install` 은 제품 repo를 controller target으로 등록하고 controller-local runtime readiness를 확인한다. product repo에 harness runtime/state를 복사하지 않는다. `.venv` 는 controller-local runtime이며 portability artifact가 아니다. 고급 `target ...`, `task`, `run`, `finish` 명령은 복구/디버깅 때만 본다.
+
+## runtime 자동 설치가 안 된다
+
+자동 설치는 macOS + Homebrew + TTY에서만 누락된 필수 도구에 대해 한 번 물어본다. unsupported OS, Homebrew가 없는 macOS, non-TTY/CI에서는 product repo를 건드리지 않고 필요한 next action만 출력한다.
+
+먼저 controller에서 상태를 본다.
+
+```bash
+./harness install
+./harness controller doctor
+```
+
+필요한 secret은 `.env` 또는 환경변수에만 둔다. setup report나 readiness 출력에 secret 값을 붙여 넣지 않는다.
 
 ## `./harness new`가 실패한다
 
@@ -34,6 +47,15 @@ git -C /path/to/my-app status --short --branch
 의도한 변경이면 commit/stash/정리 후 다시 실행한다. 하네스는 dirty target에서 product-changing run을 fail-closed한다.
 
 ## queued auto task가 없다
+
+active goal이 있다면 먼저 watch가 planner refill을 하게 둔다.
+
+```bash
+./harness goal
+./harness watch
+```
+
+단일 task intake를 수동으로 확인해야 할 때만 아래 고급 명령을 쓴다.
 
 ```bash
 ./harness task list

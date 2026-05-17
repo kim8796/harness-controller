@@ -1,0 +1,2 @@
+# Controller beginner runtime currently uses the Python standard library.
+# Keep this file minimal; broader development and CI dependencies stay in requirements.txt.
