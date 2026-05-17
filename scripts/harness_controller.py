@@ -1285,6 +1285,7 @@ def pending_backlog_product_pushes(*, controller_root: Path, record: TargetRecor
     if not runs_root.exists():
         return pending
     push_run_ids: set[str] = set()
+    credential_blocked_run_ids: set[str] = set()
     for push_evidence in sorted(runs_root.glob("external-*-backlog-push-*/generated-evidence.json")):
         try:
             push_payload = _read_json_file(push_evidence, label="backlog product push generated evidence")
@@ -1296,6 +1297,53 @@ def pending_backlog_product_pushes(*, controller_root: Path, record: TargetRecor
             and str(push_payload.get("target_id") or "") == record.target_id
         ):
             push_run_ids.add(str(push_payload.get("implementation_run_id") or ""))
+    for pr_evidence in sorted(runs_root.glob("external-*-backlog-pr-*/generated-evidence.json")):
+        try:
+            pr_payload = _read_json_file(pr_evidence, label="backlog product PR generated evidence")
+        except ControllerError:
+            continue
+        if (
+            str(pr_payload.get("operation") or "") == "backlog-product-pr"
+            and bool(pr_payload.get("applied")) is True
+            and str(pr_payload.get("target_id") or "") == record.target_id
+        ):
+            push_run_ids.add(str(pr_payload.get("implementation_run_id") or ""))
+        if (
+            str(pr_payload.get("operation") or "") == "backlog-product-pr"
+            and str(pr_payload.get("target_id") or "") == record.target_id
+            and str(pr_payload.get("status") or pr_payload.get("publication_state") or "") == "credential-blocked"
+        ):
+            run_id = str(pr_payload.get("implementation_run_id") or pr_payload.get("run_id") or "")
+            if run_id:
+                credential_blocked_run_ids.add(run_id)
+    publication_root = state_paths.state_root / "state" / "publication"
+    if publication_root.exists() and not publication_root.is_symlink():
+        for receipt_path in sorted(publication_root.glob("*.json")):
+            if receipt_path.is_symlink() or not receipt_path.is_file():
+                continue
+            try:
+                receipt_payload = _read_json_file(receipt_path, label="backlog product PR publication receipt")
+            except ControllerError:
+                continue
+            if (
+                str(receipt_payload.get("operation") or "") == "backlog-product-pr"
+                and (
+                    bool(receipt_payload.get("applied")) is True
+                    or str(receipt_payload.get("publication_state") or "") == "published"
+                )
+                and str(receipt_payload.get("target_id") or "") == record.target_id
+            ):
+                run_id = str(receipt_payload.get("implementation_run_id") or receipt_payload.get("run_id") or "")
+                if run_id:
+                    push_run_ids.add(run_id)
+            if (
+                str(receipt_payload.get("operation") or "") == "backlog-product-pr"
+                and str(receipt_payload.get("target_id") or "") == record.target_id
+                and str(receipt_payload.get("status") or receipt_payload.get("publication_state") or "") == "credential-blocked"
+            ):
+                run_id = str(receipt_payload.get("implementation_run_id") or receipt_payload.get("run_id") or "")
+                if run_id:
+                    credential_blocked_run_ids.add(run_id)
     for evidence_path in sorted(runs_root.glob("*/generated-evidence.json")):
         if evidence_path.is_symlink() or not evidence_path.is_file():
             continue
@@ -1315,6 +1363,7 @@ def pending_backlog_product_pushes(*, controller_root: Path, record: TargetRecor
                     "run_id": run_id,
                     "backlog_id": str(summary["backlog_id"]),
                     "backlog_title": str(summary["backlog_title"]),
+                    "status": "credential-blocked" if run_id in credential_blocked_run_ids else "pending",
                 }
             )
     return pending

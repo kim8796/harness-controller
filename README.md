@@ -13,8 +13,8 @@ product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는�
 ./harness controller doctor
 ./harness controller release-check --run-lint --run-pytest
 ./harness install /path/to/product-repo
+./harness goal "이 프로젝트를 완성도 있는 MVP로 만든다"
 ./harness telegram setup --target-id my-app --repo-id my-app-relay --dry-run
-./harness do "README에 설치 방법을 간단히 추가해"
 ./harness watch
 ./harness controller audit-size
 ```
@@ -24,14 +24,13 @@ product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는�
 - `./harness` 와 `./harness help` 는 한국어 시작 화면을 보여준다. 전체 명령 참조는 `./harness --help` 를 쓴다.
 - `./harness controller release-check --run-lint --run-pytest` 는 private controller repo release 전용 검증이다. source repo pre-push guard 와 달리 controller 배포에 필요한 금지 추적 파일, export source, focused lint/test 만 확인한다.
 - `./harness install /path/to/product-repo` 는 전역 설치가 아니라 제품 저장소를 하네스 관리 대상으로 등록하는 명령이다. 첫 유효 타겟은 자동으로 `@default`가 된다.
+- `./harness goal "제품 목표"` 는 단일 요청이 아니라 제품 완성 목표를 controller sidecar에 등록한다.
 - `./harness telegram setup --target-id my-app --repo-id my-app-relay --dry-run` 은 Telegram/Redis setup readiness 를 redacted 출력으로 점검한다. `--dry-run` 은 env/provider/webhook/deploy side effect 를 모두 막는다.
 - 터미널에서 인자 없이 `./harness install` 을 실행하면 제품 저장소 경로만 질문한다. 스크립트/CI에서는 `./harness install /path/to/product-repo`를 쓴다. 질문에 답할 수 없는 환경에서 인자 없이 실행하면 상태만 보여준다.
-- `./harness do "요청"` 은 자연어 요청을 task로 만들고 normalize/review/queue/run을 한 번에 진행한다.
-- `do`가 자동 실행 계약을 만들 수 없으면 사람에게 필요한 질문만 남기고 멈춘다.
-- `./harness watch` 는 Telegram relay, `/harness task` inbox, queued auto backlog를 계속 감시한다.
-- 성공 transaction은 완료 처리, product local commit, push gate까지 순서대로 시도한다.
-- watch는 compact memory를 남기고 안전한 controller sidecar maintenance를 자동 수행한다.
-- push는 기본 transaction에 포함되지만 upstream/remote/branch/dirty/remote drift preflight가 맞지 않으면 commit까지만 끝내고 멈춘다.
+- `./harness watch` 는 Telegram relay, active goal, queued auto backlog를 계속 감시하며 goal이 비면 planner가 task를 다시 채운다.
+- 성공 transaction은 완료 처리, product local commit, task branch push, PR publication receipt까지 순서대로 시도한다.
+- watch는 compact memory, incident, safe sidecar maintenance를 남기고 가능한 경우 다음 task 또는 repair task로 계속 진행한다.
+- `./harness do "요청"` 은 한 작업을 바로 처리하고 싶을 때 쓰는 보조 명령이다.
 - `./harness task`, `./harness task review`, `./harness task queue`, `./harness run`, `./harness finish`, `./harness target archive` 는 복구/고급 명령이다.
 - 푸시는 배포나 외부 자동화를 트리거할 수 있고 자동 원격 롤백은 없다.
 - `./harness smoke implementation` 은 임시 제품 저장소로 구현 경로가 정상인지 검증하고 기본적으로 smoke sidecar를 정리한다. 남기려면 `--keep`을 붙인다.
@@ -42,9 +41,10 @@ Advanced mapping:
 - `./harness target add my-app --repo /path/to/product-repo --branch main` is the lower-level form behind `install`.
 - `./harness target alias add my-app app` and `./harness target set-default my-app` are available when operators need shorter selectors.
 - `./harness target verify my-app`, `./harness target dashboard my-app`, and `./harness target run my-app --once` remain the explicit inspection/smoke commands.
+- Bare `./harness goal "product outcome"` writes active goal state under `targets/<target-id>/goals/` only.
 - Bare `./harness do "request"` wraps task text intake, normalization, auto queue, and an autopilot run.
-- Bare `./harness watch` wraps Telegram relay drain, `/harness task` inbox intake, autopilot run, compact memory, and sidecar maintenance.
-- Bare `./harness run` is an autopilot wrapper over `target run @default --implement-backlog-once`, `target backlog transition`, `target backlog commit`, and `target backlog push`.
+- Bare `./harness watch` wraps Telegram relay drain, active goal planning/refill, autopilot run, task PR publication, compact memory, and sidecar maintenance.
+- Bare `./harness run` is a lower-level one-shot autopilot wrapper over `target run @default --implement-backlog-once`, `target backlog transition`, `target backlog commit`, and task PR publication.
 - Bare `./harness finish` maps to a recovery summary over the latest implementation evidence. When a concrete run is resolved, follow-up commands include the exact `--run <run-id>` and delegate to the same target backlog gates used by autopilot.
 
 Telegram/Redis owner commands are target-scoped in external mode:
@@ -118,7 +118,10 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `scripts/harness_cli.py`
 - `scripts/harness_controller.py`
 - `scripts/harness_env.py`
+- `scripts/harness_goal.py`
+- `scripts/harness_incident.py`
 - `scripts/harness_profiles.py`
+- `scripts/harness_publication.py`
 - `scripts/harness_shared.py`
 - `scripts/harness_task_intake.py`
 - `scripts/harness_autonomy/__init__.py`
@@ -174,6 +177,9 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `tests/test_harness_cli.py`
 - `tests/test_harness_controller.py`
 - `tests/test_harness_export.py`
+- `tests/test_harness_goal.py`
+- `tests/test_harness_incident.py`
+- `tests/test_harness_publication.py`
 - `tests/test_harness_task_intake.py`
 - `tests/test_harness_telegram_bridge.py`
 - `tests/test_redis_relay.py`

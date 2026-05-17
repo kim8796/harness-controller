@@ -33,11 +33,11 @@ python3 -m venv .venv
 
 ```bash
 ./harness install /path/to/my-app
-./harness do "README에 설치 방법을 간단히 추가해"
+./harness goal "이 프로젝트를 1인 플레이 가능한 완성도 있는 MVP로 만든다"
 ./harness watch
 ```
 
-이 흐름에서 product repo에는 `HARNESS.md`, `harness`, `scripts/harness*`, `runs/**`, `reports/**`, `backlog/**`, `targets/**`, `.env*`를 쓰지 않는다. 하네스 상태와 실행 증거는 controller의 `targets/<id>/` 아래에 남는다.
+이 흐름에서 `goal`은 단일 작업이 아니라 제품 완성 목표다. `watch`가 목표를 roadmap/task로 쪼개고, 가능한 task를 queue하고, 구현/검증/commit/task branch push/PR publication receipt를 반복한다. product repo에는 `HARNESS.md`, `harness`, `scripts/harness*`, `runs/**`, `reports/**`, `backlog/**`, `targets/**`, `.env*`를 쓰지 않는다. 하네스 상태와 실행 증거는 controller의 `targets/<id>/` 아래에 남는다.
 
 ## 5분 시작
 
@@ -58,13 +58,13 @@ Telegram/Redis relay를 새 컴퓨터에서 붙일 때는 controller local runti
 ./harness install /path/to/my-app
 ```
 
-3. 자연어로 바로 작업시킨다.
+3. 제품 목표를 등록한다.
 
 ```bash
-./harness do "맵이 너무 둥글고 캐릭터가 커서 줄여줘"
+./harness goal "이 프로젝트를 1인 플레이 가능한 완성도 있는 MVP로 만든다"
 ```
 
-`do`는 task 생성, 자연어 정규화, auto queue, run을 한 번에 진행한다. 안전한 실행 계약을 만들 수 없으면 필요한 질문만 보여주고 멈춘다. 이미지 참고가 필요하면 `./harness do "요청" --image <path>`를 쓴다.
+`goal`은 `targets/<target-id>/goals/` 아래에만 저장된다. 기존 active goal을 바꾸려면 `./harness goal "새 목표" --replace`를 쓴다. 현재 상태만 보려면 `./harness goal`을 실행한다.
 
 4. 계속 감시하는 loop를 켠다.
 
@@ -72,9 +72,17 @@ Telegram/Redis relay를 새 컴퓨터에서 붙일 때는 controller local runti
 ./harness watch
 ```
 
-`watch`는 Telegram relay, `/harness task` inbox, queued auto backlog를 계속 감시한다. 실패하면 compact incident/memory를 남기고, 반복 실패는 사람 확인으로 멈춘다. 성공하면 complete, product commit, push gate까지 진행한다.
+`watch`는 Telegram relay, `/harness task` inbox, active goal, queued auto backlog를 계속 감시한다. backlog가 비면 goal planner가 다시 task를 만들고, 실패한 task는 격리하거나 repair/correction 입력으로 남긴 뒤 가능한 다음 작업을 계속 찾는다. 성공하면 complete, product commit, task branch push, PR publication receipt까지 진행한다.
 
-5. 필요할 때만 고급 명령을 본다.
+5. 단일 작업만 즉시 처리하고 싶을 때만 `do`를 쓴다.
+
+```bash
+./harness do "맵이 너무 둥글고 캐릭터가 커서 줄여줘"
+```
+
+`do`는 task 생성, 자연어 정규화, auto queue, run을 한 번에 진행하는 보조 명령이다. 장기 목표 기반 작업은 `goal -> watch`가 기본이다. 이미지 참고가 필요하면 `./harness do "요청" --image <path>`를 쓴다.
+
+6. 필요할 때만 고급 명령을 본다.
 
 ```bash
 ./harness task list
@@ -84,7 +92,7 @@ Telegram/Redis relay를 새 컴퓨터에서 붙일 때는 controller local runti
 
 `task review/queue`, `run --once`, `finish`, `target archive`는 정상 사용 경로가 아니라 복구/디버깅용이다.
 
-6. 복구가 필요할 때만 finish를 쓴다.
+7. 복구가 필요할 때만 finish를 쓴다.
 
 ```bash
 ./harness finish
@@ -122,6 +130,7 @@ archive apply는 저장된 plan에 들어 있는 `targets/<target-id>/` 경로�
 ```bash
 ./harness status
 ./harness dashboard
+./harness goal "제품 목표"
 ./harness do "요청"
 ./harness watch
 ./harness controller audit-size
@@ -185,7 +194,7 @@ cd /path/to/harness-starter
 
 - 제품 repo가 clean이다: `git status --short --branch`
 - controller target이 등록돼 있다: `./harness target list`
-- queued auto task가 있다: `./harness task list`
+- active goal이 있거나 queued auto task가 있다: `./harness goal`, `./harness task list`
 - 필요한 secret은 `.env` 또는 환경변수에만 있다.
 - Telegram/Redis를 쓴다면 `./harness telegram setup --target-id <id> --repo-id <repo> --dry-run`과 [TELEGRAM.md](TELEGRAM.md)의 env가 준비돼 있다.
 

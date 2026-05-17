@@ -120,12 +120,17 @@ def sanitize_for_outbox(text: str) -> str:
         sanitized,
     )
     sanitized = re.sub(
-        r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|secret|token)\s*[:=]\s*[A-Za-z0-9._~+/=-]{16,}",
+        r"(?i)\b([A-Za-z0-9_.-]*(?:database|redis|postgres|mongo|supabase|webhook|callback)[A-Za-z0-9_.-]*(?:url|uri|endpoint)?[A-Za-z0-9_.-]*)\s*[:=]\s*[\"']?\S+[\"']?",
         r"\1=[redacted]",
         sanitized,
     )
     sanitized = re.sub(
-        r"\b(https?://)([^/\s:@]+):([^/\s@]+)@",
+        r"(?i)\b([A-Za-z0-9_.-]*(?:api[_-]?key|access[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|secret|token|password|passwd|credential|private[_-]?key|service[_-]?role[_-]?key|signing[_-]?key)[A-Za-z0-9_.-]*)\s*[:=]\s*[\"']?\S+[\"']?",
+        r"\1=[redacted]",
+        sanitized,
+    )
+    sanitized = re.sub(
+        r"\b([A-Za-z][A-Za-z0-9+.-]*://)[^@\s/]*@",
         r"\1[redacted]@",
         sanitized,
     )

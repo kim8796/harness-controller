@@ -19,7 +19,7 @@
 ```bash
 ./harness controller doctor
 ./harness install /path/to/product-repo
-./harness do "README에 설치 방법을 간단히 추가해"
+./harness goal "이 프로젝트를 완성도 있는 MVP로 만든다"
 ./harness watch
 ```
 

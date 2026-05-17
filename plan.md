@@ -1,41 +1,116 @@
-# Autopilot Happy Path Simplification Plan
+# Goal-Driven Harness Autopilot Implementation Plan
 
-## Goal
+## Objective
 
-Make the default harness UX match the product intent: one command for one task, and one command for long-running autonomous operation. Keep the strict review/queue/run/finish/archive gates as internal and recovery primitives, but stop making a normal user drive them manually.
+Implement the beginner workflow as `install -> goal -> watch`. A goal is a product-completion objective, not a single task. `watch` must keep generating and executing goal-linked tasks until progress is made or an external hard blocker exists.
 
-## User-Facing Contract
+## Decisions
 
-- `./harness do "request"` creates a task packet, normalizes it, queues it when safe, and runs the autopilot transaction by default.
-- `./harness watch` is the simple long-running loop. It drains Telegram relay when configured, converts `/harness task <target> ...` inbox instructions into task packets, runs queued work, records compact memory, and performs safe sidecar cleanup.
-- Beginner docs show only install, do, watch, and status.
-- `install` exposes only the product repo path in beginner help. Advanced flags stay supported for scripts/recovery but are hidden from normal help.
-- The first valid installed target becomes `@default` automatically so the happy path is `install /path -> do "request"`.
-- `do` must not force manual file-scope input for common product requests. Deterministic normalization should infer safe target-local scope for gameplay/player-count wording such as Korean "1인/2인/플레이/최소".
-- Existing `task review`, `task queue`, `finish`, and `target archive` commands remain available as advanced/recovery commands.
+- Add `./harness goal "..."` as the product-level objective entrypoint.
+- Keep `./harness do "..."` as a single-task helper.
+- Store all goal state in controller sidecar only: `targets/<target-id>/goals/**`.
+- Reuse task intake/review/queue for generated tasks instead of writing backlog markdown directly where possible.
+- Treat manual-review/no executable backlog as planner/correction input, not as a global stop.
+- Add publication receipts for task branch push/PR; if `gh` or credentials are unavailable, record a clear credential blocker and continue when possible.
+- Add external incident classification and controller-repair task materialization; full automated controller repair execution can be built on this state.
 
-## Safety Rules
+## Implementation Phases
 
-- `do` may only auto queue when the normalized contract passes the existing canonical task gate.
-- `watch` may only convert explicit `Action: task` owner instructions into tasks. Notes remain notes.
-- Any missing scope, missing validation, secret/env scope, deploy, DB mutation, destructive command, or broad unsafe request stops as manual-review.
-- Git commit/push gates stay unchanged. Remote drift, dirty state, or push preflight failures still stop instead of forcing changes.
-- Automatic cleanup may touch only controller-owned sidecar data and product repo files are never archive/delete targets.
+1. Goal store and CLI:
+   - Add controller-owned goal module.
+   - Add `goal` parser/command.
+   - Show active goal status when no text is provided.
+   - Support `--replace`, `--target`, and hidden `--json`.
 
-## Implementation Scope
+2. Planner/refill:
+   - Collect a secret-safe product profile.
+   - Build deterministic roadmap/tasks for common JS/Python/documentation projects.
+   - Queue generated tasks through existing task intake.
+   - Persist `goal.json`, `goal.md`, `roadmap.json`, `progress.json`, and `queue-report.json`.
 
-- Add task text intake helper for inline natural-language requests.
-- Add top-level `do` command.
-- Add top-level `watch` command as the simple long-running path.
-- Add `/harness task` owner instruction support in control/bridge parsing and target selector resolution.
-- Add inbox task conversion from `targets/<id>/operator-inbox` to task packets.
-- Add compact autopilot memory entries for task intake, queue, transaction success/failure, and maintenance.
-- Add safe automatic target-sidecar archive/cleanup after successful work or watch idle maintenance.
-- Update docs/help/export tests so beginner surface is short and advanced commands are not the primary path.
+3. Watch integration:
+   - Before idle sleep, refill from active goal when queued auto backlog is empty.
+   - Record progress/no-progress memory.
+   - Convert manual-review generated tasks into repair-needed progress rather than stopping the goal loop.
 
-## Verification
+4. Publication and progress:
+   - Add branch/PR receipt helpers.
+   - Extend autopilot transaction result/progress with commit/push/PR metadata.
+   - Keep existing push gate but do not let pending publication block unrelated queued work.
 
-- Focused tests:
-  - `python3 -m pytest tests/test_harness_task_intake.py tests/test_harness_cli.py tests/test_harness_telegram_bridge.py tests/test_harness_export.py`
-- Full guard before completion:
-  - `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+5. Incident/self-repair:
+   - Classify failures into controller-contract, product-implementation, publication, credentials, target-precondition, runner-transient.
+   - Materialize controller repair tasks for controller-contract incidents.
+   - Record product checkpoint before repair and resume instructions after repair.
+
+6. Docs/tests/export:
+   - Update beginner docs to `install -> goal -> watch`.
+   - Add focused tests for goal command, planner queue, watch refill, publication receipt, incident classification, and export inclusion.
+   - Run focused pytest, then full pre-push guard.
+
+## Agent Protocol
+
+- Worker A: goal store/planner module and goal tests.
+- Worker B: CLI/watch integration.
+- Worker C: publication/incident helpers.
+- Worker D: docs/export/tests.
+- Reviewers: goal-to-task, publication idempotency, self-repair/no-stop behavior.
+- If reviewers find blockers, patch and rerun focused tests before final guard.
+
+## Correction Loop 1
+
+Reviewer blockers:
+
+- `credential-blocked` publication must be treated as blocked, not as success.
+- Pending publication must not be a global blocker for `run` or `watch`.
+- Incident-blocked backlog items must be quarantined so watch does not hot-loop the same queued auto item.
+- Goal refill must not stall forever when generated tasks only produced manual-review artifacts.
+- Stable `state/publication/*.json` receipts must close pending publication detection.
+- Publication and incident persisted failure text must redact common secret forms beyond GitHub tokens.
+
+Patch plan:
+
+- Normalize credential publication to a hard blocker in `command_run`.
+- Continue past pending publication after recording diagnosis.
+- Move repeated-incident backlog items to blocked/manual-review state before continuing watch.
+- Allow goal refill to generate fallback correction tasks when prior generated tasks contain no executable backlog.
+- Include stable publication receipts in pending detection.
+- Expand redaction and add focused regression tests.
+
+## Correction Loop 2
+
+Reviewer blockers:
+
+- Goal refill still treats a linked queued path as executable even when the actual sidecar backlog is `manual-review` or no longer queued.
+- Previous publication receipts with `credential-blocked` are reported as ordinary pending publication, so `watch` can keep working when a hard external credential blocker exists.
+- Repeated-incident quarantine failures return a string and let `watch` continue, which can hot-loop the same task if the state transition failed.
+- Secret redaction still misses prefixed env names such as `AWS_SECRET_ACCESS_KEY`.
+- Export-facing docs still describe the old `install -> task/do -> run` beginner path in a few canonical docs.
+
+Patch plan:
+
+- Derive goal executable status from discovered sidecar backlog items and require `status=queued` plus `Autonomy-Execute:auto`.
+- Persist and surface `credential-blocked` publication state through pending publication detection, then hard-stop with one clear action.
+- Make repeated-incident backlog quarantine return an explicit success flag and stop if isolation fails.
+- Broaden shared redaction patterns to any secret-like key name, including prefixed cloud env names.
+- Sync export/workflow docs to `install -> goal -> watch`, with `do/task/run/finish` marked as helper or recovery commands.
+
+## Correction Loop 3
+
+Reviewer blockers:
+
+- A previous `credential-blocked` PR receipt can permanently block rerun even after `gh` credentials are fixed.
+- Publication/incident redaction misses quoted secret assignments and URL env values such as `WEBHOOK_URL`, `DATABASE_URL`, and `REDIS_URL`.
+- Incident signatures do not include backlog/goal identity, so two tasks with the same failure text can share a repeated-failure counter.
+- Controller self-repair tasks are materialized into target backlog as `Autonomy-Execute:auto`, which routes them through the product implementation lane.
+- Product checkpoints are persisted without recursive redaction.
+- `SESSION_BOOTSTRAP.md` still describes the old `run/run --watch` beginner path.
+
+Patch plan:
+
+- Hard-stop old credential-blocked receipts only while `gh` is missing or unauthenticated; after credentials are ready, treat them as retryable pending publication so work can resume.
+- Add quoted assignment, URL env, and generic URL userinfo redaction to publication, incident, and outbox sanitizers.
+- Include backlog and goal ids in incident signatures and persisted payloads.
+- Store controller-repair tasks under `state/controller-repair-tasks/**`, not product executable backlog.
+- Recursively redact checkpoint dictionaries/lists before writing incidents and repair payloads.
+- Update bootstrap wording and add focused regression tests.

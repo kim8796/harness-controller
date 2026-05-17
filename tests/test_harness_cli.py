@@ -29,7 +29,7 @@ def test_beginner_help_home_no_args_and_help_are_static(monkeypatch, tmp_path: P
     no_arg_output = capsys.readouterr().out
     assert "하네스 시작" in no_arg_output
     assert "./harness install /path/to/product" in no_arg_output
-    assert './harness do "맵이 너무 둥글고 캐릭터가 커서 줄여줘"' in no_arg_output
+    assert './harness goal "이 프로젝트를 완성도 있는 MVP로 만든다"' in no_arg_output
     assert "./harness watch" in no_arg_output
     assert "./harness task review <packet-id> --normalize auto" not in no_arg_output
     assert "./harness target archive plan my-app" not in no_arg_output
@@ -109,6 +109,86 @@ def test_target_archive_help_documents_audit_plan_apply(capsys) -> None:
     assert "apply" in output
     assert "targets/<target-id>" in output
     assert "product repo" in output
+
+
+def test_goal_command_creates_and_reports_active_goal(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.27")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    capsys.readouterr()
+
+    assert module.main(["goal", "이 프로젝트를 완성도 있는 MVP로 만든다"]) == 0
+    output = capsys.readouterr().out
+    assert "하네스 goal 등록 완료" in output
+    assert "다음 명령: `./harness watch`" in output
+    assert (controller / "targets" / "demo" / "goals" / "active-goal.json").exists()
+
+    assert module.main(["goal"]) == 0
+    status_output = capsys.readouterr().out
+    assert "하네스 goal 상태" in status_output
+    assert "완성도 있는 MVP" in status_output
+    _assert_no_product_harness_pollution(product)
+
+
+def test_goal_watch_refill_generates_backlog_when_idle(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.27")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    assert module.main(["goal", "README 기반 MVP를 정리한다"]) == 0
+    capsys.readouterr()
+
+    record = module.harness_controller.default_target(controller)
+    refill = module._refill_goal_if_idle(record)
+
+    assert refill is not None
+    assert int(refill["queued"]) >= 1
+    assert (controller / "targets" / "demo" / "backlog" / "queued").exists()
+    queued = tuple((controller / "targets" / "demo" / "backlog" / "queued").glob("*.md"))
+    assert queued
+    assert "Goal:" in queued[0].read_text(encoding="utf-8")
+    _assert_no_product_harness_pollution(product)
+
+
+def test_watch_public_flow_refills_and_runs_goal_task(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.27")
+    calls: list[str] = []
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    assert module.main(["goal", "README 기반 MVP를 정리한다"]) == 0
+    capsys.readouterr()
+
+    def fake_transaction(_record, _args):
+        calls.append("ran")
+        return module.AutopilotTransaction("published", "run-1", "BL-generated", "abc1234", "abc1234", "completed")
+
+    monkeypatch.setattr(module, "_run_autopilot_transaction", fake_transaction)
+
+    assert module.main(["watch", "--max-cycles", "1", "--no-telegram-drain"]) == 0
+    output = capsys.readouterr().out
+
+    assert "goal planner refill" in output
+    assert "transaction 시작:" in output
+    assert "watch 종료: max-cycles=1" in output
+    assert calls == ["ran"]
+    _assert_no_product_harness_pollution(product)
 
 
 def test_do_queue_only_creates_normalized_auto_backlog(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -524,12 +604,83 @@ def test_beginner_run_once_autopilot_uses_default_target_transaction(monkeypatch
     output = capsys.readouterr().out
     assert "하네스 autopilot run 시작" in output
     assert "Codex managed latest/default" in output
-    assert "implement -> complete -> commit -> push gate" in output
+    assert "implement -> complete -> commit -> task branch PR publication" in output
     args = calls[0]
     assert args.runner_model is None
     assert args.runner_reasoning_effort == "xhigh"
     assert "transaction 완료: `BL-demo`" in output
     assert "run 종료: 처리한 backlog 1개" in output
+
+
+def test_repeated_incident_blocking_isolates_backlog_item(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.27")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    _write_sidecar_backlog(controller)
+    capsys.readouterr()
+    record = module.harness_controller.default_target(controller)
+
+    blocked_ok, blocked_path = module._block_sidecar_backlog_for_incident(
+        record=record,
+        backlog_id="BL-demo",
+        reason="repeated incident test",
+    )
+
+    assert blocked_ok is True
+    assert blocked_path.endswith("backlog/blocked/BL-demo.md")
+    assert not (controller / "targets" / "demo" / "backlog" / "queued" / "BL-demo.md").exists()
+    blocked = controller / "targets" / "demo" / "backlog" / "blocked" / "BL-demo.md"
+    assert blocked.exists()
+    body = blocked.read_text(encoding="utf-8")
+    assert "Status: blocked" in body
+    assert "Autonomy-Execute: manual-review" in body
+    assert "Blocked-Reason: repeated incident test" in body
+
+
+def test_watch_stops_when_repeated_incident_quarantine_fails(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    record = module.harness_controller.TargetRecord(
+        target_id="demo",
+        repo=product,
+        branch="main",
+        state_root=controller / "targets" / "demo",
+        controller_version="test",
+        created_at="",
+        updated_at="",
+        is_default=True,
+    )
+    record.state_root.mkdir(parents=True)
+    incident = {"signature": "sig-demo", "count": module.AUTOPILOT_INCIDENT_THRESHOLD}
+
+    def fail_transition(**_kwargs):
+        raise module.harness_controller.ControllerError("transition failed")
+
+    def fail_if_transaction_runs(_record, _args):
+        raise AssertionError("watch must stop when it cannot quarantine the repeated-failure task")
+
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_controller, "default_target", lambda root: record)
+    monkeypatch.setattr(module.harness_controller, "pending_backlog_product_pushes", lambda **kwargs: [])
+    monkeypatch.setattr(module.harness_controller, "transition_sidecar_backlog", fail_transition)
+    monkeypatch.setattr(module, "_refill_goal_if_idle", lambda _record: None)
+    monkeypatch.setattr(module, "_target_next_auto_backlog_item", lambda _record: type("Item", (), {"item_id": "BL-demo"})())
+    monkeypatch.setattr(module, "_target_open_incident_blocker", lambda _record, _backlog_id: incident)
+    monkeypatch.setattr(module, "_run_autopilot_transaction", fail_if_transaction_runs)
+
+    assert module.main(["run", "--watch", "--max-cycles", "1"]) == 2
+    output = capsys.readouterr().out
+    assert "반복 실패가 threshold에 도달" in output
+    assert "watch 중단: 반복 실패 task 격리에 실패했습니다." in output
 
 
 def test_beginner_run_default_drains_queue_and_exits_when_empty(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -685,10 +836,8 @@ def test_beginner_run_once_autopilot_completes_and_commits_before_push_block(
     assert "구현 완료:" in output
     assert "완료 처리:" in output
     assert "product commit:" in output
-    assert "product push: 보류" in output
-    assert "./harness finish --run " in output
-    assert "--push --apply" in output
-    assert "run 일시정지" in output
+    assert "product publication:" in output
+    assert "publication 보류" in output or "publication 중단" in output
     assert _product_head(product) != before_head
     assert _product_git_status(product) == []
     assert not (controller / "targets" / "demo" / "backlog" / "queued" / "BL-demo.md").exists()
@@ -710,12 +859,94 @@ def test_beginner_run_once_autopilot_completes_and_commits_before_push_block(
         encoding="utf-8",
     )
     assert module.main(["run", "--once", "--runner", "custom", "--command-template", "printf 'next\\n' > next.txt"]) == 2
-    blocked_output = capsys.readouterr().out
-    assert "이전 transaction의 product push가 아직 닫히지 않았습니다" in blocked_output
-    assert "./harness finish --run " in blocked_output
-    assert "--push --apply" in blocked_output
-    assert "BL-next" not in blocked_output
-    assert not (product / "next.txt").exists()
+    continued_output = capsys.readouterr().out
+    assert "product publication이 아직 닫히지 않았습니다" in continued_output
+    assert "pending publication은 run/watch 전체를 멈추지 않고" in continued_output
+    assert "BL-next" in continued_output
+    assert (product / "next.txt").exists()
+
+
+def test_beginner_run_hard_stops_on_previous_credential_blocked_publication(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    record = module.harness_controller.TargetRecord(
+        target_id="demo",
+        repo=product,
+        branch="main",
+        state_root=controller / "targets" / "demo",
+        controller_version="test",
+        created_at="",
+        updated_at="",
+        is_default=True,
+    )
+    record.state_root.mkdir(parents=True)
+
+    def fail_if_selected(_record):
+        raise AssertionError("credential-blocked publication must stop before selecting the next task")
+
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_controller, "default_target", lambda root: record)
+    monkeypatch.setattr(
+        module.harness_controller,
+        "pending_backlog_product_pushes",
+        lambda **kwargs: [{"run_id": "run-old", "backlog_id": "BL-old", "status": "credential-blocked"}],
+    )
+    monkeypatch.setattr(module, "_github_credentials_ready", lambda **kwargs: False)
+    monkeypatch.setattr(module, "_target_next_auto_backlog_item", fail_if_selected)
+
+    assert module.main(["run", "--once"]) == 2
+    output = capsys.readouterr().out
+    assert "publication 중단: GitHub credential/gh CLI가 필요합니다." in output
+    assert "gh auth status" in output
+
+
+def test_beginner_run_continues_after_old_credential_blocker_when_gh_auth_is_ready(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    record = module.harness_controller.TargetRecord(
+        target_id="demo",
+        repo=product,
+        branch="main",
+        state_root=controller / "targets" / "demo",
+        controller_version="test",
+        created_at="",
+        updated_at="",
+        is_default=True,
+    )
+    record.state_root.mkdir(parents=True)
+    calls: list[str] = []
+
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_controller, "default_target", lambda root: record)
+    monkeypatch.setattr(
+        module.harness_controller,
+        "pending_backlog_product_pushes",
+        lambda **kwargs: [{"run_id": "run-old", "backlog_id": "BL-old", "status": "credential-blocked"}],
+    )
+    monkeypatch.setattr(module, "_github_credentials_ready", lambda **kwargs: True)
+    monkeypatch.setattr(module, "_target_next_auto_backlog_item", lambda _record: type("Item", (), {"item_id": "BL-next"})())
+    monkeypatch.setattr(
+        module,
+        "_run_autopilot_transaction",
+        lambda _record, _args: calls.append("ran")
+        or module.AutopilotTransaction("published", "run-next", "BL-next", "abc1234", "abc1234", "completed"),
+    )
+
+    assert module.main(["run", "--once"]) == 0
+    output = capsys.readouterr().out
+    assert calls == ["ran"]
+    assert "publication 재시도 가능" in output
+    assert "transaction 완료: `BL-next`" in output
 
 
 def test_beginner_run_autopilot_blocks_secret_like_product_diff_before_completion(

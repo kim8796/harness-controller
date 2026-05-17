@@ -268,6 +268,109 @@ def test_product_diff_policy_scans_directory_contents_and_rejects_pathspec_magic
         module.product_diff_policy_blockers(product, [":(glob)client/*"])
 
 
+def test_pending_backlog_product_pushes_accepts_state_publication_receipt(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_git_repo(product)
+    record = module.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.26",
+    )
+    state_root = controller / "targets" / "demo"
+    queued = state_root / "backlog" / "completed" / "BL-demo.md"
+    queued.parent.mkdir(parents=True, exist_ok=True)
+    queued.write_text(
+        "\n".join(
+            [
+                "ID: BL-demo",
+                "Title: Demo",
+                "Status: completed",
+                "Autonomy-Execute: auto",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    run_dir = state_root / "runs" / "harness" / "run-1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "status": "pass",
+                "root_context": {"target_id": "demo", "state_root": state_root.as_posix()},
+                "product_execution": "enabled",
+                "product_implementation": "enabled",
+                "product_commit": "disabled",
+                "product_push": "disabled",
+                "lane_execution": "backlog-implementation",
+                "external_backlog": {
+                    "id": "BL-demo",
+                    "path": "backlog/completed/BL-demo.md",
+                    "title": "Demo",
+                },
+                "product_diff_paths": ["README.md"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    commit_dir = state_root / "runs" / "harness" / "external-demo-backlog-commit-1"
+    commit_dir.mkdir(parents=True, exist_ok=True)
+    (commit_dir / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "operation": "backlog-product-commit",
+                "applied": True,
+                "target_id": "demo",
+                "implementation_run_id": "run-1",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert module.pending_backlog_product_pushes(controller_root=controller, record=record)
+
+    publication_dir = state_root / "state" / "publication"
+    publication_dir.mkdir(parents=True, exist_ok=True)
+    credential_receipt = publication_dir / "BL-demo-credential.json"
+    credential_receipt.write_text(
+        json.dumps(
+            {
+                "operation": "backlog-product-pr",
+                "publication_state": "credential-blocked",
+                "applied": False,
+                "target_id": "demo",
+                "run_id": "run-1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    credential_pending = module.pending_backlog_product_pushes(controller_root=controller, record=record)
+    assert credential_pending
+    assert credential_pending[0]["status"] == "credential-blocked"
+    credential_receipt.unlink()
+
+    (publication_dir / "BL-demo.json").write_text(
+        json.dumps(
+            {
+                "operation": "backlog-product-pr",
+                "publication_state": "published",
+                "applied": True,
+                "target_id": "demo",
+                "run_id": "run-1",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert module.pending_backlog_product_pushes(controller_root=controller, record=record) == []
+
+
 def test_commit_product_backlog_diff_stages_expected_deletion(tmp_path: Path) -> None:
     module = _load_module()
     product = tmp_path / "product"

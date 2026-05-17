@@ -1,0 +1,414 @@
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import subprocess
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable, Mapping, Sequence
+
+
+class PublicationError(RuntimeError):
+    pass
+
+
+CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
+
+
+@dataclass(frozen=True)
+class PublicationResult:
+    status: str
+    branch: str
+    base: str
+    pr_url: str
+    receipt_path: Path
+    evidence_path: Path
+    message: str
+
+
+@dataclass(frozen=True)
+class TaskPublicationResult:
+    published: bool
+    receipt_path: Path
+    evidence_path: Path
+    receipt: dict[str, object]
+
+
+def utc_timestamp() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def default_runner(command: Sequence[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(list(command), cwd=cwd, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def task_branch_name(target_id: str, backlog_id: str) -> str:
+    safe_target = re.sub(r"[^0-9A-Za-z._-]+", "-", target_id).strip("-") or "target"
+    safe_backlog = re.sub(r"[^0-9A-Za-z._-]+", "-", backlog_id).strip("-") or "backlog"
+    return f"harness/{safe_target}/{safe_backlog[:80]}"
+
+
+def _run(runner: CommandRunner, command: Sequence[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    return runner(tuple(command), cwd=cwd)
+
+
+def _safe_slug(value: str, *, fallback: str = "item", max_length: int = 96) -> str:
+    slug = re.sub(r"[^0-9A-Za-z._-]+", "-", value).strip("-")
+    return (slug or fallback)[:max_length]
+
+
+def _redact(text: str) -> str:
+    redacted = re.sub(r"([A-Za-z][A-Za-z0-9+.-]*://)[^@\s/]*@", r"\1<redacted>@", text)
+    secret_key_pattern = (
+        r"[A-Za-z0-9_.-]*(?:api[_-]?key|access[_-]?key|client[_-]?secret|"
+        r"refresh[_-]?token|secret|token|password|passwd|credential|private[_-]?key)[A-Za-z0-9_.-]*"
+    )
+    secret_url_key_pattern = r"[A-Za-z0-9_.-]*(?:database|redis|postgres|mongo|webhook|callback)[A-Za-z0-9_.-]*(?:url|uri|endpoint)?[A-Za-z0-9_.-]*"
+    quoted_assignment_pattern = rf"({secret_key_pattern}\s*=\s*)([\"']).*?(\2)"
+    quoted_mapping_pattern = rf"({secret_key_pattern}\s*:\s*)([\"']).*?(\2)"
+    quoted_url_assignment_pattern = rf"({secret_url_key_pattern}\s*=\s*)([\"']).*?(\2)"
+    quoted_url_mapping_pattern = rf"({secret_url_key_pattern}\s*:\s*(?!//))([\"']).*?(\2)"
+    redacted = re.sub(quoted_assignment_pattern, r"\1\2<redacted>\3", redacted, flags=re.IGNORECASE)
+    redacted = re.sub(quoted_mapping_pattern, r"\1\2<redacted>\3", redacted, flags=re.IGNORECASE)
+    redacted = re.sub(quoted_url_assignment_pattern, r"\1\2<redacted>\3", redacted, flags=re.IGNORECASE)
+    redacted = re.sub(quoted_url_mapping_pattern, r"\1\2<redacted>\3", redacted, flags=re.IGNORECASE)
+    redacted = re.sub(rf"({secret_url_key_pattern}\s*=\s*)[^\s\"']+", r"\1<redacted>", redacted, flags=re.IGNORECASE)
+    redacted = re.sub(rf"({secret_url_key_pattern}\s*:\s*(?!//))[^\s\"']+", r"\1<redacted>", redacted, flags=re.IGNORECASE)
+    redacted = re.sub(rf"({secret_key_pattern}\s*=\s*)[^\s\"']+", r"\1<redacted>", redacted, flags=re.IGNORECASE)
+    redacted = re.sub(rf"({secret_key_pattern}\s*:\s*)[^\s\"']+", r"\1<redacted>", redacted, flags=re.IGNORECASE)
+    redacted = re.sub(rf'("{secret_key_pattern}"\s*:\s*")[^"]+(")', r"\1<redacted>\2", redacted, flags=re.IGNORECASE)
+    redacted = re.sub(rf"('{secret_key_pattern}'\s*:\s*')[^']+(')", r"\1<redacted>\2", redacted, flags=re.IGNORECASE)
+    redacted = re.sub(r"gh[pousr]_[0-9A-Za-z_]{8,}", "<redacted-github-token>", redacted)
+    redacted = re.sub(r"(authorization:\s*bearer\s+)[^\s\"']+", r"\1<redacted>", redacted, flags=re.IGNORECASE)
+    redacted = re.sub(r"(bearer\s+)[A-Za-z0-9._~+/=-]{12,}", r"\1<redacted>", redacted, flags=re.IGNORECASE)
+    return redacted
+
+
+def _write_json(path: Path, payload: Mapping[str, object]) -> None:
+    if path.exists() and path.is_symlink():
+        raise PublicationError(f"refusing symlink publication artifact: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dict(payload), ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _read_json(path: Path) -> dict[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _allocate_publication_dir(state_root: Path, backlog_id: str) -> Path:
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    root = state_root / "runs" / "harness"
+    root.mkdir(parents=True, exist_ok=True)
+    base = root / f"external-{stamp}-backlog-pr-{backlog_id}"
+    path = base
+    counter = 2
+    while path.exists():
+        path = root / f"{base.name}-{counter}"
+        counter += 1
+    path.mkdir(parents=True)
+    return path
+
+
+def _extract_url(text: str) -> str:
+    for line in text.splitlines():
+        value = line.strip()
+        if value.startswith("http://") or value.startswith("https://"):
+            return value
+    return ""
+
+
+def _looks_like_credential_error(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        token in lowered
+        for token in (
+            "authentication",
+            "authorization",
+            "permission denied",
+            "gh auth",
+            "not logged in",
+            "login required",
+            "could not read username",
+            "bad credentials",
+            "token",
+            "credential",
+            "forbidden",
+            "unauthorized",
+        )
+    )
+
+
+def publication_receipt_path(*, state_root: Path, task_id: str, branch: str, commit_sha: str) -> Path:
+    digest = re.sub(r"[^0-9A-Za-z]+", "", commit_sha)[:12] or "head"
+    name = f"{_safe_slug(task_id, fallback='task')}-{_safe_slug(branch, fallback='branch')}-{digest}.json"
+    return state_root / "state" / "publication" / name
+
+
+def _default_pr_body(task_id: str, commit_sha: str) -> str:
+    return (
+        "## Summary\n\n"
+        "- Harness task branch publication.\n\n"
+        "## Receipt Metadata\n\n"
+        f"- Task: `{task_id}`\n"
+        f"- Commit: `{commit_sha}`\n"
+    )
+
+
+def publish_task_branch_receipt(
+    *,
+    state_root: Path,
+    repo_root: Path,
+    target_id: str,
+    task_id: str,
+    branch: str,
+    commit_sha: str,
+    run_id: str = "",
+    base_branch: str = "main",
+    pr_title: str = "",
+    pr_body: str = "",
+    runner: CommandRunner = default_runner,
+    now: Callable[[], str] = utc_timestamp,
+) -> TaskPublicationResult:
+    """Compatibility publication helper used by tests and repair/retry tooling."""
+    receipt_path = publication_receipt_path(state_root=state_root, task_id=task_id, branch=branch, commit_sha=commit_sha)
+    evidence_path = receipt_path.with_name(receipt_path.stem + "-evidence.json")
+    existing = _read_json(receipt_path) if receipt_path.exists() and not receipt_path.is_symlink() else {}
+    if existing.get("publication_state") == "published":
+        reused = dict(existing)
+        reused["reused"] = True
+        return TaskPublicationResult(True, receipt_path, evidence_path, reused)
+
+    created_at = now()
+    title = pr_title or f"Complete {task_id}"
+    body = pr_body if pr_body else _default_pr_body(task_id, commit_sha)
+    push_command = ("git", "push", "-u", "origin", f"HEAD:refs/heads/{branch}")
+    failures: list[dict[str, object]] = []
+    push = _run(runner, push_command, repo_root)
+    branch_push = "succeeded" if push.returncode == 0 else "failed"
+    pr_create = "skipped"
+    pr_url = ""
+
+    if push.returncode != 0:
+        message = _redact((push.stderr or push.stdout).strip())[:1000]
+        failures.append({"stage": "push-branch", "message": message})
+        publication_state = "credential-blocked" if _looks_like_credential_error(message) else "blocked"
+        published = False
+    else:
+        pr_command = (
+            "gh",
+            "pr",
+            "create",
+            "--base",
+            base_branch,
+            "--head",
+            branch,
+            "--title",
+            title,
+            "--body",
+            body,
+            "--draft",
+        )
+        create = _run(runner, pr_command, repo_root)
+        if create.returncode == 0:
+            pr_create = "succeeded"
+            pr_url = _extract_url(create.stdout)
+            publication_state = "published"
+            published = True
+        else:
+            pr_create = "failed"
+            message = _redact((create.stderr or create.stdout).strip())[:1000]
+            failures.append({"stage": "create-pr", "message": message})
+            publication_state = "credential-blocked" if _looks_like_credential_error(message) else "blocked"
+            published = False
+
+    receipt: dict[str, object] = {
+        "schema_version": 1,
+        "operation": "backlog-product-pr",
+        "publication_state": publication_state,
+        "applied": published,
+        "target_id": target_id,
+        "task_id": task_id,
+        "backlog_id": task_id,
+        "run_id": run_id,
+        "implementation_run_id": run_id,
+        "branch": branch,
+        "base": base_branch,
+        "product_commit_sha": commit_sha,
+        "branch_push": branch_push,
+        "pr_create": pr_create,
+        "pr_url": pr_url,
+        "failures": failures,
+        "receipt_path": receipt_path.as_posix(),
+        "created_at": created_at,
+        "reused": False,
+    }
+    _write_json(receipt_path, receipt)
+    _write_json(evidence_path, receipt)
+    return TaskPublicationResult(published, receipt_path, evidence_path, receipt)
+
+
+def publish_task_pr(
+    *,
+    controller_root: Path,
+    state_root: Path,
+    target_repo: Path,
+    target_id: str,
+    goal_id: str,
+    backlog_id: str,
+    run_id: str,
+    commit_sha: str,
+    base_branch: str,
+    title: str,
+    body: str,
+    runner: CommandRunner = default_runner,
+) -> PublicationResult:
+    branch = task_branch_name(target_id, backlog_id)
+    run_dir = _allocate_publication_dir(state_root, backlog_id)
+    receipt_path = run_dir / "product-pr-receipt.json"
+    evidence_path = run_dir / "generated-evidence.json"
+    now = utc_timestamp()
+    gh_path = shutil.which("gh")
+    if gh_path is None and runner is default_runner:
+        payload = {
+            "schema_version": 1,
+            "operation": "backlog-product-pr",
+            "applied": False,
+            "status": "credential-blocked",
+            "target_id": target_id,
+            "goal_id": goal_id,
+            "backlog_id": backlog_id,
+            "implementation_run_id": run_id,
+            "product_commit_sha": commit_sha,
+            "branch": branch,
+            "base": base_branch,
+            "pr_url": "",
+            "message": "gh CLI is not available",
+            "created_at": now,
+        }
+        _write_json(receipt_path, payload)
+        _write_json(evidence_path, payload)
+        return PublicationResult("credential-blocked", branch, base_branch, "", receipt_path, evidence_path, "gh CLI is not available")
+
+    push = _run(runner, ("git", "push", "origin", f"{commit_sha}:refs/heads/{branch}"), target_repo)
+    if push.returncode != 0:
+        payload = {
+            "schema_version": 1,
+            "operation": "backlog-product-pr",
+            "applied": False,
+            "status": "push-blocked",
+            "target_id": target_id,
+            "goal_id": goal_id,
+            "backlog_id": backlog_id,
+            "implementation_run_id": run_id,
+            "product_commit_sha": commit_sha,
+            "branch": branch,
+            "base": base_branch,
+            "pr_url": "",
+            "message": _redact((push.stderr or push.stdout).strip())[:1000],
+            "created_at": now,
+        }
+        _write_json(receipt_path, payload)
+        _write_json(evidence_path, payload)
+        result_status = "credential-blocked" if _looks_like_credential_error(str(payload["message"])) else "push-blocked"
+        if result_status == "credential-blocked":
+            payload["status"] = result_status
+            _write_json(receipt_path, payload)
+            _write_json(evidence_path, payload)
+        return PublicationResult(result_status, branch, base_branch, "", receipt_path, evidence_path, str(payload["message"]))
+
+    existing = _run(
+        runner,
+        ("gh", "pr", "list", "--head", branch, "--base", base_branch, "--json", "url", "--jq", ".[0].url"),
+        target_repo,
+    )
+    pr_url = existing.stdout.strip() if existing.returncode == 0 else ""
+    status = "updated"
+    if not pr_url:
+        create = _run(
+            runner,
+            (
+                "gh",
+                "pr",
+                "create",
+                "--base",
+                base_branch,
+                "--head",
+                branch,
+                "--title",
+                title,
+                "--body",
+                body,
+            ),
+            target_repo,
+        )
+        if create.returncode != 0:
+            payload = {
+                "schema_version": 1,
+                "operation": "backlog-product-pr",
+                "applied": False,
+                "status": "pr-blocked",
+                "target_id": target_id,
+                "goal_id": goal_id,
+                "backlog_id": backlog_id,
+                "implementation_run_id": run_id,
+                "product_commit_sha": commit_sha,
+                "branch": branch,
+                "base": base_branch,
+                "pr_url": "",
+                "message": _redact((create.stderr or create.stdout).strip())[:1000],
+                "created_at": now,
+            }
+            _write_json(receipt_path, payload)
+            _write_json(evidence_path, payload)
+            result_status = "credential-blocked" if _looks_like_credential_error(str(payload["message"])) else "pr-blocked"
+            if result_status == "credential-blocked":
+                payload["status"] = result_status
+                _write_json(receipt_path, payload)
+                _write_json(evidence_path, payload)
+            return PublicationResult(result_status, branch, base_branch, "", receipt_path, evidence_path, str(payload["message"]))
+        pr_url = _extract_url(create.stdout)
+        status = "created"
+
+    payload = {
+        "schema_version": 1,
+        "operation": "backlog-product-pr",
+        "applied": True,
+        "status": status,
+        "target_id": target_id,
+        "goal_id": goal_id,
+        "backlog_id": backlog_id,
+        "implementation_run_id": run_id,
+        "product_commit_sha": commit_sha,
+        "branch": branch,
+        "base": base_branch,
+        "pr_url": pr_url,
+        "created_at": now,
+    }
+    _write_json(receipt_path, payload)
+    _write_json(evidence_path, payload)
+    return PublicationResult(status, branch, base_branch, pr_url, receipt_path, evidence_path, f"PR {status}: {pr_url}")
+
+
+def has_publication_receipt(*, state_root: Path, run_id: str, target_id: str) -> bool:
+    runs_root = state_root / "runs" / "harness"
+    if not runs_root.exists():
+        return False
+    for evidence in runs_root.glob("external-*-backlog-pr-*/generated-evidence.json"):
+        try:
+            payload = json.loads(evidence.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (
+            payload.get("operation") == "backlog-product-pr"
+            and payload.get("applied") is True
+            and payload.get("implementation_run_id") == run_id
+            and payload.get("target_id") == target_id
+        ):
+            return True
+    return False

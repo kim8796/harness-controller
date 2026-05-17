@@ -1276,10 +1276,18 @@ def test_sanitize_for_outbox_redacts_secrets_but_keeps_normal_text() -> None:
 
     leaked = (
         "HARNESS_TELEGRAM_BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrSTUvwxYZ0123456789 "
+        "AWS_SECRET_ACCESS_KEY=aws-secret-value "
+        "SUPABASE_SERVICE_ROLE_KEY=supabase-secret "
+        "DATABASE_URL=postgres://user:pass@example.test/db "
+        "REDIS_URL=redis://:redis-pass@example.test/0 "
         "chat_id=-1001234567890 https://api.telegram.org/bot1234567890:ABCdefGHIjklMNOpqrSTUvwxYZ0123456789/sendMessage"
     )
     sanitized = module.sanitize_for_outbox(leaked)
     assert "1234567890:ABCdefGHIjklMNOpqrSTUvwxYZ0123456789" not in sanitized
+    assert "aws-secret-value" not in sanitized
+    assert "supabase-secret" not in sanitized
+    assert "user:pass@" not in sanitized
+    assert "redis-pass" not in sanitized
     assert "-1001234567890" not in sanitized
     assert "[redacted" in sanitized
     assert module.sanitize_for_outbox("FPS: 60, run_id: 20260504-foo") == "FPS: 60, run_id: 20260504-foo"

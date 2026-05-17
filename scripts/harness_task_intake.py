@@ -1561,27 +1561,41 @@ def _backlog_markdown(
     packet_id: str,
     autonomy_execute: str,
     model: Mapping[str, object],
+    goal_id: str = "unlinked",
+    milestone_id: str = "",
+    planner_plan_id: str = "",
+    depends_on: Sequence[str] = (),
 ) -> str:
     today = datetime.now().date().isoformat()
     summary = tuple(model["summary"]) or tuple(model["goal"])
     forbidden = tuple(dict.fromkeys((*MANDATORY_FORBIDDEN_SCOPE, *tuple(model["forbidden_scope"]))))
-    return "\n".join(
-        [
+    metadata = [
             f"ID: {backlog_id}",
             f"Title: {title}",
             "Status: queued",
             "Priority: P2",
-            "Goal: unlinked",
+            f"Goal: {goal_id or 'unlinked'}",
             "Owner: unassigned",
             "Source: task-intake",
             f"Created: {today}",
             f"Updated: {today}",
-            "Auto-PR: no",
+            "Auto-PR: yes" if goal_id and goal_id != "unlinked" else "Auto-PR: no",
             "Related Run: n/a",
             "Labels: product, external, task-intake",
             f"Autonomy-Execute: {autonomy_execute}",
             f"Target-ID: {target_id}",
             f"Intake-Packet: {packet_id}",
+    ]
+    if milestone_id:
+        metadata.append(f"Milestone: {milestone_id}")
+    if planner_plan_id:
+        metadata.append(f"Planner-Plan: {planner_plan_id}")
+    clean_depends = tuple(str(item).strip() for item in depends_on if str(item).strip())
+    if clean_depends:
+        metadata.append("Depends-On: " + ", ".join(clean_depends))
+    return "\n".join(
+        [
+            *metadata,
             "",
             "## Summary",
             "",
@@ -2695,6 +2709,10 @@ def queue_packet(
     expected_target_id: str | None = None,
     normalize: str = "auto",
     target_repo: Path | None = None,
+    goal_id: str = "unlinked",
+    milestone_id: str = "",
+    planner_plan_id: str = "",
+    depends_on: Sequence[str] = (),
 ) -> QueueResult:
     resolved_packet_id = validate_packet_id(packet_id)
     packet = load_packet(state_root, resolved_packet_id)
@@ -2745,6 +2763,10 @@ def queue_packet(
         packet_id=resolved_packet_id,
         autonomy_execute=autonomy_execute,
         model=model,
+        goal_id=goal_id,
+        milestone_id=milestone_id,
+        planner_plan_id=planner_plan_id,
+        depends_on=depends_on,
     )
     try:
         _write_text(backlog_path, body)

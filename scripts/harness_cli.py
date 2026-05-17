@@ -25,7 +25,10 @@ import harness_bootstrap_wizard
 import harness_controller
 import harness_env
 import harness_export
+import harness_goal
+import harness_incident
 import harness_loop
+import harness_publication
 import harness_profiles
 import harness_starter_install
 import harness_task_intake
@@ -66,8 +69,11 @@ CONTROLLER_RELEASE_CHECK_RUFF_PATHS = (
     "scripts/harness_controller.py",
     "scripts/harness_env.py",
     "scripts/harness_export.py",
+    "scripts/harness_goal.py",
     "scripts/harness_guard.py",
+    "scripts/harness_incident.py",
     "scripts/harness_profiles.py",
+    "scripts/harness_publication.py",
     "scripts/harness_relay_store.py",
     "scripts/harness_starter_install.py",
     "scripts/harness_task_intake.py",
@@ -79,7 +85,10 @@ CONTROLLER_RELEASE_CHECK_RUFF_PATHS = (
     "tests/test_harness_controller.py",
     "tests/test_harness_env.py",
     "tests/test_harness_export.py",
+    "tests/test_harness_goal.py",
     "tests/test_harness_guard.py",
+    "tests/test_harness_incident.py",
+    "tests/test_harness_publication.py",
     "tests/test_harness_relay_store.py",
     "tests/test_harness_task_intake.py",
     "tests/test_harness_telegram_bridge.py",
@@ -92,7 +101,10 @@ CONTROLLER_RELEASE_CHECK_PYTEST_PATHS = (
     "tests/test_harness_controller.py",
     "tests/test_harness_env.py",
     "tests/test_harness_export.py",
+    "tests/test_harness_goal.py",
     "tests/test_harness_guard.py",
+    "tests/test_harness_incident.py",
+    "tests/test_harness_publication.py",
     "tests/test_harness_relay_store.py",
     "tests/test_harness_task_intake.py",
     "tests/test_harness_telegram_bridge.py",
@@ -135,6 +147,8 @@ class AutopilotTransaction:
     commit_sha: str
     push_sha: str
     message: str
+    pr_url: str = ""
+    publication_branch: str = ""
 
 
 @dataclass(frozen=True)
@@ -159,20 +173,21 @@ BEGINNER_HELP_TEXT = """하네스 시작
 
 5분 경로:
 1. ./harness install /path/to/product
-2. ./harness do "맵이 너무 둥글고 캐릭터가 커서 줄여줘"
+2. ./harness goal "이 프로젝트를 완성도 있는 MVP로 만든다"
 3. ./harness watch
 
 무엇을 하는지:
 - install: 제품 저장소를 하네스 관리 대상으로 등록합니다. 제품 저장소에는 하네스 파일을 쓰지 않습니다.
   터미널에서 ./harness install만 입력하면 제품 저장소 경로만 물어봅니다.
-- do: 자연어 요청을 task로 만들고, 안전하면 normalize -> queue -> run -> commit/push gate까지 한 번에 진행합니다.
-- watch: Telegram relay와 queued task를 계속 감시하며, 실패는 incident/memory로 남기고 안전한 sidecar 정리를 자동 수행합니다.
+- goal: 제품 완성 목표를 등록합니다. watch가 이 목표를 계획/task로 나눕니다.
+- watch: Telegram relay와 goal/task backlog를 계속 감시하며 구현, 검증, commit, push/PR publication을 반복합니다.
+- do: 특정 작업 하나를 즉시 처리하는 보조 명령입니다.
 - task/run/finish/archive: 복구와 디버깅을 위한 고급 명령입니다.
 
 자주 쓰는 확인:
 - ./harness status
 - ./harness dashboard
-- ./harness do "README에 설치 방법을 간단히 추가해"
+- ./harness goal
 - ./harness watch
 - ./harness telegram setup --target-id my-app --repo-id my-app --dry-run
 - ./harness verify --loop-ready
@@ -209,6 +224,24 @@ def _git(args: Sequence[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         env=_clean_git_env(),
     )
+
+
+def _github_credentials_ready(*, cwd: Path | None = None) -> bool:
+    if shutil.which("gh") is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "status"],
+            cwd=cwd or repo_root(),
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def _git_checked(args: Sequence[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -1078,7 +1111,10 @@ def _natural_task_text(args: argparse.Namespace) -> str:
     if text:
         return text
     if not sys.stdin.isatty():
-        return sys.stdin.read().strip()
+        try:
+            return sys.stdin.read().strip()
+        except OSError:
+            return ""
     return ""
 
 
@@ -1459,13 +1495,71 @@ def command_do(args: argparse.Namespace) -> int:
         return 2
 
 
+def _goal_text(args: argparse.Namespace) -> str:
+    parts = [str(item) for item in getattr(args, "goal", []) or []]
+    text = " ".join(part.strip() for part in parts if part.strip()).strip()
+    if text:
+        return text
+    if not sys.stdin.isatty():
+        try:
+            return sys.stdin.read().strip()
+        except OSError:
+            return ""
+    return ""
+
+
+def command_goal(args: argparse.Namespace) -> int:
+    try:
+        record = _resolve_task_target(getattr(args, "target", None))
+        text = _goal_text(args)
+        if not text:
+            payload = harness_goal.status_payload(state_root=record.state_root)
+            if getattr(args, "json", False):
+                print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+                return 0 if payload.get("active") else 2
+            if not payload.get("active"):
+                print("활성 goal 없음")
+                print('다음 명령: `./harness goal "제품 목표"`')
+                return 2
+            goal = payload["goal"] if isinstance(payload.get("goal"), Mapping) else {}
+            progress = payload["progress"] if isinstance(payload.get("progress"), Mapping) else {}
+            print("하네스 goal 상태")
+            print(f"- 대상: `{record.target_id}`")
+            print(f"- goal: `{goal.get('goal_id')}`")
+            print(f"- 제목: {goal.get('title')}")
+            print(f"- 상태: `{goal.get('status')}`")
+            print(f"- linked backlog: {len(goal.get('linked_backlog_ids') or [])}")
+            print(f"- completed: {progress.get('completed_count', 0)}")
+            print("다음 명령: `./harness watch`")
+            return 0
+        goal = harness_goal.create_goal(
+            state_root=record.state_root,
+            target_id=record.target_id,
+            text=text,
+            replace=bool(getattr(args, "replace", False)),
+        )
+        if getattr(args, "json", False):
+            print(json.dumps(harness_goal.status_payload(state_root=record.state_root), ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+        print("하네스 goal 등록 완료")
+        print(f"- 대상: `{record.target_id}`")
+        print(f"- goal: `{goal.goal_id}`")
+        print(f"- 제목: {goal.title}")
+        print(f"- 위치: `{goal.goal_dir.as_posix()}`")
+        print("다음 명령: `./harness watch`")
+        return 0
+    except (HarnessCliError, harness_controller.ControllerError, harness_goal.GoalError) as exc:
+        print(f"error: {exc}")
+        return 2
+
+
 def command_watch(args: argparse.Namespace) -> int:
     return command_run(
         argparse.Namespace(
             extra=[],
             once=False,
             watch=True,
-            max_cycles=0,
+            max_cycles=getattr(args, "max_cycles", 0),
             idle_seconds=getattr(args, "idle_seconds", 60),
             runner=getattr(args, "runner", "codex"),
             runner_model=getattr(args, "runner_model", None),
@@ -1475,6 +1569,38 @@ def command_watch(args: argparse.Namespace) -> int:
             auto_maintenance=True,
         )
     )
+
+
+def _refill_goal_if_idle(record: harness_controller.TargetRecord) -> Mapping[str, object] | None:
+    if _target_executable_backlog_items(record):
+        return None
+    try:
+        active = harness_goal.load_active_goal(record.state_root)
+    except harness_goal.GoalError as exc:
+        raise HarnessCliError(str(exc)) from exc
+    if active is None or active.status != "active":
+        return None
+    result = harness_goal.refill_goal_tasks(
+        state_root=record.state_root,
+        target_id=record.target_id,
+        target_repo=record.repo,
+        goal=active,
+    )
+    if result is None:
+        return None
+    payload = {
+        "goal_id": result.goal_id,
+        "plan_id": result.plan_id,
+        "created": result.created,
+        "queued": result.queued,
+        "manual_review": result.manual_review,
+        "completed": result.completed,
+        "queue_report_path": result.queue_report_path.as_posix(),
+        "generated_backlog_ids": list(result.generated_backlog_ids),
+        "message": result.message,
+    }
+    _append_autopilot_memory(record, "goal-refill", payload)
+    return payload
 
 
 def _prompt_value(label: str) -> str:
@@ -1850,14 +1976,24 @@ def _autopilot_commit_message(backlog_id: str, backlog_title: str) -> str:
     return f"feat: {title[:72] or backlog_id}"
 
 
-def _autopilot_incident_signature(stage: str, error: BaseException | str) -> str:
+def _autopilot_incident_signature(
+    stage: str,
+    error: BaseException | str,
+    *,
+    backlog_id: str = "",
+    goal_id: str = "",
+) -> str:
     text = str(error)
     normalized = re.sub(r"`[^`]+`", "`<value>`", text)
     normalized = re.sub(r"/(?:private|Users|tmp|var)/\S+", "<path>", normalized)
     normalized = re.sub(r"\b[0-9a-f]{7,40}\b", "<sha>", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"\d{8}-\d{6}|\d{4}-\d{2}-\d{2}T\S+", "<time>", normalized)
     normalized = re.sub(r"\s+", " ", normalized).strip().lower()[:240]
-    payload = json.dumps({"stage": stage, "error": normalized}, sort_keys=True, separators=(",", ":"))
+    payload = json.dumps(
+        {"stage": stage, "error": normalized, "backlog_id": backlog_id, "goal_id": goal_id},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -1869,7 +2005,8 @@ def _record_autopilot_incident(
     backlog_id: str = "",
     run_id: str = "",
 ) -> Mapping[str, object]:
-    signature = _autopilot_incident_signature(stage, error)
+    goal_id = _backlog_goal_id(record, backlog_id) if backlog_id else ""
+    signature = _autopilot_incident_signature(stage, error, backlog_id=backlog_id, goal_id=goal_id)
     incidents_dir = record.state_root / "state" / "incidents"
     incidents_dir.mkdir(parents=True, exist_ok=True)
     incident_path = incidents_dir / f"{signature}.json"
@@ -1887,6 +2024,7 @@ def _record_autopilot_incident(
         "signature": signature,
         "stage": stage,
         "count": count,
+        "goal_id": goal_id,
         "first_seen": str(payload.get("first_seen") or now),
         "last_seen": now,
         "last_error": sanitize_for_outbox(str(error))[:500],
@@ -1967,6 +2105,26 @@ def _target_open_incident_blocker(
     return None
 
 
+def _block_sidecar_backlog_for_incident(
+    *,
+    record: harness_controller.TargetRecord,
+    backlog_id: str,
+    reason: str,
+) -> tuple[bool, str]:
+    try:
+        transition = harness_controller.transition_sidecar_backlog(
+            controller_root=repo_root(),
+            record=record,
+            status="blocked",
+            reason=reason,
+            backlog_ref=backlog_id,
+            apply=True,
+        )
+    except (harness_controller.ControllerError, harness_loop.LoopError, OSError) as exc:
+        return False, f"failed: {exc}"
+    return True, str(transition.get("target_path") or "")
+
+
 def _print_run_blockers(blockers: Sequence[str]) -> None:
     print(f"- run blockers: {', '.join(blockers)}")
     for blocker in blockers:
@@ -1995,6 +2153,16 @@ def _print_beginner_transaction_error(error: Exception) -> None:
         print("- 다음 조치: 비밀값/하네스 파일/위험 파일을 제거한 뒤 다시 실행하세요.")
         return
     print(f"run 중단: {detail}")
+
+
+def _backlog_goal_id(record: harness_controller.TargetRecord, backlog_id: str) -> str:
+    try:
+        for item in harness_loop.discover_backlog_items(record.state_root):
+            if item.item_id == backlog_id:
+                return item.goal or "unlinked"
+    except Exception:
+        return "unlinked"
+    return "unlinked"
 
 
 def _run_autopilot_transaction(record: harness_controller.TargetRecord, args: argparse.Namespace) -> AutopilotTransaction:
@@ -2059,21 +2227,50 @@ def _run_autopilot_transaction(record: harness_controller.TargetRecord, args: ar
     commit_sha = str(commit.get("product_commit_sha") or "")
     print(f"- product commit: `{commit_sha}`")
 
-    try:
-        push = harness_controller.push_sidecar_backlog_product_commit(
-            controller_root=repo_root(),
-            record=record,
-            run_id=run_id,
-            apply=True,
+    goal_id = _backlog_goal_id(record, backlog_id)
+    publication = harness_publication.publish_task_pr(
+        controller_root=repo_root(),
+        state_root=record.state_root,
+        target_repo=record.repo,
+        target_id=record.target_id,
+        goal_id=goal_id,
+        backlog_id=backlog_id,
+        run_id=run_id,
+        commit_sha=commit_sha,
+        base_branch=record.branch,
+        title=message,
+        body=(
+            f"Goal: `{goal_id}`\n\n"
+            f"Backlog: `{backlog_id}`\n\n"
+            f"Implementation run: `{run_id}`\n\n"
+            "Generated by harness goal autopilot.\n"
         )
-    except harness_controller.ControllerError as exc:
-        print("- product push: 보류")
-        print(f"- 멈춘 이유: {exc}")
-        print(f"다음 조치: product repo remote/upstream을 확인한 뒤 `./harness finish --run {run_id} --push --apply`")
-        return AutopilotTransaction("push-blocked", run_id, backlog_id, commit_sha, "", str(exc))
-    push_sha = str(push.get("product_push_sha") or "")
-    print(f"- product push: `{push_sha}`")
-    return AutopilotTransaction("pushed", run_id, backlog_id, commit_sha, push_sha, "completed")
+    )
+    if publication.status in {"created", "updated"}:
+        print(f"- product branch: `{publication.branch}`")
+        print(f"- product PR: `{publication.pr_url}`")
+        return AutopilotTransaction(
+            "published",
+            run_id,
+            backlog_id,
+            commit_sha,
+            commit_sha,
+            "completed",
+            pr_url=publication.pr_url,
+            publication_branch=publication.branch,
+        )
+    print(f"- product publication: `{publication.status}`")
+    print(f"- reason: {publication.message}")
+    blocked_status = "credential-blocked" if publication.status == "credential-blocked" else "publication-blocked"
+    return AutopilotTransaction(
+        blocked_status,
+        run_id,
+        backlog_id,
+        commit_sha,
+        "",
+        publication.message,
+        publication_branch=publication.branch,
+    )
 
 
 def _task_summary_json(
@@ -2218,12 +2415,12 @@ def command_run(args: argparse.Namespace) -> int:
     else:
         print("- 실행: 현재 queued auto backlog를 처리한 뒤 queue가 비면 종료합니다.")
     print("- 모델: Codex managed latest/default, reasoning=xhigh")
-    print("- 처리: implement -> complete -> commit -> push gate")
+    print("- 처리: implement -> complete -> commit -> task branch PR publication")
     if getattr(args, "drain_telegram", False):
         print("- 입력: Telegram relay drain + /harness task inbox intake enabled")
     if getattr(args, "auto_maintenance", False):
         print("- 정리: compact memory + safe sidecar maintenance enabled")
-    print(f"- push 주의: {FINISH_PUSH_CAUTION_KO}")
+    print(f"- publication 주의: {FINISH_PUSH_CAUTION_KO}")
     while True:
         try:
             if getattr(args, "drain_telegram", False):
@@ -2243,13 +2440,42 @@ def command_run(args: argparse.Namespace) -> int:
                         f"queued={int(inbox_result.get('queued') or 0)}, "
                         f"manual-review={int(inbox_result.get('manual_review') or 0)}"
                     )
+            if args.watch:
+                refill = _refill_goal_if_idle(record)
+                if refill and int(refill.get("queued") or 0):
+                    print(
+                        "- goal planner refill: "
+                        f"goal={refill.get('goal_id')}, queued={refill.get('queued')}, "
+                        f"manual-review={refill.get('manual_review')}"
+                    )
             pending_pushes = harness_controller.pending_backlog_product_pushes(
                 controller_root=repo_root(),
                 record=record,
             )
             if pending_pushes:
+                credential_blocker = next(
+                    (item for item in pending_pushes if str(item.get("status") or "") == "credential-blocked"),
+                    None,
+                )
+                if credential_blocker is not None and not _github_credentials_ready(cwd=record.repo):
+                    print("publication 중단: GitHub credential/gh CLI가 필요합니다.")
+                    print(f"- 구현 기록: `{credential_blocker['run_id']}`")
+                    print(f"- 작업 항목: `{credential_blocker['backlog_id']}`")
+                    diagnosis = _record_autopilot_doctor_diagnosis(
+                        record=record,
+                        stage="publication-credential-blocked",
+                        error="previous task branch PR publication is credential-blocked",
+                        backlog_id=str(credential_blocker["backlog_id"]),
+                        run_id=str(credential_blocker["run_id"]),
+                    )
+                    _append_autopilot_memory(record, "doctor-diagnosis", diagnosis)
+                    print(f"- doctor diagnosis: `{diagnosis['path']}`")
+                    print("- 다음 조치: `gh auth status`로 로그인 상태를 확인하고 다시 `./harness watch`를 실행하세요.")
+                    return 2
+                if credential_blocker is not None:
+                    print("publication 재시도 가능: GitHub credential이 준비되어 이전 credential blocker를 pending retry로 처리합니다.")
                 latest = pending_pushes[-1]
-                print("run 중단: 이전 transaction의 product push가 아직 닫히지 않았습니다.")
+                print("publication 보류: 이전 transaction의 product publication이 아직 닫히지 않았습니다.")
                 print(f"- 구현 기록: `{latest['run_id']}`")
                 print(f"- 작업 항목: `{latest['backlog_id']}`")
                 diagnosis = _record_autopilot_doctor_diagnosis(
@@ -2261,8 +2487,10 @@ def command_run(args: argparse.Namespace) -> int:
                 )
                 _append_autopilot_memory(record, "doctor-diagnosis", diagnosis)
                 print(f"- doctor diagnosis: `{diagnosis['path']}`")
-                print(f"- 다음 명령: `./harness finish --run {latest['run_id']} --push --apply`")
-                return 2
+                print("- pending publication은 run/watch 전체를 멈추지 않고 다음 executable 작업을 계속 찾습니다.")
+            if args.watch and max_cycles and processed >= max_cycles:
+                print(f"watch 종료: max-cycles={max_cycles}, 처리한 backlog {processed}개")
+                return 0
             if not args.watch and processed >= max_cycles:
                 if processed:
                     print(f"run 종료: 처리한 backlog {processed}개")
@@ -2278,8 +2506,16 @@ def command_run(args: argparse.Namespace) -> int:
             return 2
         if item is None:
             if args.watch:
+                refill = _refill_goal_if_idle(record)
+                if refill and int(refill.get("queued") or 0):
+                    print(
+                        "- goal planner refill: "
+                        f"goal={refill.get('goal_id')}, queued={refill.get('queued')}, "
+                        f"manual-review={refill.get('manual_review')}"
+                    )
+                    continue
                 print("대기: queued auto backlog가 없습니다.")
-                print('다음 작업을 넣으려면 `./harness do "요청"`을 사용하세요.')
+                print('새 목표를 넣으려면 `./harness goal "제품 목표"`을 사용하세요.')
                 print(f"- watch 대기: {idle_seconds}초 후 다시 확인합니다.")
                 time.sleep(idle_seconds)
                 continue
@@ -2297,11 +2533,42 @@ def command_run(args: argparse.Namespace) -> int:
         if incident_blocker:
             print("run 중단: 같은 작업의 반복 실패가 threshold에 도달했습니다.")
             print(f"- incident: `{incident_blocker['signature']}` count={incident_blocker['count']}")
+            if args.watch:
+                blocked_ok, blocked_path = _block_sidecar_backlog_for_incident(
+                    record=record,
+                    backlog_id=backlog_id,
+                    reason=f"repeated incident {incident_blocker['signature']}",
+                )
+                print(f"- blocked backlog: `{blocked_path}`")
+                if not blocked_ok:
+                    print("- watch 중단: 반복 실패 task 격리에 실패했습니다.")
+                    return 2
+                print("- watch는 이 task를 격리하고 다음 goal/task 진행 경로를 찾습니다.")
+                continue
             print("- 다음 조치: controller maintenance로 원인 수정 후 incident를 해결 처리하세요.")
             return 2
         try:
             outcome = _run_autopilot_transaction(record, args)
         except (HarnessCliError, harness_controller.ControllerError, harness_loop.LoopError) as exc:
+            incident_record = harness_incident.record_incident(
+                state_root=record.state_root,
+                target_id=record.target_id,
+                stage="transaction",
+                error=exc,
+                backlog_id=backlog_id,
+                goal_id=_backlog_goal_id(record, backlog_id),
+                product_checkpoint={
+                    "repo": record.repo.as_posix(),
+                    "branch": record.branch,
+                },
+            )
+            if incident_record.get("repairable"):
+                repair_task = harness_incident.materialize_controller_repair_task(
+                    controller_root=repo_root(),
+                    state_root=record.state_root,
+                    incident=incident_record,
+                )
+                print(f"- controller repair task: `{repair_task.as_posix()}`")
             incident = _record_autopilot_incident(record=record, stage="transaction", error=exc, backlog_id=backlog_id)
             diagnosis = _record_autopilot_doctor_diagnosis(
                 record=record,
@@ -2324,46 +2591,66 @@ def command_run(args: argparse.Namespace) -> int:
                 },
             )
             if int(incident["count"]) >= AUTOPILOT_INCIDENT_THRESHOLD:
-                print("- 반복 실패: 같은 문제를 다시 시도하지 않습니다. controller maintenance가 필요합니다.")
+                print("- 반복 실패: 해당 task를 격리하고 goal/watch는 다음 correction 또는 다음 task를 찾습니다.")
+                if args.watch:
+                    blocked_ok, blocked_path = _block_sidecar_backlog_for_incident(
+                        record=record,
+                        backlog_id=backlog_id,
+                        reason=f"repeated incident {incident['signature']}",
+                    )
+                    print(f"- blocked backlog: `{blocked_path}`")
+                    if not blocked_ok:
+                        print("- watch 중단: 반복 실패 task 격리에 실패했습니다.")
+                        return 2
+            if args.watch and not bool(incident_record.get("hard_stop")):
+                continue
             return 2
         processed += 1
-        if outcome.status == "push-blocked":
+        if outcome.status in {"push-blocked", "publication-blocked", "credential-blocked"}:
             _record_autopilot_incident(
                 record=record,
-                stage="push",
+                stage="publication",
                 error=outcome.message,
                 backlog_id=outcome.backlog_id,
                 run_id=outcome.run_id,
             )
             _append_autopilot_memory(
                 record,
-                "push-blocked",
+                "publication-credential-blocked" if outcome.status == "credential-blocked" else "publication-blocked",
                 {
                     "backlog_id": outcome.backlog_id,
                     "run_id": outcome.run_id,
                     "product_commit_sha": outcome.commit_sha,
+                    "publication_branch": outcome.publication_branch,
                     "reason": sanitize_for_outbox(outcome.message)[:240],
                 },
             )
             diagnosis = _record_autopilot_doctor_diagnosis(
                 record=record,
-                stage="push-blocked",
+                stage="publication-blocked",
                 error=outcome.message,
                 backlog_id=outcome.backlog_id,
                 run_id=outcome.run_id,
             )
             _append_autopilot_memory(record, "doctor-diagnosis", diagnosis)
             print(f"- doctor diagnosis: `{diagnosis['path']}`")
-            print("run 일시정지: commit은 완료됐지만 push gate가 막혔습니다.")
-            return 2
+            if outcome.status == "credential-blocked":
+                print("publication 중단: GitHub credential/gh CLI가 필요합니다.")
+                return 2
+            print("publication 보류: commit은 완료됐고 watch는 다음 작업을 계속 찾습니다.")
+            if not args.watch:
+                return 2
+            continue
         _append_autopilot_memory(
             record,
-            "transaction-pushed",
+            "transaction-published",
             {
                 "backlog_id": outcome.backlog_id,
                 "run_id": outcome.run_id,
                 "product_commit_sha": outcome.commit_sha,
                 "product_push_sha": outcome.push_sha,
+                "pr_url": outcome.pr_url,
+                "publication_branch": outcome.publication_branch,
             },
         )
         if getattr(args, "auto_maintenance", False):
@@ -2379,7 +2666,10 @@ def command_run(args: argparse.Namespace) -> int:
                 print(f"- sidecar maintenance 보류: {sanitize_for_outbox(str(exc))}")
         print(f"transaction 완료: `{outcome.backlog_id}`")
         if args.once or (max_cycles and processed >= max_cycles):
-            print(f"run 종료: 처리한 backlog {processed}개")
+            if args.watch:
+                print(f"watch 종료: max-cycles={max_cycles}, 처리한 backlog {processed}개")
+            else:
+                print(f"run 종료: 처리한 backlog {processed}개")
             return 0
 
 
@@ -4512,6 +4802,13 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
     install.set_defaults(func=command_install)
 
+    goal = subparsers.add_parser("goal", help="Set or inspect the active product completion goal.")
+    goal.add_argument("goal", nargs="*", help="Product-level goal. Omit to show active goal status.")
+    goal.add_argument("--target", default="@default", help=argparse.SUPPRESS)
+    goal.add_argument("--replace", action="store_true", help=argparse.SUPPRESS)
+    goal.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    goal.set_defaults(func=command_goal)
+
     do = subparsers.add_parser("do", help="One-command task intake and autopilot run for a natural-language request.")
     do.add_argument("request", nargs="*", help="Natural-language product request. Omit to read from stdin.")
     do.add_argument("--target", default="@default", help="Target selector; default is @default.")
@@ -4532,6 +4829,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     watch = subparsers.add_parser("watch", help="Simple long-running autopilot loop for the default target.")
     watch.add_argument("--idle-seconds", type=int, default=60, help=argparse.SUPPRESS)
+    watch.add_argument("--max-cycles", type=int, default=0, help=argparse.SUPPRESS)
     watch.add_argument("--no-telegram-drain", action="store_true", help=argparse.SUPPRESS)
     watch.add_argument("--runner", choices=("codex", "claude", "custom"), default="codex", help=argparse.SUPPRESS)
     watch.add_argument("--runner-model", default=None, help=argparse.SUPPRESS)
