@@ -81,6 +81,53 @@ def test_argparse_help_and_invalid_command_remain_advanced_reference(capsys) -> 
     assert "invalid choice" in capsys.readouterr().err
 
 
+def test_repo_harness_shim_reexecs_controller_venv(tmp_path: Path) -> None:
+    source = Path(__file__).resolve().parents[1] / "harness"
+    root = tmp_path / "controller"
+    root.mkdir()
+    (root / "scripts").mkdir()
+    (root / "scripts" / "harness_cli.py").write_text(
+        "def main(argv=None):\n    print('LOCAL')\n    return 0\n",
+        encoding="utf-8",
+    )
+    shim = root / "harness"
+    shim.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    shim.chmod(0o755)
+    venv_python = root / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("#!/bin/sh\necho VENV:$1:$2\n", encoding="utf-8")
+    venv_python.chmod(0o755)
+
+    result = subprocess.run([shim.as_posix(), "--sentinel"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+
+    assert result.stdout.strip() == f"VENV:{shim.as_posix()}:--sentinel"
+
+
+def test_repo_harness_shim_does_not_reexec_symlinked_venv(tmp_path: Path) -> None:
+    source = Path(__file__).resolve().parents[1] / "harness"
+    root = tmp_path / "controller"
+    external = tmp_path / "external"
+    root.mkdir()
+    (root / "scripts").mkdir()
+    (root / "scripts" / "harness_cli.py").write_text(
+        "def main(argv=None):\n    print('LOCAL')\n    return 0\n",
+        encoding="utf-8",
+    )
+    shim = root / "harness"
+    shim.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    shim.chmod(0o755)
+    external_python = external / "bin" / "python"
+    external_python.parent.mkdir(parents=True)
+    external_python.write_text("#!/bin/sh\necho BAD\n", encoding="utf-8")
+    external_python.chmod(0o755)
+    (root / ".venv").symlink_to(external, target_is_directory=True)
+
+    result = subprocess.run([shim.as_posix(), "--help"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+
+    assert "BAD" not in result.stdout
+    assert "LOCAL" in result.stdout
+
+
 def test_task_review_help_documents_normalization_modes(capsys) -> None:
     module = _load_module()
 
@@ -1573,6 +1620,141 @@ def test_beginner_install_tty_prompt_registers_target(monkeypatch, tmp_path: Pat
     _assert_no_product_harness_pollution(product)
 
 
+def _runtime_status(
+    module,
+    controller: Path,
+    *,
+    actions: tuple[object, ...] = (),
+    codex_status: str = "ready",
+    gh_status: str = "ready",
+    can_auto_install: bool = True,
+):
+    caps = (
+        module.harness_runtime_setup.Capability("git", "ready", "git ready", True),
+        module.harness_runtime_setup.Capability("python", "ready", "python ready", True),
+        module.harness_runtime_setup.Capability("controller_venv", "ready", "venv ready", True),
+        module.harness_runtime_setup.Capability(
+            "codex",
+            codex_status,
+            f"codex {codex_status}",
+            True,
+            "Run `codex login`." if codex_status == "unauthenticated" else "",
+        ),
+        module.harness_runtime_setup.Capability(
+            "gh",
+            gh_status,
+            f"gh {gh_status}",
+            False,
+            "Run `gh auth login`." if gh_status == "unauthenticated" else "",
+        ),
+        module.harness_runtime_setup.Capability("homebrew", "ready", "brew ready", False),
+    )
+    return module.harness_runtime_setup.RuntimeSetupStatus(
+        controller_root=controller,
+        capabilities=caps,
+        actions=actions,
+        can_auto_install=can_auto_install,
+        auto_install_reason="test",
+        include_telegram=False,
+    )
+
+
+def test_beginner_install_tty_runtime_setup_asks_one_consent_prompt(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    action = module.harness_runtime_setup.SetupAction(
+        "create-controller-venv",
+        "Create controller-local .venv",
+        ("python3", "-m", "venv", str(controller / ".venv")),
+    )
+    ready = _runtime_status(module, controller)
+    needs_setup = _runtime_status(module, controller, actions=(action,))
+    prompts: list[str] = []
+    applied: list[str] = []
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.28")
+    monkeypatch.setattr(module.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(module, "_evaluate_install_runtime_setup", lambda root, check_auth: ready if applied else needs_setup)
+    monkeypatch.setattr(module, "_apply_install_runtime_setup", lambda status: applied.append("yes") or (controller / "state/setup/runtime-setup-latest.json"))
+    monkeypatch.setattr("builtins.input", lambda prompt="": prompts.append(prompt) or "y")
+
+    assert module.main(["install", str(product)]) == 0
+    output = capsys.readouterr().out
+    assert prompts == ["누락된 필수 도구를 설치/구성할까요? [Y/n]: "]
+    assert applied == ["yes"]
+    assert "runtime setup receipt" in output
+    assert "다음 명령: `./harness goal \"제품 목표\"`" in output
+    _assert_no_product_harness_pollution(product)
+
+
+def test_beginner_install_gh_auth_missing_does_not_block_target_registration(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.28")
+    monkeypatch.setattr(
+        module,
+        "_evaluate_install_runtime_setup",
+        lambda root, check_auth: _runtime_status(module, controller, gh_status="unauthenticated"),
+    )
+
+    assert module.main(["install", str(product)]) == 0
+    output = capsys.readouterr().out
+    assert "GitHub publication: unauthenticated" in output
+    assert "Run `gh auth login`." in output
+    assert module.harness_controller.default_target(controller).target_id == "product"
+    _assert_no_product_harness_pollution(product)
+
+
+def test_beginner_install_json_returns_nonzero_when_runtime_not_ready(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.28")
+    monkeypatch.setattr(
+        module,
+        "_evaluate_install_runtime_setup",
+        lambda root, check_auth: _runtime_status(module, controller, codex_status="missing"),
+    )
+
+    assert module.main(["install", str(product), "--json"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["runtime_setup"]["controller_runtime_ready"] is False
+    assert payload["target"]["target_id"] == "product"
+    _assert_no_product_harness_pollution(product)
+
+
+def test_runtime_setup_receipt_is_secret_safe(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    controller.mkdir()
+    path = module.harness_runtime_setup.write_receipt(
+        controller,
+        {
+            "HARNESS_RELAY_SIGNING_KEY": "super-secret-signing-key",
+            "UPSTASH_REDIS_REST_TOKEN": "upstash-secret-token",
+            "stdout": "OPENAI_API_KEY=sk-secret-value",
+            "url": "https://user:password@example.invalid/path",
+        },
+    )
+
+    body = path.read_text(encoding="utf-8")
+    assert "super-secret-signing-key" not in body
+    assert "upstash-secret-token" not in body
+    assert "sk-secret-value" not in body
+    assert "password@example.invalid" not in body
+    assert "<redacted>" in body
+
+
 def test_beginner_install_status_surfaces_default_run_blockers(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_module()
     controller = tmp_path / "controller"
@@ -2884,6 +3066,7 @@ def test_controller_doctor_is_secret_safe(monkeypatch, tmp_path: Path, capsys) -
     monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.0")
     monkeypatch.setattr(module.harness_export, "missing_controller_source_paths", lambda root, version: ())
     monkeypatch.setattr(module, "_targets_ignored_by_git", lambda root: True)
+    monkeypatch.setattr(module, "_evaluate_install_runtime_setup", lambda root, check_auth: _runtime_status(module, controller))
 
     assert module.main(["controller", "doctor", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -2901,6 +3084,7 @@ def test_controller_doctor_fails_when_targets_not_ignored(monkeypatch, tmp_path:
     monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.0")
     monkeypatch.setattr(module.harness_export, "missing_controller_source_paths", lambda root, version: ())
     monkeypatch.setattr(module, "_targets_ignored_by_git", lambda root: False)
+    monkeypatch.setattr(module, "_evaluate_install_runtime_setup", lambda root, check_auth: _runtime_status(module, controller))
 
     assert module.main(["controller", "doctor", "--json"]) == 2
     payload = json.loads(capsys.readouterr().out)
@@ -3194,9 +3378,11 @@ def test_external_target_add_verify_dashboard_and_run_preflight(monkeypatch, tmp
     assert module.main(["target", "alias", "add", "demo", "app"]) == 0
     alias_output = capsys.readouterr().out
     assert "@app" in alias_output
-    assert module.main(["target", "set-default", "demo"]) == 0
+    assert module.main(["target", "set", "demo"]) == 0
     default_output = capsys.readouterr().out
     assert "@default -> `demo`" in default_output
+    assert module.main(["target", "set-default", "demo"]) == 0
+    capsys.readouterr()
     assert module.main(["target", "alias", "list", "--json"]) == 0
     alias_payload = json.loads(capsys.readouterr().out)
     assert alias_payload["targets"][0]["aliases"] == ["app"]

@@ -30,6 +30,7 @@ import harness_incident
 import harness_loop
 import harness_publication
 import harness_profiles
+import harness_runtime_setup
 import harness_starter_install
 import harness_task_intake
 import harness_telegram_setup
@@ -74,6 +75,7 @@ CONTROLLER_RELEASE_CHECK_RUFF_PATHS = (
     "scripts/harness_incident.py",
     "scripts/harness_profiles.py",
     "scripts/harness_publication.py",
+    "scripts/harness_runtime_setup.py",
     "scripts/harness_relay_store.py",
     "scripts/harness_starter_install.py",
     "scripts/harness_task_intake.py",
@@ -90,6 +92,7 @@ CONTROLLER_RELEASE_CHECK_RUFF_PATHS = (
     "tests/test_harness_incident.py",
     "tests/test_harness_publication.py",
     "tests/test_harness_relay_store.py",
+    "tests/test_harness_runtime_setup.py",
     "tests/test_harness_task_intake.py",
     "tests/test_harness_telegram_bridge.py",
     "tests/test_harness_telegram_setup.py",
@@ -106,6 +109,7 @@ CONTROLLER_RELEASE_CHECK_PYTEST_PATHS = (
     "tests/test_harness_incident.py",
     "tests/test_harness_publication.py",
     "tests/test_harness_relay_store.py",
+    "tests/test_harness_runtime_setup.py",
     "tests/test_harness_task_intake.py",
     "tests/test_harness_telegram_bridge.py",
     "tests/test_harness_telegram_setup.py",
@@ -878,6 +882,8 @@ def command_install(args: argparse.Namespace) -> int:
             return 2
         print("하네스 install 상태")
         print("- 의미: 제품 저장소에 하네스 파일을 설치하지 않고 controller에 대상만 연결합니다.")
+        runtime_status = _evaluate_install_runtime_setup(root, check_auth=False)
+        _print_runtime_setup_summary(runtime_status)
         print(f"- 등록된 대상: {len(records)}개")
         if default_record is not None:
             print(f"- 기본 대상: `{default_record.target_id}`")
@@ -888,12 +894,13 @@ def command_install(args: argparse.Namespace) -> int:
                 print(f"- run blockers: {', '.join(run_blockers)}")
                 print(f"- 다음 명령: `./harness target status {default_record.target_id}`")
                 return 2
-            print('다음 명령: `./harness do "요청"` 또는 `./harness watch`')
+            print('다음 명령: `./harness goal "제품 목표"` 또는 `./harness watch`')
             return 0
         print("- 기본 대상: 없음")
         print("다음 명령: `./harness install /path/to/product`")
         return 2
     try:
+        runtime_status, setup_receipt = _prepare_runtime_for_install(root, args)
         target_id = target_id or repo.resolve().name
         record = harness_controller.add_target(
             controller_root=root,
@@ -925,20 +932,25 @@ def command_install(args: argparse.Namespace) -> int:
                         "verification": verification,
                         "run_blockers": run_blockers,
                         "dashboard": report.as_posix(),
+                        "runtime_setup": runtime_status.to_json(),
+                        "runtime_setup_receipt": setup_receipt.as_posix() if setup_receipt is not None else None,
                     },
                     ensure_ascii=False,
                     indent=2,
                     sort_keys=True,
                 )
             )
-            return 0 if ready_for_run else 2
+            return 0 if ready_for_run and runtime_status.controller_runtime_ready else 2
         print("하네스 install 완료")
         print(f"- 대상 ID: `{record.target_id}`")
         print(f"- 제품 저장소: `{record.repo.as_posix()}`")
         print(f"- 컨트롤러 기록: `{record.state_root.as_posix()}`")
         print(f"- 기본 대상: {'yes' if record.is_default else 'no'}")
         print("- 제품 저장소 변경: 없음")
-        print("- 제품 저장소에는 HARNESS.md, scripts/harness*, runs, reports, backlog, targets, .env* 를 쓰지 않습니다.")
+        print("- 제품 저장소에는 HARNESS.md, scripts/harness*, runs, reports, backlog, targets, .env*, controller .venv 를 쓰지 않습니다.")
+        _print_runtime_setup_summary(runtime_status)
+        if setup_receipt is not None:
+            print(f"- runtime setup receipt: `{setup_receipt.as_posix()}`")
         if verification["blockers"]:
             print(f"- 확인 필요: {', '.join(verification['blockers'])}")
             print(f"- dashboard: `{report.as_posix()}`")
@@ -949,8 +961,18 @@ def command_install(args: argparse.Namespace) -> int:
             print(f"- dashboard: `{report.as_posix()}`")
             print(f"- 다음 명령: `./harness target status {record.target_id}`")
             return 2
+        runtime_blocker = _runtime_install_blocker(
+            runtime_status,
+            interactive=bool(sys.stdin.isatty() and not getattr(args, "json", False)),
+            setup_receipt=setup_receipt,
+        )
+        if runtime_blocker:
+            print(f"- runtime 준비 필요: {runtime_blocker}")
+            print(f"- dashboard: `{report.as_posix()}`")
+            print("- 다음 명령: `./harness install /path/to/product` 를 터미널에서 다시 실행하거나 표시된 next action을 먼저 수행하세요.")
+            return 2
         print(f"- dashboard: `{report.as_posix()}`")
-        print('다음 명령: `./harness do "요청"`')
+        print('다음 명령: `./harness goal "제품 목표"`')
         return 0
     except harness_controller.ControllerError as exc:
         print(f"error: {exc}")
@@ -971,7 +993,7 @@ def _install_inputs(args: argparse.Namespace) -> tuple[Path | None, str | None, 
             )
     repo = option_repo or positional_repo
     target_id = getattr(args, "id", None)
-    branch = getattr(args, "branch", "main")
+    branch = getattr(args, "branch", None)
     make_default = bool(getattr(args, "default", False))
     if repo is None and _install_prompt_enabled(args):
         print("하네스 install 인터뷰를 시작합니다. 제품 저장소 경로만 입력하면 됩니다.")
@@ -979,7 +1001,92 @@ def _install_inputs(args: argparse.Namespace) -> tuple[Path | None, str | None, 
         if not repo_value:
             raise HarnessCliError("제품 저장소 경로가 필요합니다")
         repo = Path(repo_value)
-    return repo, target_id or None, branch, make_default
+    if repo is not None and not branch:
+        branch = _detect_product_branch(_target_path(repo)) or "main"
+    return repo, target_id or None, branch or "main", make_default
+
+
+def _evaluate_install_runtime_setup(root: Path, *, check_auth: bool) -> harness_runtime_setup.RuntimeSetupStatus:
+    return harness_runtime_setup.evaluate_runtime_setup(root, check_auth=check_auth)
+
+
+def _prepare_runtime_for_install(
+    root: Path, args: argparse.Namespace
+) -> tuple[harness_runtime_setup.RuntimeSetupStatus, Path | None]:
+    check_auth = bool(sys.stdin.isatty() and not getattr(args, "json", False))
+    status = _evaluate_install_runtime_setup(root, check_auth=check_auth)
+    if (
+        status.actions
+        and status.can_auto_install
+        and sys.stdin.isatty()
+        and not getattr(args, "json", False)
+        and _prompt_install_runtime_consent(status)
+    ):
+        receipt = _apply_install_runtime_setup(status)
+        return _evaluate_install_runtime_setup(root, check_auth=check_auth), receipt
+    return status, None
+
+
+def _apply_install_runtime_setup(status: harness_runtime_setup.RuntimeSetupStatus) -> Path:
+    harness_runtime_setup.apply_runtime_setup(status)
+    return harness_runtime_setup.receipt_path(status.controller_root)
+
+
+def _prompt_install_runtime_consent(status: harness_runtime_setup.RuntimeSetupStatus) -> bool:
+    print("controller runtime 준비가 필요합니다.")
+    print("- 적용 위치: controller checkout only")
+    print("- 제품 저장소 변경: 없음")
+    for action in status.actions:
+        print(f"- {action.label}: `{' '.join(action.command)}`")
+    answer = _prompt_value("누락된 필수 도구를 설치/구성할까요? [Y/n]").strip().lower()
+    return answer in {"", "y", "yes", "예", "ㅇ"}
+
+
+def _print_runtime_setup_summary(status: harness_runtime_setup.RuntimeSetupStatus) -> None:
+    print(f"- controller runtime: {'ready' if status.controller_runtime_ready else 'needs action'}")
+    codex = status.capability("codex")
+    gh = status.capability("gh")
+    print(f"- Codex: {codex.status}")
+    if codex.next_action:
+        print(f"  next: {codex.next_action}")
+    print(f"- GitHub publication: {'ready' if status.github_publication_ready else gh.status}")
+    if gh.next_action:
+        print(f"  next: {gh.next_action}")
+    if status.actions:
+        action_labels = ", ".join(action.action_id for action in status.actions)
+        print(f"- runtime setup actions: {action_labels}")
+        if not status.can_auto_install:
+            print(f"  auto-install: unavailable ({status.auto_install_reason})")
+    else:
+        print("- runtime setup actions: none")
+
+
+def _runtime_install_blocker(status: harness_runtime_setup.RuntimeSetupStatus, *, interactive: bool, setup_receipt: Path | None) -> str | None:
+    failed = [cap for cap in status.capabilities if cap.required and cap.status == "failed"]
+    if failed:
+        return "runtime setup failed: " + ", ".join(cap.name for cap in failed)
+    if not status.controller_runtime_ready:
+        return "controller runtime is not ready"
+    return None
+
+
+def _detect_product_branch(repo: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", repo.as_posix(), "rev-parse", "--abbrev-ref", "HEAD"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            env=_clean_git_env(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    branch = result.stdout.strip()
+    if result.returncode == 0 and branch and branch != "HEAD":
+        return branch
+    return None
 
 
 def _should_auto_default_new_target(root: Path) -> bool:
@@ -996,7 +1103,7 @@ def _install_prompt_enabled(args: argparse.Namespace) -> bool:
         getattr(args, "repo_path", None) is None
         and getattr(args, "repo", None) is None
         and getattr(args, "id", None) is None
-        and getattr(args, "branch", "main") == "main"
+        and getattr(args, "branch", None) in (None, "main")
         and getattr(args, "profile", harness_profiles.DEFAULT_PROFILE) == harness_profiles.DEFAULT_PROFILE
         and getattr(args, "display_name", None) is None
         and not bool(getattr(args, "default", False))
@@ -3172,6 +3279,7 @@ def command_controller_doctor(args: argparse.Namespace) -> int:
     missing = [path.as_posix() for path in harness_export.missing_controller_source_paths(root, version)]
     records = harness_controller.list_targets(root)
     targets_ignored = _targets_ignored_by_git(root)
+    runtime_status = _evaluate_install_runtime_setup(root, check_auth=False)
     payload = {
         "schema_version": 1,
         "controller_root": root.as_posix(),
@@ -3181,6 +3289,7 @@ def command_controller_doctor(args: argparse.Namespace) -> int:
         "targets_count": len(records),
         "targets_root": (root / "targets").as_posix(),
         "targets_ignored_by_git": targets_ignored,
+        "runtime_setup": runtime_status.to_json(),
     }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
@@ -3191,10 +3300,11 @@ def command_controller_doctor(args: argparse.Namespace) -> int:
         print(f"- export source: {'ok' if not missing else 'missing ' + ', '.join(missing)}")
         print(f"- registered targets: {len(records)}")
         print(f"- targets ignored by git: {'yes' if targets_ignored else 'no'}")
+        _print_runtime_setup_summary(runtime_status)
         print("- product repo 기본 정책: harness runtime 파일 커밋 안 함")
         print("- Telegram/Redis secret 위치: controller env only")
-        print("다음 명령: `./harness target add <id> --repo /path/to/product-repo --branch main`")
-    return 0 if not missing and targets_ignored else 2
+        print("다음 명령: `./harness install /path/to/product-repo`")
+    return 0 if not missing and targets_ignored and runtime_status.controller_runtime_ready else 2
 
 
 def _directory_size_bytes(path: Path) -> int:
@@ -4789,7 +4899,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     install.add_argument("--repo", type=Path, help=argparse.SUPPRESS)
     install.add_argument("--id", help=argparse.SUPPRESS)
-    install.add_argument("--branch", default="main", help=argparse.SUPPRESS)
+    install.add_argument("--branch", default=None, help=argparse.SUPPRESS)
     install.add_argument(
         "--profile",
         choices=harness_profiles.profile_names(),
@@ -5216,6 +5326,9 @@ def build_parser() -> argparse.ArgumentParser:
     target_backlog_push.add_argument("--apply", action="store_true", help="Push the product commit; default is dry-run.")
     target_backlog_push.add_argument("--json", action="store_true")
     target_backlog_push.set_defaults(func=command_target_backlog_push)
+    target_set = target_subparsers.add_parser("set", help="Set @default target. Short alias for set-default.")
+    target_set.add_argument("target_id", help=target_id_help)
+    target_set.set_defaults(func=command_target_set_default)
     target_set_default = target_subparsers.add_parser("set-default", help="Set explicit @default selector for read-only convenience.")
     target_set_default.add_argument("target_id", help=target_id_help)
     target_set_default.set_defaults(func=command_target_set_default)

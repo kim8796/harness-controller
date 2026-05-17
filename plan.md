@@ -114,3 +114,72 @@ Patch plan:
 - Store controller-repair tasks under `state/controller-repair-tasks/**`, not product executable backlog.
 - Recursively redact checkpoint dictionaries/lists before writing incidents and repair payloads.
 - Update bootstrap wording and add focused regression tests.
+
+## Target Set Alias Follow-Up
+
+Goal:
+
+- Add `./harness target set <target-id>` as the short beginner-friendly alias for `./harness target set-default <target-id>`.
+
+Scope:
+
+- Keep `set-default` working for backward compatibility.
+- Wire the new parser alias to the existing `command_target_set_default` implementation.
+- Update beginner docs/export wording that recommends switching targets.
+- Add a focused CLI regression test.
+
+Verification:
+
+- `python3 -m pytest tests/test_harness_cli.py tests/test_harness_export.py`
+
+## Install Runtime Auto-Setup Follow-Up
+
+Goal:
+
+- Make `./harness install /path/to/product` the beginner-friendly setup and registration command.
+- Keep product repositories untouched while preparing only the controller checkout.
+- Detect required local runtime tools and, on macOS/Homebrew TTY sessions, offer one consent prompt to install missing essentials.
+
+Decisions:
+
+- Auto-install scope is macOS + Homebrew only.
+- Do not auto-install Homebrew itself.
+- Keep `requirements.txt` as the broad dev/CI superset; add smaller requirement groups for beginner runtime and Telegram relay support.
+- `git`, `python3 >= 3.11`, controller `.venv`, and Codex CLI are required for default `watch`.
+- `gh` is required for PR publication readiness but must not block target registration.
+- Auth flows are reported as next actions; do not create credentials automatically.
+- All setup receipts and reports must be secret-safe and controller-owned.
+
+Scope:
+
+- Add a controller runtime setup/readiness module.
+- Integrate readiness and optional setup into `command_install`.
+- Add setup status to `controller doctor` and no-arg `install`.
+- Update beginner docs/export text to `install -> goal -> watch`.
+- Preserve the existing target set alias changes already present in this worktree.
+
+Verification:
+
+- `python3 -m pytest tests/test_harness_cli.py tests/test_harness_export.py`
+- `python3 scripts/harness_export.py --check`
+- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+
+### Correction Loop 1
+
+Reviewer blockers:
+
+- Runtime setup receipts can persist failed subprocess output with insufficient redaction coverage.
+- `state/setup` receipt writes do not fail closed when a parent directory is a symlink.
+- Controller `.venv` setup actions do not reject symlinked `.venv`, which could write outside the controller.
+- The `./harness` shim still runs under `/usr/bin/env python3` after `.venv` setup, so installed controller runtime dependencies may not be used by `watch`.
+- The `./harness` shim can follow a symlinked `.venv` before runtime setup safety checks run.
+- Non-TTY/json install can still exit success while required runtime readiness is missing.
+
+Patch plan:
+
+- Expand redaction for bearer headers, JSON token fields, query-string credentials, and spaced assignments.
+- Add safe controller-owned directory checks before receipt writes.
+- Mark symlinked controller `.venv` as failed and avoid setup actions that write through it.
+- Make the repo-local `harness` shim re-exec into controller `.venv/bin/python` when it exists.
+- Make the shim refuse symlinked `.venv` and keep runtime readiness in install/json exit codes.
+- Add focused regression tests and rerun focused pytest plus full guard.

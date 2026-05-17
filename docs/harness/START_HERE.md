@@ -25,9 +25,11 @@
 git clone git@github.com:kim8796/harness-controller.git
 cd harness-controller
 python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install -r requirements-runtime.txt
 ./harness controller doctor
 ```
+
+`.venv` 는 이 controller checkout 전용 runtime이다. portability artifact가 아니며 product repo에 복사하거나 커밋하지 않는다. `./harness install /path/to/product` 는 제품 repo를 등록하면서 controller-local runtime readiness를 확인하고, 지원되는 환경에서는 필요한 setup을 controller 쪽에만 준비한다.
 
 제품 repo를 controller에 등록한다.
 
@@ -37,7 +39,7 @@ python3 -m venv .venv
 ./harness watch
 ```
 
-이 흐름에서 `goal`은 단일 작업이 아니라 제품 완성 목표다. `watch`가 목표를 roadmap/task로 쪼개고, 가능한 task를 queue하고, 구현/검증/commit/task branch push/PR publication receipt를 반복한다. product repo에는 `HARNESS.md`, `harness`, `scripts/harness*`, `runs/**`, `reports/**`, `backlog/**`, `targets/**`, `.env*`를 쓰지 않는다. 하네스 상태와 실행 증거는 controller의 `targets/<id>/` 아래에 남는다.
+이 흐름에서 `goal`은 단일 작업이 아니라 제품 완성 목표다. `watch`가 목표를 roadmap/task로 쪼개고, 가능한 task를 queue하고, 구현/검증/commit/task branch push/PR publication receipt를 반복한다. product repo에는 `HARNESS.md`, `harness`, `scripts/harness*`, `runs/**`, `reports/**`, `backlog/**`, `targets/**`, `.env*`, controller `.venv`를 쓰지 않는다. 하네스 상태와 실행 증거는 controller의 `targets/<id>/` 아래에 남는다.
 
 ## 5분 시작
 
@@ -46,9 +48,11 @@ python3 -m venv .venv
 ```bash
 cd /path/to/harness-controller
 python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install -r requirements-runtime.txt
 ./harness controller doctor
 ```
+
+이미 `./harness install /path/to/my-app` 를 실행했다면 controller-local `.venv`와 필수 도구 상태를 함께 확인한다. macOS + Homebrew + TTY에서는 누락된 필수 도구 설치를 한 번 물어볼 수 있다. unsupported OS, Homebrew가 없는 macOS, non-TTY/CI에서는 자동 설치하지 않고 필요한 명령과 next action만 출력한다.
 
 Telegram/Redis relay를 새 컴퓨터에서 붙일 때는 controller local runtime, gateway/Vercel runtime, BotFather, Upstash, Vercel env를 각각 준비해야 한다. 자세한 단계는 [TELEGRAM.md](TELEGRAM.md)의 New Computer Bootstrap을 따른다.
 
