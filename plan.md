@@ -1,3 +1,22 @@
+# Pre-Push CI Sanitizer Parity Plan
+
+## Objective
+
+Make local pre-push guard catch the same controller export sanitization/self-test failures that GitHub Actions catches, without changing the user-facing guard command or `.githooks/pre-push`.
+
+## Fix
+
+1. Add a pre-push-only controller sanitizer self-test helper in `scripts/harness_guard.py`.
+2. Export the controller bundle with `--sanitize-report`.
+3. Enforce CI-equivalent sanitizer assertions: report ok, no blockers, no controller surface mentions, historical mentions limited to `tests/test_harness_autonomy.py`, and no truncated historical mention list.
+4. Run the same exported-bundle focused pytest target list used by CI.
+5. Keep pre-commit behavior unchanged.
+
+## Validation Commands
+
+- `python3 -m pytest tests/test_harness_guard.py tests/test_harness_export.py -q`
+- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+
 # CI Sanitizer Fixture Fix Plan
 
 ## Objective
