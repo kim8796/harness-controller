@@ -2,7 +2,7 @@
 
 하네스를 처음 쓰는 사람이 보는 입구 문서다. 이 파일은 짧게 유지하고, 자세한 운영/설정/문제 해결은 아래 문서로 연결한다.
 
-현재 기준은 `v1.8.26` 이다. 전체 변경 이력은 [VERSION.md](VERSION.md), export 계약은 [FRAMEWORK_EXPORT.md](FRAMEWORK_EXPORT.md), starter 파일 구조는 [STARTER_SCAFFOLD.md](STARTER_SCAFFOLD.md)를 본다. Telegram/Redis relay drain 은 controller-owned Upstash adapter 를 사용하며 외부 app 내부 RedisStore 를 요구하지 않는다.
+현재 기준은 `v1.8.27` 이다. 전체 변경 이력은 [VERSION.md](VERSION.md), export 계약은 [FRAMEWORK_EXPORT.md](FRAMEWORK_EXPORT.md), starter 파일 구조는 [STARTER_SCAFFOLD.md](STARTER_SCAFFOLD.md)를 본다. Telegram/Redis relay drain 은 controller-owned Upstash adapter 를 사용하며 외부 app 내부 RedisStore 를 요구하지 않는다.
 
 ## 어디부터 보면 되나
 
@@ -77,6 +77,15 @@ Telegram/Redis relay를 새 컴퓨터에서 붙일 때는 controller local runti
 ```
 
 `watch`는 Telegram relay, `/harness task` inbox, active goal, queued auto backlog를 계속 감시한다. backlog가 비면 goal planner가 다시 task를 만들고, 실패한 task는 격리하거나 repair/correction 입력으로 남긴 뒤 가능한 다음 작업을 계속 찾는다. 성공하면 complete, product commit, task branch push, PR publication receipt까지 진행한다.
+
+실제 프로젝트에서 한 번만 안전하게 검증하려면 아래처럼 bounded smoke로 시작한다.
+
+```bash
+./harness watch --max-cycles 1 --no-telegram-drain
+./harness watch --status
+```
+
+`watch --status`는 `targets/<target-id>/watch/latest.json` 과 `latest.md`를 읽어 active goal, backlog, run, commit, PR publication 상태와 다음 조치를 보여준다. 실행할 goal/backlog가 없을 때 바로 종료시키려면 `./harness watch --stop-on-idle --no-telegram-drain`을 쓴다.
 
 5. 단일 작업만 즉시 처리하고 싶을 때만 `do`를 쓴다.
 
