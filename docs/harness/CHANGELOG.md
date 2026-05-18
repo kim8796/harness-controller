@@ -1,5 +1,11 @@
 # Harness Changelog
 
+## 1.8.30 - 2026-05-18
+
+- Preserved the last published transaction in watch status after the loop becomes idle.
+- Added a separate last transaction block to `./harness watch --status` and `watch/latest.md`.
+- Kept the status carry-forward secret-safe and controller sidecar-only.
+
 ## 1.8.29 - 2026-05-18
 
 - Extracted beginner `do` and `task` command orchestration into `scripts/harness_task_cli.py`.

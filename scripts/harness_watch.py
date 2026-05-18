@@ -162,6 +162,115 @@ def watch_active_goal_id(record: harness_controller.TargetRecord) -> str:
     return active.goal_id
 
 
+def _status_text(payload: Mapping[str, object], key: str) -> str:
+    return str(payload.get(key) or "")
+
+
+def _transaction_status_from_payload(payload: Mapping[str, object]) -> dict[str, str]:
+    return {
+        "last_selected_backlog_id": _status_text(payload, "selected_backlog_id"),
+        "last_run_id": _status_text(payload, "run_id"),
+        "last_transaction_status": _status_text(payload, "transaction_status"),
+        "last_commit_sha": _status_text(payload, "commit_sha"),
+        "last_publication_branch": _status_text(payload, "publication_branch"),
+        "last_pr_url": _status_text(payload, "pr_url"),
+        "last_transaction_at": _status_text(payload, "last_heartbeat_at"),
+    }
+
+
+def _last_transaction_from_previous(previous: Mapping[str, object]) -> dict[str, str]:
+    migrated = {
+        "last_selected_backlog_id": _status_text(previous, "last_selected_backlog_id"),
+        "last_run_id": _status_text(previous, "last_run_id"),
+        "last_transaction_status": _status_text(previous, "last_transaction_status"),
+        "last_commit_sha": _status_text(previous, "last_commit_sha"),
+        "last_publication_branch": _status_text(previous, "last_publication_branch"),
+        "last_pr_url": _status_text(previous, "last_pr_url"),
+        "last_transaction_at": _status_text(previous, "last_transaction_at"),
+    }
+    if any(migrated.values()):
+        return migrated
+    return _transaction_status_from_payload(previous)
+
+
+def _load_previous_watch_status(path: Path) -> Mapping[str, object]:
+    if not path.exists() or path.is_symlink():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, Mapping) else {}
+
+
+def _latest_transaction_from_receipts(record: harness_controller.TargetRecord) -> dict[str, str]:
+    receipt_paths = [
+        path
+        for path in (record.state_root / "runs" / "harness").glob("*/product-pr-receipt.json")
+        if path.is_file() and not path.is_symlink()
+    ]
+    for path in sorted(receipt_paths, key=lambda item: (item.stat().st_mtime, item.as_posix()), reverse=True):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, Mapping):
+            continue
+        backlog_id = _status_text(payload, "backlog_id")
+        pr_url = _status_text(payload, "pr_url")
+        branch = _status_text(payload, "branch")
+        commit_sha = _status_text(payload, "product_commit_sha") or _status_text(payload, "commit_sha")
+        run_id = _status_text(payload, "run_id") or _status_text(payload, "implementation_run_id") or path.parent.name
+        status = _status_text(payload, "transaction_status") or _status_text(payload, "status")
+        if status == "created" and pr_url:
+            status = "published"
+        if not any((backlog_id, run_id, status, commit_sha, branch, pr_url)):
+            continue
+        return {
+            "last_selected_backlog_id": backlog_id,
+            "last_run_id": run_id,
+            "last_transaction_status": status,
+            "last_commit_sha": commit_sha,
+            "last_publication_branch": branch,
+            "last_pr_url": pr_url,
+            "last_transaction_at": _status_text(payload, "created_at"),
+        }
+    return {
+        "last_selected_backlog_id": "",
+        "last_run_id": "",
+        "last_transaction_status": "",
+        "last_commit_sha": "",
+        "last_publication_branch": "",
+        "last_pr_url": "",
+        "last_transaction_at": "",
+    }
+
+
+def _last_transaction_fields(
+    record: harness_controller.TargetRecord,
+    *,
+    current_payload: Mapping[str, object],
+    previous_payload: Mapping[str, object],
+    heartbeat: str,
+) -> dict[str, str]:
+    current = _transaction_status_from_payload(current_payload)
+    if any(value for key, value in current.items() if key != "last_transaction_at"):
+        current["last_transaction_at"] = heartbeat
+        return current
+    previous = _last_transaction_from_previous(previous_payload)
+    if not any(previous.values()):
+        previous = _latest_transaction_from_receipts(record)
+    return {
+        "last_selected_backlog_id": previous.get("last_selected_backlog_id", ""),
+        "last_run_id": previous.get("last_run_id", ""),
+        "last_transaction_status": previous.get("last_transaction_status", ""),
+        "last_commit_sha": previous.get("last_commit_sha", ""),
+        "last_publication_branch": previous.get("last_publication_branch", ""),
+        "last_pr_url": previous.get("last_pr_url", ""),
+        "last_transaction_at": previous.get("last_transaction_at", ""),
+    }
+
+
 def write_watch_status(
     record: harness_controller.TargetRecord,
     *,
@@ -189,6 +298,7 @@ def write_watch_status(
     if md_path.exists() and md_path.is_symlink():
         raise _error("watch status markdown must not be a symlink")
     now = datetime.now().isoformat(timespec="seconds")
+    previous_payload = _load_previous_watch_status(json_path)
     payload: dict[str, object] = {
         "schema_version": 1,
         "target_id": record.target_id,
@@ -209,6 +319,14 @@ def write_watch_status(
         "json_path": watch_sidecar_relative(record, json_path),
         "markdown_path": watch_sidecar_relative(record, md_path),
     }
+    payload.update(
+        _last_transaction_fields(
+            record,
+            current_payload=payload,
+            previous_payload=previous_payload,
+            heartbeat=now,
+        )
+    )
     safe_payload = watch_safe_value(payload)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=watch_dir, delete=False) as handle:
         json.dump(safe_payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
@@ -248,6 +366,31 @@ def render_watch_status_markdown(payload: Mapping[str, object]) -> str:
         f"- Next action: {value('next_action', 'none')}",
         "",
     ]
+    if not any(value(key, "") for key in ("selected_backlog_id", "run_id", "transaction_status")) and any(
+        value(key, "")
+        for key in (
+            "last_selected_backlog_id",
+            "last_run_id",
+            "last_transaction_status",
+            "last_commit_sha",
+            "last_publication_branch",
+            "last_pr_url",
+        )
+    ):
+        lines.extend(
+            [
+                "## Last Transaction",
+                "",
+                f"- Backlog: `{value('last_selected_backlog_id', 'none')}`",
+                f"- Run: `{value('last_run_id', 'none')}`",
+                f"- Transaction: `{value('last_transaction_status', 'none')}`",
+                f"- Commit: `{value('last_commit_sha', 'none')}`",
+                f"- Publication branch: `{value('last_publication_branch', 'none')}`",
+                f"- PR: `{value('last_pr_url', 'none')}`",
+                f"- At: `{value('last_transaction_at', 'unknown')}`",
+                "",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -268,6 +411,22 @@ def load_watch_status(record: harness_controller.TargetRecord) -> Mapping[str, o
     safe = watch_safe_value(payload)
     if not isinstance(safe, Mapping):
         raise _error("watch status JSON 형식이 올바르지 않습니다")
+    if not any(safe.get(key) for key in ("selected_backlog_id", "run_id", "transaction_status")) and not any(
+        safe.get(key)
+        for key in (
+            "last_selected_backlog_id",
+            "last_run_id",
+            "last_transaction_status",
+            "last_commit_sha",
+            "last_publication_branch",
+            "last_pr_url",
+        )
+    ):
+        enriched = dict(safe)
+        enriched.update(_latest_transaction_from_receipts(record))
+        enriched_safe = watch_safe_value(enriched)
+        if isinstance(enriched_safe, Mapping):
+            return enriched_safe
     return safe
 
 
@@ -290,6 +449,25 @@ def print_watch_status(record: harness_controller.TargetRecord) -> int:
     print(f"- commit: `{payload.get('commit_sha') or 'none'}`")
     print(f"- publication branch: `{payload.get('publication_branch') or 'none'}`")
     print(f"- PR: `{payload.get('pr_url') or 'none'}`")
+    if not any(payload.get(key) for key in ("selected_backlog_id", "run_id", "transaction_status")) and any(
+        payload.get(key)
+        for key in (
+            "last_selected_backlog_id",
+            "last_run_id",
+            "last_transaction_status",
+            "last_commit_sha",
+            "last_publication_branch",
+            "last_pr_url",
+        )
+    ):
+        print("- last transaction:")
+        print(f"  - backlog: `{payload.get('last_selected_backlog_id') or 'none'}`")
+        print(f"  - run: `{payload.get('last_run_id') or 'none'}`")
+        print(f"  - transaction: `{payload.get('last_transaction_status') or 'none'}`")
+        print(f"  - commit: `{payload.get('last_commit_sha') or 'none'}`")
+        print(f"  - publication branch: `{payload.get('last_publication_branch') or 'none'}`")
+        print(f"  - PR: `{payload.get('last_pr_url') or 'none'}`")
+        print(f"  - at: `{payload.get('last_transaction_at') or 'unknown'}`")
     pending = str(payload.get("pending_reason") or "")
     if pending:
         print(f"- pending: {pending}")

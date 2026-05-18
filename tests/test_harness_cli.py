@@ -380,6 +380,53 @@ def test_watch_status_redacts_secrets_and_rejects_symlink(monkeypatch, tmp_path:
     _assert_no_product_harness_pollution(product)
 
 
+def test_watch_status_prints_last_transaction_after_idle_overwrite(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.30")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    record = module.harness_controller.default_target(controller)
+    module._write_watch_status(
+        record,
+        phase="transaction-published",
+        status="running",
+        selected_backlog_id="BL-demo",
+        run_id="run-demo",
+        transaction_status="published",
+        commit_sha="abc1234",
+        publication_branch="harness/demo/BL-demo",
+        pr_url="https://github.com/acme/demo/pull/7",
+        processed_count=1,
+        next_action="continue watch or inspect PR",
+    )
+    module._write_watch_status(
+        record,
+        phase="idle-no-goal",
+        status="idle",
+        processed_count=1,
+        idle_count=10,
+        next_action='./harness goal "제품 목표"',
+    )
+    capsys.readouterr()
+
+    assert module.main(["watch", "--status"]) == 0
+    output = capsys.readouterr().out
+
+    assert "- backlog: `none`" in output
+    assert "- last transaction:" in output
+    assert "  - backlog: `BL-demo`" in output
+    assert "  - run: `run-demo`" in output
+    assert "  - transaction: `published`" in output
+    assert "  - commit: `abc1234`" in output
+    assert "  - PR: `https://github.com/acme/demo/pull/7`" in output
+    _assert_no_product_harness_pollution(product)
+
+
 def test_watch_preserves_manual_review_only_status(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_module()
     controller = tmp_path / "controller"
