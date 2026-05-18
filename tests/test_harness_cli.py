@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -270,7 +271,15 @@ def test_watch_status_before_run_and_stop_on_idle(monkeypatch, tmp_path: Path, c
     _init_product_repo(product)
     monkeypatch.setattr(module, "repo_root", lambda: controller)
     monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.27")
-    monkeypatch.setattr(module.time, "sleep", lambda _seconds: pytest.fail("stop-on-idle must not sleep"))
+    original_watch_runtime = module._watch_runtime
+
+    def watch_runtime_without_sleep():
+        return replace(
+            original_watch_runtime(),
+            sleep=lambda _seconds: pytest.fail("stop-on-idle must not sleep"),
+        )
+
+    monkeypatch.setattr(module, "_watch_runtime", watch_runtime_without_sleep)
 
     assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
     capsys.readouterr()

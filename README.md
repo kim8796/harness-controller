@@ -1,4 +1,4 @@
-# Harness Controller Bundle v1.8.28
+# Harness Controller Bundle v1.8.29
 
 이 디렉토리는 product repo 밖에서 실행하는 external harness controller 배포 번들이다.
 product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는다. Runtime 준비와 `.venv`는 controller checkout 안에서만 관리한다.
@@ -126,6 +126,7 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `scripts/harness_profiles.py`
 - `scripts/harness_publication.py`
 - `scripts/harness_shared.py`
+- `scripts/harness_task_cli.py`
 - `scripts/harness_task_intake.py`
 - `scripts/harness_watch.py`
 - `scripts/harness_autonomy/__init__.py`
@@ -184,10 +185,12 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `tests/test_harness_goal.py`
 - `tests/test_harness_incident.py`
 - `tests/test_harness_publication.py`
+- `tests/test_harness_task_cli.py`
 - `tests/test_harness_task_intake.py`
 - `tests/test_harness_telegram_bridge.py`
 - `tests/test_harness_watch.py`
 - `tests/test_redis_relay.py`
+- `docs/harness/releases/v1.8.29.md`
 - `docs/harness/releases/v1.8.28.md`
 - `docs/harness/releases/v1.8.27.md`
 - `docs/harness/releases/v1.8.26.md`

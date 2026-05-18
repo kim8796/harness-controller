@@ -125,6 +125,9 @@ def test_export_bundle_copies_sources_and_writes_readme(tmp_path: Path) -> None:
         "scripts/harness_cleanup.py\n"
     )
     assert (bundle_dir / "scripts" / "harness_cli.py").read_text(encoding="utf-8") == "scripts/harness_cli.py\n"
+    assert (bundle_dir / "scripts" / "harness_task_cli.py").read_text(encoding="utf-8") == (
+        "scripts/harness_task_cli.py\n"
+    )
     assert (bundle_dir / "scripts" / "harness_watch.py").read_text(encoding="utf-8") == "scripts/harness_watch.py\n"
     assert (bundle_dir / "scripts" / "harness_controller.py").read_text(encoding="utf-8") == (
         "scripts/harness_controller.py\n"
@@ -238,6 +241,7 @@ def test_starter_bundle_excludes_live_state_and_can_create_project(tmp_path: Pat
     assert (bundle / "harness").exists()
     assert os.access(bundle / "harness", os.X_OK)
     assert (bundle / "scripts" / "harness_cli.py").exists()
+    assert (bundle / "scripts" / "harness_task_cli.py").exists()
     assert (bundle / "scripts" / "harness_watch.py").exists()
     assert (bundle / "scripts" / "harness_controller.py").exists()
     assert (bundle / "scripts" / "harness_profiles.py").exists()
@@ -313,6 +317,7 @@ def test_starter_bundle_excludes_live_state_and_can_create_project(tmp_path: Pat
     assert os.access(created / "harness", os.X_OK)
     assert (created / "scripts" / "harness_loop.py").exists()
     assert (created / "scripts" / "harness_cli.py").exists()
+    assert (created / "scripts" / "harness_task_cli.py").exists()
     assert (created / "scripts" / "harness_watch.py").exists()
     assert not (created / ".github" / "workflows" / "harness-controller-ci.yml").exists()
     assert (created / "scripts" / "harness_autonomy" / "relay.py").exists()
@@ -368,6 +373,7 @@ def test_starter_bundle_excludes_live_state_and_can_create_project(tmp_path: Pat
     )
     assert (second_bundle / "harness").exists()
     assert (second_bundle / "scripts" / "harness_cli.py").exists()
+    assert (second_bundle / "scripts" / "harness_task_cli.py").exists()
     assert (second_bundle / "scripts" / "harness_watch.py").exists()
     assert (second_bundle / "scripts" / "harness_profiles.py").exists()
 
@@ -387,6 +393,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     workflow_text = (bundle / ".github" / "workflows" / "harness-controller-ci.yml").read_text(encoding="utf-8")
     assert "--check --controller-bundle" in workflow_text
     assert "harness controller export" in workflow_text
+    assert (bundle / "scripts" / "harness_task_cli.py").exists()
     assert (bundle / "scripts" / "harness_watch.py").exists()
     assert (bundle / "scripts" / "harness_controller.py").exists()
     assert (bundle / "scripts" / "harness_autonomy" / "relay.py").exists()
@@ -404,6 +411,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "tests" / "test_harness_runtime_setup.py").exists()
     assert (bundle / "tests" / "test_harness_telegram_bridge.py").exists()
     assert (bundle / "tests" / "test_harness_telegram_setup.py").exists()
+    assert (bundle / "tests" / "test_harness_task_cli.py").exists()
     assert (bundle / "tests" / "test_harness_watch.py").exists()
     assert (bundle / "tests" / "test_redis_relay.py").exists()
     assert (bundle / "docs" / "harness" / "releases" / "v1.8.8.md").exists()
