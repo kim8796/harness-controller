@@ -147,6 +147,9 @@ def test_export_bundle_copies_sources_and_writes_readme(tmp_path: Path) -> None:
     assert (bundle_dir / "scripts" / "harness_env.py").read_text(encoding="utf-8") == (
         "scripts/harness_env.py\n"
     )
+    assert (bundle_dir / "scripts" / "harness_operator_wait.py").read_text(encoding="utf-8") == (
+        "scripts/harness_operator_wait.py\n"
+    )
     assert (bundle_dir / "scripts" / "harness_profiles.py").read_text(encoding="utf-8") == (
         "scripts/harness_profiles.py\n"
     )
@@ -243,6 +246,7 @@ def test_starter_bundle_excludes_live_state_and_can_create_project(tmp_path: Pat
     assert (bundle / "scripts" / "harness_cli.py").exists()
     assert (bundle / "scripts" / "harness_task_cli.py").exists()
     assert (bundle / "scripts" / "harness_watch.py").exists()
+    assert (bundle / "scripts" / "harness_operator_wait.py").exists()
     assert (bundle / "scripts" / "harness_controller.py").exists()
     assert (bundle / "scripts" / "harness_profiles.py").exists()
     assert not (bundle / "requirements.txt").exists()
@@ -319,6 +323,7 @@ def test_starter_bundle_excludes_live_state_and_can_create_project(tmp_path: Pat
     assert (created / "scripts" / "harness_cli.py").exists()
     assert (created / "scripts" / "harness_task_cli.py").exists()
     assert (created / "scripts" / "harness_watch.py").exists()
+    assert (created / "scripts" / "harness_operator_wait.py").exists()
     assert not (created / ".github" / "workflows" / "harness-controller-ci.yml").exists()
     assert (created / "scripts" / "harness_autonomy" / "relay.py").exists()
     assert (created / "scripts" / "harness_relay_store.py").exists()
@@ -375,6 +380,7 @@ def test_starter_bundle_excludes_live_state_and_can_create_project(tmp_path: Pat
     assert (second_bundle / "scripts" / "harness_cli.py").exists()
     assert (second_bundle / "scripts" / "harness_task_cli.py").exists()
     assert (second_bundle / "scripts" / "harness_watch.py").exists()
+    assert (second_bundle / "scripts" / "harness_operator_wait.py").exists()
     assert (second_bundle / "scripts" / "harness_profiles.py").exists()
 
 
@@ -395,6 +401,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "harness controller export" in workflow_text
     assert (bundle / "scripts" / "harness_task_cli.py").exists()
     assert (bundle / "scripts" / "harness_watch.py").exists()
+    assert (bundle / "scripts" / "harness_operator_wait.py").exists()
     assert (bundle / "scripts" / "harness_controller.py").exists()
     assert (bundle / "scripts" / "harness_autonomy" / "relay.py").exists()
     assert (bundle / "scripts" / "harness_relay_store.py").exists()
@@ -437,6 +444,8 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "tests" / "test_harness_goal.py").exists()
     assert (bundle / "tests" / "test_harness_publication.py").exists()
     assert (bundle / "tests" / "test_harness_incident.py").exists()
+    assert (bundle / "scripts" / "harness_operator_wait.py").exists()
+    assert (bundle / "tests" / "test_harness_operator_wait.py").exists()
     no_arg_help = subprocess.run(
         [str(bundle / "harness")],
         cwd=bundle,
@@ -477,6 +486,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "./harness controller audit-size" in readme
     assert '`./harness do "요청"` 은 한 작업을 바로 처리하고 싶을 때' in readme
     assert "`./harness watch` 는 Telegram relay, active goal" in readme
+    assert "operator-wait는 credential, permission, provider outage" in readme
     assert "queued auto 요청을 반복 처리" not in readme
     assert "기본 autopilot 루프" not in readme
     assert "완료 처리, product local commit, task branch push, PR publication receipt" in readme

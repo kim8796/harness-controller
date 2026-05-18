@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -17,11 +17,14 @@ import harness_controller
 import harness_goal
 import harness_incident
 import harness_loop
+import harness_operator_wait
 import harness_task_intake
 from harness_autonomy.control import sanitize_for_outbox
 
 
 ERROR_CLASS: type[RuntimeError] = RuntimeError
+OPERATOR_WAIT_DEFAULT_SECONDS = 15 * 60
+OPERATOR_WAIT_POLL_SECONDS = 15
 
 
 def _error(message: str) -> RuntimeError:
@@ -150,6 +153,469 @@ def watch_sidecar_relative(record: harness_controller.TargetRecord, path: Path) 
         return path.relative_to(record.state_root).as_posix()
     except ValueError:
         return path.name
+
+
+def _safe_slug(value: object, *, default: str = "wait") -> str:
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "").strip()).strip("-._")
+    return (slug or default)[:96]
+
+
+def _operator_wait_id(*, wait_class: str, backlog_id: str, run_id: str) -> str:
+    return "-".join(
+        part
+        for part in (
+            _safe_slug(wait_class, default="operator-wait"),
+            _safe_slug(backlog_id, default="backlog"),
+            _safe_slug(run_id, default="run"),
+        )
+        if part
+    )[:127]
+
+
+def _parse_operator_wait_time(value: object) -> datetime | None:
+    if not value:
+        return None
+    text = str(value)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _operator_wait_public_payload(
+    record: harness_controller.TargetRecord,
+    payload: Mapping[str, object],
+) -> Mapping[str, object]:
+    public = dict(payload)
+    if public.get("id") in (None, "") and public.get("wait_id"):
+        public["id"] = public.get("wait_id")
+    for key in ("json_path", "markdown_path"):
+        raw = public.get(key)
+        if not raw:
+            continue
+        path = Path(str(raw))
+        if path.is_absolute():
+            public[key] = watch_sidecar_relative(record, path)
+    safe = watch_safe_value(public)
+    return safe if isinstance(safe, Mapping) else public
+
+
+def _helper_operator_wait_payload(value: object, record: harness_controller.TargetRecord) -> Mapping[str, object] | None:
+    if value is None:
+        return None
+    payload_attr = getattr(value, "payload", None)
+    if isinstance(payload_attr, Mapping):
+        return _operator_wait_public_payload(record, payload_attr)
+    if isinstance(value, Mapping):
+        return _operator_wait_public_payload(record, value)
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        mapped = to_dict()
+        if isinstance(mapped, Mapping):
+            return _operator_wait_public_payload(record, mapped)
+    if hasattr(value, "__dict__"):
+        mapped = vars(value)
+        if isinstance(mapped, Mapping):
+            return _operator_wait_public_payload(record, mapped)
+    return None
+
+
+def _write_operator_wait_outbox_cue(
+    record: harness_controller.TargetRecord,
+    wait: Mapping[str, object],
+) -> Path:
+    wait_id = _safe_slug(wait.get("id") or wait.get("wait_id") or "operator-wait", default="operator-wait")
+    outbox_dir = record.state_root / "operator-outbox"
+    if record.state_root.is_symlink() or record.state_root.parent.is_symlink():
+        raise _error("operator-wait outbox state root must not be a symlink")
+    if outbox_dir.exists() and outbox_dir.is_symlink():
+        raise _error("operator-wait outbox directory must not be a symlink")
+    outbox_dir.mkdir(parents=True, exist_ok=True)
+    path = outbox_dir / f"operator-wait-{wait_id}.md"
+    if path.exists() and path.is_symlink():
+        raise _error("operator-wait outbox file must not be a symlink")
+
+    def safe_value(key: str, default: str = "") -> str:
+        raw = wait.get(key, default)
+        return redact_watch_text(str(raw if raw not in (None, "") else default))
+
+    target_id = safe_value("target_id", record.target_id)
+    wait_class = safe_value("wait_class", "operator-wait")
+    status = safe_value("status", "waiting")
+    reason = safe_value("reason", "operator action required")
+    next_action = safe_value("next_action", "inspect `./harness watch --status`")
+    deadline = safe_value("deadline_at", "unknown")
+    detail_link = f"repo://targets/{target_id}/operator-waits/{wait_id}.md"
+    lines = [
+        f"Task-ID: operator-wait-{wait_id}",
+        "Event-Type: operator-wait",
+        "Lane: watch",
+        f"Result: {status}",
+        f"Notification-ID: operator-wait:{target_id}:{wait_id}",
+        f"Target-ID: {target_id}",
+        f"Wait-ID: {wait_id}",
+        f"Wait-Class: {wait_class}",
+        f"Next-Recommendation: {next_action}",
+        f"Operator-Summary: operator-wait `{wait_class}` for target `{target_id}`",
+        f"Operator-Result: {reason}",
+        f"Operator-Next-Action: {next_action}",
+        "",
+        "## Summary",
+        "",
+        f"- Target: `{target_id}`",
+        f"- Wait: `{wait_id}`",
+        f"- Class: `{wait_class}`",
+        f"- Status: `{status}`",
+        f"- Reason: {reason}",
+        f"- Deadline: `{deadline}`",
+        f"- Detail: {detail_link}",
+        "",
+        "## Reply Guidance",
+        "",
+        "This cue is notification-only. Do not paste secrets in Telegram or chat replies.",
+        "Set secrets in `.env` or provider secret UI, then rerun `./harness watch`.",
+        "Approval replies record intent only and do not bypass Harness guards.",
+        "",
+    ]
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=outbox_dir, delete=False) as handle:
+        handle.write("\n".join(lines))
+        temp_name = handle.name
+    os.replace(temp_name, path)
+    return path
+
+
+def _create_or_update_operator_wait(
+    record: harness_controller.TargetRecord,
+    *,
+    wait_id: str,
+    wait_class: str,
+    backlog_id: str,
+    run_id: str,
+    reason: str,
+    risk_summary: str,
+    next_action: str,
+    allowed_replies: Sequence[str],
+    resume_check: str,
+    resume_policy: str,
+    timeout_seconds: int | None = None,
+) -> Mapping[str, object]:
+    resolved_timeout_seconds = OPERATOR_WAIT_DEFAULT_SECONDS if timeout_seconds is None else timeout_seconds
+    record_payload = harness_operator_wait.build_operator_wait_record(
+        target_id=record.target_id,
+        wait_id=wait_id,
+        wait_class=wait_class,
+        reason=reason,
+        risk_summary=risk_summary,
+        next_action=next_action,
+        allowed_replies=tuple(allowed_replies),
+        resume_check=resume_check,
+        resume_policy=resume_policy,
+        timeout_seconds=resolved_timeout_seconds,
+        context={"backlog_id": backlog_id, "run_id": run_id},
+    )
+    record_payload["backlog_id"] = backlog_id
+    record_payload["run_id"] = run_id
+    payload = _helper_operator_wait_payload(
+        harness_operator_wait.write_operator_wait_record(record.state_root, record_payload),
+        record,
+    )
+    if payload is None:
+        raise _error("operator-wait record writer returned no payload")
+    _write_operator_wait_outbox_cue(record, payload)
+    return payload
+
+
+def _finalize_operator_wait(
+    record: harness_controller.TargetRecord,
+    wait: Mapping[str, object],
+    *,
+    status: str,
+    result: str,
+) -> Mapping[str, object]:
+    payload = dict(wait)
+    payload["status"] = status
+    payload["result"] = result
+    payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    if status == "timeout":
+        payload["timed_out_at"] = payload["updated_at"]
+    elif status in {"ready", "resolved"}:
+        payload["resolved_at"] = payload["updated_at"]
+    if payload.get("wait_id") in (None, "") and payload.get("id"):
+        payload["wait_id"] = str(payload.get("id") or "")
+    payload = dict(_operator_wait_public_payload(record, payload))
+    written = harness_operator_wait.write_operator_wait_record(record.state_root, payload)
+    finalized = _helper_operator_wait_payload(written, record)
+    if finalized is None:
+        raise _error("operator-wait finalizer returned no payload")
+    return finalized
+
+
+def _publication_credential_operator_wait(
+    record: harness_controller.TargetRecord,
+    blocker: Mapping[str, object],
+    *,
+    timeout_seconds: int | None = None,
+) -> Mapping[str, object]:
+    backlog_id = str(blocker.get("backlog_id") or "")
+    run_id = str(blocker.get("run_id") or "")
+    reason = str(blocker.get("message") or "GitHub credential/gh CLI is required for PR publication")
+    wait_id = _operator_wait_id(wait_class="setup-wait", backlog_id=backlog_id, run_id=run_id)
+    return _create_or_update_operator_wait(
+        record,
+        wait_id=wait_id,
+        wait_class="setup-wait",
+        backlog_id=backlog_id,
+        run_id=run_id,
+        reason=reason,
+        risk_summary=(
+            "PR publication is blocked until the local GitHub CLI credential is ready. "
+            "Do not paste tokens or secrets into operator replies."
+        ),
+        next_action="Run `gh auth status`; if needed run `gh auth login`, then rerun `./harness watch`.",
+        allowed_replies=("resolved", "stop"),
+        resume_check="gh auth status",
+        resume_policy="watch-polls-until-ready-or-timeout",
+        timeout_seconds=OPERATOR_WAIT_DEFAULT_SECONDS if timeout_seconds is None else timeout_seconds,
+    )
+
+
+def _operator_wait_deadline(wait: Mapping[str, object]) -> datetime:
+    return _parse_operator_wait_time(wait.get("deadline_at")) or (
+        datetime.now(timezone.utc) + timedelta(seconds=OPERATOR_WAIT_DEFAULT_SECONDS)
+    )
+
+
+def _should_poll_publication_operator_wait(args: argparse.Namespace) -> bool:
+    return (
+        bool(getattr(args, "watch", False))
+        and not bool(getattr(args, "once", False))
+        and int(getattr(args, "max_cycles", 0) or 0) == 0
+        and not bool(getattr(args, "stop_on_idle", False))
+    )
+
+
+def _write_publication_operator_wait_status(
+    runtime: WatchRuntime,
+    record: harness_controller.TargetRecord,
+    *,
+    phase: str,
+    status: str,
+    blocker: Mapping[str, object],
+    wait: Mapping[str, object],
+    processed_count: int,
+    idle_count: int,
+    pending_reason: str,
+    next_action: str,
+) -> Mapping[str, object]:
+    return runtime.write_watch_status(
+        record,
+        phase=phase,
+        status=status,
+        selected_backlog_id=str(blocker.get("backlog_id") or ""),
+        run_id=str(blocker.get("run_id") or ""),
+        transaction_status=str(blocker.get("status") or "credential-blocked"),
+        commit_sha=str(blocker.get("commit_sha") or ""),
+        publication_branch=str(blocker.get("publication_branch") or ""),
+        pending_reason=pending_reason,
+        processed_count=processed_count,
+        idle_count=idle_count,
+        next_action=next_action,
+        operator_wait=wait,
+    )
+
+
+def _poll_publication_credentials_until_ready(
+    runtime: WatchRuntime,
+    record: harness_controller.TargetRecord,
+    args: argparse.Namespace,
+    *,
+    blocker: Mapping[str, object],
+    wait: Mapping[str, object],
+    processed_count: int,
+    idle_count: int,
+) -> bool:
+    deadline = _operator_wait_deadline(wait)
+    poll_seconds = max(1, int(getattr(args, "idle_seconds", 0) or OPERATOR_WAIT_POLL_SECONDS))
+    while True:
+        remaining = int((deadline - datetime.now(timezone.utc)).total_seconds())
+        if remaining <= 0:
+            timeout_wait = _finalize_operator_wait(
+                record,
+                wait,
+                status="timeout",
+                result="GitHub CLI credential readiness was not restored before the operator-wait deadline.",
+            )
+            _write_publication_operator_wait_status(
+                runtime,
+                record,
+                phase="operator-timeout",
+                status="blocked",
+                blocker=blocker,
+                wait=timeout_wait,
+                processed_count=processed_count,
+                idle_count=idle_count,
+                pending_reason="GitHub credential operator-wait timed out",
+                next_action="authenticate GitHub CLI with `gh auth login`, then rerun `./harness watch`",
+            )
+            print("publication 중단: operator-wait timeout, GitHub credential/gh CLI가 아직 준비되지 않았습니다.")
+            return False
+        sleep_seconds = min(poll_seconds, remaining)
+        _write_publication_operator_wait_status(
+            runtime,
+            record,
+            phase="operator-wait",
+            status="operator-wait",
+            blocker=blocker,
+            wait=wait,
+            processed_count=processed_count,
+            idle_count=idle_count,
+            pending_reason="GitHub credential/gh CLI is required for PR publication",
+            next_action=f"waiting for GitHub CLI credentials; recheck in {sleep_seconds}s",
+        )
+        print(f"- operator-wait: GitHub credential 준비를 {sleep_seconds}초 뒤 다시 확인합니다.")
+        runtime.sleep(sleep_seconds)
+        if runtime.github_credentials_ready(cwd=record.repo):
+            ready_wait = _finalize_operator_wait(
+                record,
+                wait,
+                status="ready",
+                result="GitHub CLI credential readiness check passed.",
+            )
+            _write_publication_operator_wait_status(
+                runtime,
+                record,
+                phase="operator-ready",
+                status="running",
+                blocker=blocker,
+                wait=ready_wait,
+                processed_count=processed_count,
+                idle_count=idle_count,
+                pending_reason="GitHub credential/gh CLI is ready for PR publication",
+                next_action="continue pending publication retry path",
+            )
+            return True
+
+
+def _handle_publication_credential_wait(
+    runtime: WatchRuntime,
+    record: harness_controller.TargetRecord,
+    args: argparse.Namespace,
+    *,
+    blocker: Mapping[str, object],
+    processed_count: int,
+    idle_count: int,
+) -> bool:
+    wait = _publication_credential_operator_wait(record, blocker)
+    print("publication operator-wait: GitHub credential/gh CLI가 필요합니다.")
+    print(f"- 구현 기록: `{blocker.get('run_id')}`")
+    print(f"- 작업 항목: `{blocker.get('backlog_id')}`")
+    print(f"- operator-wait: `{wait.get('id')}` deadline=`{wait.get('deadline_at')}`")
+    _write_publication_operator_wait_status(
+        runtime,
+        record,
+        phase="operator-wait",
+        status="operator-wait",
+        blocker=blocker,
+        wait=wait,
+        processed_count=processed_count,
+        idle_count=idle_count,
+        pending_reason="GitHub credential/gh CLI is required for PR publication",
+        next_action="run `gh auth status`; authenticate with `gh auth login` if needed",
+    )
+    if _should_poll_publication_operator_wait(args):
+        return _poll_publication_credentials_until_ready(
+            runtime,
+            record,
+            args,
+            blocker=blocker,
+            wait=wait,
+            processed_count=processed_count,
+            idle_count=idle_count,
+        )
+    print("- 다음 조치: `gh auth status`로 로그인 상태를 확인한 뒤 `./harness watch`를 다시 실행하세요.")
+    return False
+
+
+def _transaction_operator_wait_action(wait_class: str) -> tuple[tuple[str, ...], str, str, str]:
+    if wait_class == "approval-wait":
+        return (
+            ("approved", "rejected", "stop"),
+            "Destructive, security, or scope-sensitive action needs explicit operator intent.",
+            "Reply `approved`/`rejected` or rerun after deciding; approval still must pass canonical guards.",
+            "explicit operator approval receipt plus canonical guard rerun",
+        )
+    if wait_class == "dirty-repo-wait":
+        return (
+            ("resolved", "stop"),
+            "The product repository has dirty or unstable local state.",
+            "Commit, stash, or clean the product repo changes, then rerun `./harness watch`.",
+            "target git status is clean enough for the selected transaction",
+        )
+    if wait_class == "external-wait":
+        return (
+            ("resolved", "stop"),
+            "A runner or external provider appears temporarily unavailable.",
+            "Wait briefly or fix the provider issue, then rerun `./harness watch`.",
+            "provider/runner request succeeds on retry",
+        )
+    return (
+        ("resolved", "stop"),
+        "A credential, permission, env, or setup blocker needs operator action.",
+        "Set the required credential/env locally or in the provider UI, then rerun `./harness watch`.",
+        "setup/credential readiness check passes",
+    )
+
+
+def _handle_transaction_operator_wait(
+    runtime: WatchRuntime,
+    record: harness_controller.TargetRecord,
+    *,
+    incident_record: Mapping[str, object],
+    backlog_id: str,
+    error: BaseException,
+    processed_count: int,
+    idle_count: int,
+) -> Mapping[str, object] | None:
+    wait_class = str(incident_record.get("wait_class") or "")
+    if not bool(incident_record.get("operator_actionable")) or not wait_class:
+        return None
+    allowed_replies, risk_summary, next_action, resume_check = _transaction_operator_wait_action(wait_class)
+    signature = str(incident_record.get("signature") or "transaction")
+    wait = _create_or_update_operator_wait(
+        record,
+        wait_id=_operator_wait_id(wait_class=wait_class, backlog_id=backlog_id, run_id=signature[:16] or "transaction"),
+        wait_class=wait_class,
+        backlog_id=backlog_id,
+        run_id=str(incident_record.get("run_id") or ""),
+        reason=sanitize_for_outbox(str(error))[:500],
+        risk_summary=risk_summary,
+        next_action=next_action,
+        allowed_replies=allowed_replies,
+        resume_check=resume_check,
+        resume_policy=str(incident_record.get("resume_policy") or "next-safe-point"),
+    )
+    runtime.write_watch_status(
+        record,
+        phase="operator-wait",
+        status="operator-wait",
+        selected_backlog_id=backlog_id,
+        transaction_status=str(incident_record.get("kind") or "transaction-blocked"),
+        pending_reason=str(incident_record.get("reason") or error),
+        processed_count=processed_count,
+        idle_count=idle_count,
+        next_action=next_action,
+        operator_wait=wait,
+    )
+    print(f"transaction operator-wait: `{wait_class}`")
+    print(f"- 작업 항목: `{backlog_id}`")
+    print(f"- operator-wait: `{wait.get('id')}` deadline=`{wait.get('deadline_at')}`")
+    print(f"- 다음 조치: {next_action}")
+    return wait
 
 
 def watch_active_goal_id(record: harness_controller.TargetRecord) -> str:
@@ -287,6 +753,7 @@ def write_watch_status(
     next_action: str = "",
     processed_count: int = 0,
     idle_count: int = 0,
+    operator_wait: Mapping[str, object] | None = None,
 ) -> Mapping[str, object]:
     json_path, md_path = watch_status_paths(record)
     watch_dir = json_path.parent
@@ -299,6 +766,7 @@ def write_watch_status(
         raise _error("watch status markdown must not be a symlink")
     now = datetime.now().isoformat(timespec="seconds")
     previous_payload = _load_previous_watch_status(json_path)
+    wait_payload = _operator_wait_public_payload(record, operator_wait) if operator_wait else {}
     payload: dict[str, object] = {
         "schema_version": 1,
         "target_id": record.target_id,
@@ -319,6 +787,13 @@ def write_watch_status(
         "json_path": watch_sidecar_relative(record, json_path),
         "markdown_path": watch_sidecar_relative(record, md_path),
     }
+    if wait_payload:
+        payload["operator_wait"] = wait_payload
+        payload["operator_wait_id"] = str(wait_payload.get("id") or "")
+        payload["operator_wait_class"] = str(wait_payload.get("wait_class") or "")
+        payload["operator_wait_status"] = str(wait_payload.get("status") or "")
+        payload["operator_wait_deadline_at"] = str(wait_payload.get("deadline_at") or "")
+        payload["operator_wait_next_action"] = str(wait_payload.get("next_action") or "")
     payload.update(
         _last_transaction_fields(
             record,
@@ -346,6 +821,14 @@ def render_watch_status_markdown(payload: Mapping[str, object]) -> str:
         raw = payload.get(key, default)
         return str(raw) if raw not in (None, "") else default
 
+    def wait_value(key: str, default: str = "") -> str:
+        wait = payload.get("operator_wait")
+        if isinstance(wait, Mapping):
+            raw = wait.get(key, default)
+        else:
+            raw = payload.get(f"operator_wait_{key}", default)
+        return str(raw) if raw not in (None, "") else default
+
     lines = [
         "# Harness Watch Status",
         "",
@@ -366,7 +849,24 @@ def render_watch_status_markdown(payload: Mapping[str, object]) -> str:
         f"- Next action: {value('next_action', 'none')}",
         "",
     ]
-    if not any(value(key, "") for key in ("selected_backlog_id", "run_id", "transaction_status")) and any(
+    if wait_value("id", "") or wait_value("status", ""):
+        lines.extend(
+            [
+                "## Operator Wait",
+                "",
+                f"- Wait: `{wait_value('id', 'unknown')}`",
+                f"- Class: `{wait_value('wait_class', 'unknown')}`",
+                f"- Status: `{wait_value('status', 'unknown')}`",
+                f"- Backlog: `{wait_value('backlog_id', 'none')}`",
+                f"- Run: `{wait_value('run_id', 'none')}`",
+                f"- Reason: {wait_value('reason', 'none')}",
+                f"- Deadline: `{wait_value('deadline_at', 'unknown')}`",
+                f"- Next action: {wait_value('next_action', 'none')}",
+                "",
+            ]
+        )
+    current_transaction_visible = any(value(key, "") for key in ("selected_backlog_id", "run_id", "transaction_status"))
+    if (not current_transaction_visible or bool(wait_value("id", ""))) and any(
         value(key, "")
         for key in (
             "last_selected_backlog_id",
@@ -449,7 +949,24 @@ def print_watch_status(record: harness_controller.TargetRecord) -> int:
     print(f"- commit: `{payload.get('commit_sha') or 'none'}`")
     print(f"- publication branch: `{payload.get('publication_branch') or 'none'}`")
     print(f"- PR: `{payload.get('pr_url') or 'none'}`")
-    if not any(payload.get(key) for key in ("selected_backlog_id", "run_id", "transaction_status")) and any(
+    operator_wait = payload.get("operator_wait")
+    wait_payload = operator_wait if isinstance(operator_wait, Mapping) else {}
+    wait_id = str(wait_payload.get("id") or payload.get("operator_wait_id") or "")
+    wait_status = str(wait_payload.get("status") or payload.get("operator_wait_status") or "")
+    if wait_id or wait_status:
+        print("- operator wait:")
+        print(f"  - wait: `{wait_id or 'unknown'}`")
+        print(f"  - class: `{wait_payload.get('wait_class') or payload.get('operator_wait_class') or 'unknown'}`")
+        print(f"  - status: `{wait_status or 'unknown'}`")
+        print(f"  - backlog: `{wait_payload.get('backlog_id') or 'none'}`")
+        print(f"  - run: `{wait_payload.get('run_id') or 'none'}`")
+        reason = str(wait_payload.get("reason") or "")
+        if reason:
+            print(f"  - reason: {reason}")
+        print(f"  - deadline: `{wait_payload.get('deadline_at') or payload.get('operator_wait_deadline_at') or 'unknown'}`")
+        print(f"  - next: {wait_payload.get('next_action') or payload.get('operator_wait_next_action') or 'none'}")
+    current_transaction_visible = any(payload.get(key) for key in ("selected_backlog_id", "run_id", "transaction_status"))
+    if (not current_transaction_visible or bool(wait_id)) and any(
         payload.get(key)
         for key in (
             "last_selected_backlog_id",
@@ -702,21 +1219,6 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                     None,
                 )
                 if credential_blocker is not None and not runtime.github_credentials_ready(cwd=record.repo):
-                    print("publication 중단: GitHub credential/gh CLI가 필요합니다.")
-                    print(f"- 구현 기록: `{credential_blocker['run_id']}`")
-                    print(f"- 작업 항목: `{credential_blocker['backlog_id']}`")
-                    if args.watch:
-                        runtime.write_watch_status(
-                            record,
-                            phase="publication-credential-blocked",
-                            status="blocked",
-                            selected_backlog_id=str(credential_blocker["backlog_id"]),
-                            run_id=str(credential_blocker["run_id"]),
-                            pending_reason="GitHub credential/gh CLI is required for PR publication",
-                            processed_count=processed,
-                            idle_count=idle_count,
-                            next_action="run `gh auth status` and authenticate GitHub CLI",
-                        )
                     diagnosis = runtime.record_autopilot_doctor_diagnosis(
                         record=record,
                         stage="publication-credential-blocked",
@@ -726,8 +1228,15 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                     )
                     runtime.append_autopilot_memory(record, "doctor-diagnosis", diagnosis)
                     print(f"- doctor diagnosis: `{diagnosis['path']}`")
-                    print("- 다음 조치: `gh auth status`로 로그인 상태를 확인하고 다시 `./harness watch`를 실행하세요.")
-                    return 2
+                    if not _handle_publication_credential_wait(
+                        runtime,
+                        record,
+                        args,
+                        blocker=credential_blocker,
+                        processed_count=processed,
+                        idle_count=idle_count,
+                    ):
+                        return 2
                 if credential_blocker is not None:
                     print("publication 재시도 가능: GitHub credential이 준비되어 이전 credential blocker를 pending retry로 처리합니다.")
                 latest = pending_pushes[-1]
@@ -963,6 +1472,17 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                         print("- watch 중단: 반복 실패 task 격리에 실패했습니다.")
                         return 2
             if args.watch:
+                wait = _handle_transaction_operator_wait(
+                    runtime,
+                    record,
+                    incident_record=incident_record,
+                    backlog_id=backlog_id,
+                    error=exc,
+                    processed_count=processed,
+                    idle_count=idle_count,
+                )
+                if wait is not None:
+                    return 2
                 runtime.write_watch_status(
                     record,
                     phase="transaction-failed",
@@ -1006,11 +1526,31 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
             )
             runtime.append_autopilot_memory(record, "doctor-diagnosis", diagnosis)
             print(f"- doctor diagnosis: `{diagnosis['path']}`")
+            if outcome.status == "credential-blocked":
+                credential_blocker = {
+                    "backlog_id": outcome.backlog_id,
+                    "run_id": outcome.run_id,
+                    "status": outcome.status,
+                    "commit_sha": outcome.commit_sha,
+                    "publication_branch": outcome.publication_branch,
+                    "message": outcome.message,
+                }
+                if _handle_publication_credential_wait(
+                    runtime,
+                    record,
+                    args,
+                    blocker=credential_blocker,
+                    processed_count=processed,
+                    idle_count=idle_count,
+                ):
+                    print("publication 재시도 가능: GitHub credential이 준비되어 pending retry 경로로 돌아갑니다.")
+                    continue
+                return 2
             if args.watch:
                 runtime.write_watch_status(
                     record,
                     phase="publication-blocked",
-                    status="blocked" if outcome.status == "credential-blocked" else "running",
+                    status="running",
                     selected_backlog_id=outcome.backlog_id,
                     run_id=outcome.run_id,
                     transaction_status=outcome.status,
@@ -1019,13 +1559,8 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                     pending_reason=outcome.message,
                     processed_count=processed,
                     idle_count=idle_count,
-                    next_action="run `gh auth status`"
-                    if outcome.status == "credential-blocked"
-                    else "watch continues to next executable task",
+                    next_action="watch continues to next executable task",
                 )
-            if outcome.status == "credential-blocked":
-                print("publication 중단: GitHub credential/gh CLI가 필요합니다.")
-                return 2
             print("publication 보류: commit은 완료됐고 watch는 다음 작업을 계속 찾습니다.")
             if not args.watch:
                 return 2

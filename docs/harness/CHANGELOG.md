@@ -1,5 +1,12 @@
 # Harness Changelog
 
+## 1.8.31 - 2026-05-18
+
+- Added operator-wait core files and tests to export/release coverage.
+- Added runtime operator-wait projection for credential-blocked publication and operator-actionable transaction blockers, without adding a new beginner command.
+- Added local `operator-outbox` cues for operator-wait and hardened incident/operator-wait redaction plus symlink containment.
+- Rephrased the absorbed implementation discipline as Harness policy: plan first, diagnose with evidence, keep approvals behind existing guards, and do not mark completion without receipts.
+
 ## 1.8.30 - 2026-05-18
 
 - Preserved the last published transaction in watch status after the loop becomes idle.

@@ -1,4 +1,4 @@
-# Harness Controller Bundle v1.8.30
+# Harness Controller Bundle v1.8.31
 
 이 디렉토리는 product repo 밖에서 실행하는 external harness controller 배포 번들이다.
 product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는다. Runtime 준비와 `.venv`는 controller checkout 안에서만 관리한다.
@@ -30,8 +30,9 @@ product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는�
 - `./harness telegram setup --target-id my-app --repo-id my-app-relay --dry-run` 은 Telegram/Redis setup readiness 를 redacted 출력으로 점검한다. `--dry-run` 은 env/provider/webhook/deploy side effect 를 모두 막는다.
 - 터미널에서 인자 없이 `./harness install` 을 실행하면 제품 저장소 경로만 질문한다. 스크립트/CI에서는 `./harness install /path/to/product-repo`를 쓴다. 질문에 답할 수 없는 환경에서 인자 없이 실행하면 상태만 보여준다.
 - `./harness watch` 는 Telegram relay, active goal, queued auto backlog를 계속 감시하며 goal이 비면 planner가 task를 다시 채운다.
-- 실전 검증은 `./harness watch --max-cycles 1 --no-telegram-drain` 으로 한 transaction만 돌리고, `./harness watch --status` 로 현재 단계, 마지막 published transaction, 다음 조치를 확인한다.
+- 실전 검증은 `./harness watch --max-cycles 1 --no-telegram-drain` 으로 한 transaction만 돌리고, `./harness watch --status` 로 현재 단계, 마지막 published transaction, operator-wait, 다음 조치를 확인한다.
 - 성공 transaction은 완료 처리, product local commit, task branch push, PR publication receipt까지 순서대로 시도한다.
+- operator-wait는 credential, permission, provider outage, dirty repo, approval-needed risk 같은 외부 blocker를 표현하는 `watch` 내부 상태다. 새 beginner command가 아니며 secret은 `.env` 또는 provider secret UI에서만 고친다.
 - watch는 compact memory, incident, safe sidecar maintenance를 남기고 가능한 경우 다음 task 또는 repair task로 계속 진행한다.
 - `./harness do "요청"` 은 한 작업을 바로 처리하고 싶을 때 쓰는 보조 명령이다.
 - `./harness task`, `./harness task review`, `./harness task queue`, `./harness run`, `./harness finish`, `./harness target archive` 는 복구/고급 명령이다.
@@ -123,6 +124,7 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `scripts/harness_env.py`
 - `scripts/harness_goal.py`
 - `scripts/harness_incident.py`
+- `scripts/harness_operator_wait.py`
 - `scripts/harness_profiles.py`
 - `scripts/harness_publication.py`
 - `scripts/harness_shared.py`
@@ -184,12 +186,14 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `tests/test_harness_export.py`
 - `tests/test_harness_goal.py`
 - `tests/test_harness_incident.py`
+- `tests/test_harness_operator_wait.py`
 - `tests/test_harness_publication.py`
 - `tests/test_harness_task_cli.py`
 - `tests/test_harness_task_intake.py`
 - `tests/test_harness_telegram_bridge.py`
 - `tests/test_harness_watch.py`
 - `tests/test_redis_relay.py`
+- `docs/harness/releases/v1.8.31.md`
 - `docs/harness/releases/v1.8.30.md`
 - `docs/harness/releases/v1.8.29.md`
 - `docs/harness/releases/v1.8.28.md`

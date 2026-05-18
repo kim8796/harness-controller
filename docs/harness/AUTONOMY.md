@@ -6,9 +6,9 @@
 
 현재 external controller 기본 UX는 `./harness install /path/to/product`, `./harness goal "제품 목표"`, `./harness watch`다. `goal`은 단일 작업이 아니라 제품 완성 목표를 controller sidecar에 저장하고, `watch`가 active goal을 roadmap/task로 쪼개 queue를 채운 뒤 구현, 검증, commit, task branch push, PR publication receipt를 반복한다. `./harness do "요청"`은 한 작업을 즉시 처리하는 보조 명령으로 유지한다. `task review/queue`, `run`, `finish`, `target archive`는 strict 내부 게이트이자 복구/디버깅 명령으로 유지한다.
 
-Goal-driven watch는 manual-review/no-op/empty queue를 기본 stop으로 보지 않는다. 실행 가능한 task가 없으면 planner refill을 시도하고, task 하나가 막히면 incident/correction/repair 입력으로 격리한 뒤 다음 executable task를 찾는다. credentials, 권한, 사용자 중단, OS/process-level 실패처럼 외부 조치가 필요한 경우만 hard stop이다.
+Goal-driven watch는 manual-review/no-op/empty queue를 기본 stop으로 보지 않는다. 실행 가능한 task가 없으면 planner refill을 시도하고, task 하나가 막히면 incident/correction/repair 입력으로 격리한 뒤 다음 executable task를 찾는다. credentials, 권한, transient provider outage, dirty repo, approval-needed risk처럼 운영자가 해결할 수 있는 blocker는 가능한 경우 내부 operator-wait 상태로 남긴다. 사용자 중단, timeout, OS/process-level 실패처럼 재개 조건이 충족되지 않은 경우만 hard stop이다.
 
-`v1.8.26` 기준 external controller beginner entrypoint 는 bare `./harness` 와 `./harness help` 로 같은 한국어 시작 화면을 보여주고, root `START_HERE.md` 와 `docs/harness/START_HERE.md` 링크가 각각의 위치에서 유효해야 한다. 첫 연결은 `./harness install /path/to/product`, 제품 완성 목표 입력은 `./harness goal "제품 목표"`, 장기 실행은 `./harness watch` 다. `watch` 는 active goal 이 끝날 때까지 planner refill, task intake queue, implementation, sidecar completion, product commit, task branch push, PR create/update receipt 를 반복한다. `./harness do "요청"`은 단일 작업 helper이고, `task review/queue`, `run`, `finish`, `target backlog push` 는 복구/디버깅용 고급 명령이다. `./harness telegram setup`은 hard dry-run과 separate Vercel deploy/webhook gate를 제공한다. 전체 argparse 명령 참조는 `./harness --help` 로 분리한다. `START_HERE.md` 는 짧은 routing guide 로 유지하고, 상세 운영/요구사항/Telegram/troubleshooting/scaffold reference 는 dedicated docs 로 연결한다. `target run --implement-backlog-once` 는 기본 Codex 호출에서 literal `auto` 모델을 넘기지 않고 managed latest/default 모델과 `xhigh` reasoning 을 사용한다. Controller export 는 v1.8+ release note 이력을 보존하고 generated coverage artifact 를 제외하며, release 전 `./harness controller release-check` 로 source checkout warning, distribution strict-mode, focused lint/pytest, forbidden tracked paths, and secret-safe output projection 을 확인한다. Telegram/Redis relay drain 은 controller-owned Upstash adapter 를 사용하고, external controller 에 registered target 이 있으면 target-scoped drain 만 허용한다.
+`v1.8.31` 기준 external controller beginner entrypoint 는 bare `./harness` 와 `./harness help` 로 같은 한국어 시작 화면을 보여주고, root `START_HERE.md` 와 `docs/harness/START_HERE.md` 링크가 각각의 위치에서 유효해야 한다. 첫 연결은 `./harness install /path/to/product`, 제품 완성 목표 입력은 `./harness goal "제품 목표"`, 장기 실행은 `./harness watch` 다. `watch` 는 active goal 이 끝날 때까지 planner refill, task intake queue, implementation, sidecar completion, product commit, task branch push, PR create/update receipt 를 반복한다. Operator-wait는 이 watch 안의 bounded internal state 이며 새 beginner command가 아니다. `./harness do "요청"`은 단일 작업 helper이고, `task review/queue`, `run`, `finish`, `target backlog push` 는 복구/디버깅용 고급 명령이다. `./harness telegram setup`은 hard dry-run과 separate Vercel deploy/webhook gate를 제공한다. 전체 argparse 명령 참조는 `./harness --help` 로 분리한다. `START_HERE.md` 는 짧은 routing guide 로 유지하고, 상세 운영/요구사항/Telegram/troubleshooting/scaffold reference 는 dedicated docs 로 연결한다. `target run --implement-backlog-once` 는 기본 Codex 호출에서 literal `auto` 모델을 넘기지 않고 managed latest/default 모델과 `xhigh` reasoning 을 사용한다. Controller export 는 v1.8+ release note 이력을 보존하고 generated coverage artifact 를 제외하며, release 전 `./harness controller release-check` 로 source checkout warning, distribution strict-mode, focused lint/pytest, forbidden tracked paths, and secret-safe output projection 을 확인한다. Telegram/Redis relay drain 은 controller-owned Upstash adapter 를 사용하고, external controller 에 registered target 이 있으면 target-scoped drain 만 허용한다.
 
 현재 운영 baseline 은 `docs/harness/VERSION.md` 의 Current Version 을 따른다. 이 문서는 운영 계약과 CLI 사용법을 설명하고, 긴 릴리스별 기능 목록은 `VERSION.md`, `CHANGELOG.md`, 최신 release note 로 위임한다.
 
@@ -18,6 +18,11 @@ Goal-driven watch는 manual-review/no-op/empty queue를 기본 stop으로 보지
 
 ## 핵심 원칙
 
+- 계획과 증거가 먼저다.
+  - 코드 변경 전 `plan.md`에는 acceptance map, touched files, validation commands, placeholder check가 있어야 한다.
+  - `DONE`은 generated evidence나 receipt가 있을 때만 쓴다. 우려가 남으면 `DONE_WITH_CONCERNS`, 정보가 부족하면 `NEEDS_CONTEXT`, 재개 조건이 외부에 있으면 `BLOCKED`로 분리한다.
+  - Approval 답장은 operator intent를 기록할 뿐 destructive/security/scope guard를 우회하지 않는다.
+  - 실패 진단은 증상, 실패 명령, 첫 실패 경계, 가설, 다음 가장 작은 실험을 남긴다.
 - 스케줄링은 바깥에서 한다.
   - cron, launchd, systemd, GitHub Actions 같은 외부 스케줄러가 `scripts/harness_autonomy.py` 를 호출한다.
 - 하네스 루프는 안에서 한다.

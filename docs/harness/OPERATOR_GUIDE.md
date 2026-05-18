@@ -72,6 +72,22 @@ publication이 막히면 해당 task의 receipt/incident로 격리하고 `watch`
 Telegram/Redis는 operator instruction transport이고 product-changing 실행기는 아니다. `/harness task <target> ...`는 controller가 drain한 뒤 `watch`가 task intake gate를 통과시킬 때만 실행된다.
 `./harness telegram setup --target-id my-app --repo-id my-app --dry-run`은 readiness dry-run만 수행하며 env/provider/webhook/deploy를 바꾸지 않는다.
 
+## Operator-Wait
+
+`watch`가 credential, permission, transient provider outage, dirty target, approval-needed risk처럼 사용자가 해결할 수 있는 blocker를 만나면 내부 operator-wait를 연다. 기록은 controller sidecar의 `targets/<target-id>/operator-waits/`에 JSON/Markdown으로 남고, `watch --status`와 `targets/<target-id>/operator-outbox/` cue에는 blocker, risk, next action, allowed replies, deadline만 secret-safe로 표시한다.
+
+운영자는 새 명령을 배울 필요가 없다. 안내된 외부 조치를 끝낸 뒤 기존 `./harness watch` 또는 bounded smoke를 다시 실행한다. Telegram으로 outbox cue가 전달되더라도 notification-only다. `resolved`, `approved`, `rejected`, `stop` 같은 답장은 의사표시일 뿐 설정값으로 소비되지 않고 guard를 우회하지 않는다. 다음 safe point에서 기존 검증/전환/commit/push/publication gate가 다시 판단한다.
+
+Secret이나 token은 답장, issue, report에 붙이지 않는다. 값은 `.env`, shell env, 또는 provider secret UI에만 둔다.
+
+## Harness Policy
+
+- 코드 변경 전 `plan.md`에 acceptance, touched files, validation command를 고정한다.
+- 실패 진단은 증상, 실패 명령, 첫 실패 경계, 가설, 다음 가장 작은 실험 순서로 남긴다.
+- 완료, publication success, goal closeout은 generated evidence나 receipt 없이는 표시하지 않는다.
+- Implementer/reviewer 상태는 `DONE`, `DONE_WITH_CONCERNS`, `NEEDS_CONTEXT`, `BLOCKED`로 분리하고, review는 코드 품질보다 spec/guard 준수를 먼저 본다.
+- 병렬 agent는 기본적으로 read-only 진단과 리뷰에만 쓴다.
+
 ## 마무리
 
 ```bash

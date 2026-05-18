@@ -19,6 +19,9 @@ class IncidentClassification:
     hard_stop: bool
     repairable: bool
     reason: str
+    operator_actionable: bool = False
+    wait_class: str | None = None
+    resume_policy: str = "none"
 
 
 @dataclass(frozen=True)
@@ -28,6 +31,9 @@ class ExternalIncidentClassification:
     repairable: bool
     confidence: str
     reason: str
+    operator_actionable: bool = False
+    wait_class: str | None = None
+    resume_policy: str = "none"
 
 
 @dataclass(frozen=True)
@@ -59,6 +65,24 @@ def _redact(text: str) -> str:
     redacted = re.sub(rf"({secret_key_pattern}\s*:\s*)[^\s\"']+", r"\1<redacted>", redacted, flags=re.IGNORECASE)
     redacted = re.sub(rf'("{secret_key_pattern}"\s*:\s*")[^"]+(")', r"\1<redacted>\2", redacted, flags=re.IGNORECASE)
     redacted = re.sub(rf"('{secret_key_pattern}'\s*:\s*')[^']+(')", r"\1<redacted>\2", redacted, flags=re.IGNORECASE)
+    redacted = re.sub(
+        r"https://api\.telegram\.org/bot\d+:[^\s/]+",
+        "https://api.telegram.org/bot<redacted>",
+        redacted,
+    )
+    redacted = re.sub(r"\b\d{8,}:[A-Za-z0-9_-]{20,}\b", "<redacted-telegram-token>", redacted)
+    redacted = re.sub(
+        r"(?i)([\"']?\b(?:chat[_ -]?id|admin[_ -]?chat[_ -]?id|operator[_ -]?id|"
+        r"operator[_ -]?user[_ -]?ids?|actor[_ -]?id)\b[\"']?\s*[=:]\s*)([\"']).*?\2",
+        r"\1\2<redacted>\2",
+        redacted,
+    )
+    redacted = re.sub(
+        r"(?i)([\"']?\b(?:chat[_ -]?id|admin[_ -]?chat[_ -]?id|operator[_ -]?id|"
+        r"operator[_ -]?user[_ -]?ids?|actor[_ -]?id)\b[\"']?\s*[=:]\s*)[^\s,'\"}]+",
+        r"\1<redacted>",
+        redacted,
+    )
     redacted = re.sub(r"gh[pousr]_[0-9A-Za-z_]{8,}", "<redacted-github-token>", redacted)
     redacted = re.sub(r"(authorization:\s*bearer\s+)[^\s\"']+", r"\1<redacted>", redacted, flags=re.IGNORECASE)
     redacted = re.sub(r"(bearer\s+)[A-Za-z0-9._~+/=-]{12,}", r"\1<redacted>", redacted, flags=re.IGNORECASE)
@@ -71,7 +95,8 @@ def _redact_value(value: object) -> object:
         sensitive_key = re.compile(
             r"(api[_-]?key|access[_-]?key|client[_-]?secret|refresh[_-]?token|secret|token|password|passwd|"
             r"credential|private[_-]?key|service[_-]?role[_-]?key|signing[_-]?key|database[_-]?url|redis[_-]?url|"
-            r"webhook[_-]?url)",
+            r"webhook[_-]?url|chat[_-]?id|admin[_-]?chat[_-]?id|operator[_-]?user[_-]?ids?|"
+            r"operator[_-]?id|actor[_-]?id|actor[_-]?user[_-]?id|telegram[_-]?user[_-]?id)",
             flags=re.IGNORECASE,
         )
         for key, item in value.items():
@@ -87,19 +112,140 @@ def _redact_value(value: object) -> object:
     return value
 
 
+def _validate_sidecar_root(state_root: Path) -> Path:
+    if state_root.is_symlink():
+        raise IncidentError(f"refusing symlink target state root: {state_root}")
+    if state_root.parent.name != "targets":
+        raise IncidentError(f"incident state root must be targets/<target-id>: {state_root}")
+    if state_root.parent.is_symlink():
+        raise IncidentError(f"refusing symlink targets parent: {state_root.parent}")
+    return state_root.resolve(strict=False)
+
+
+def _ensure_sidecar_path(state_root: Path, path: Path, *, label: str) -> Path:
+    resolved_root = _validate_sidecar_root(state_root)
+    try:
+        lexical_relative = path.relative_to(state_root)
+    except ValueError:
+        lexical_relative = None
+    if lexical_relative is not None:
+        current = state_root
+        for part in lexical_relative.parts[:-1]:
+            current = current / part
+            if current.is_symlink():
+                raise IncidentError(f"refusing symlink {label} parent: {current}")
+    resolved_path = path.resolve(strict=False)
+    try:
+        relative = resolved_path.relative_to(resolved_root)
+    except ValueError as exc:
+        raise IncidentError(f"{label} must stay inside target sidecar: {path}") from exc
+    current = resolved_root
+    for part in relative.parts[:-1]:
+        current = current / part
+        if current.is_symlink():
+            raise IncidentError(f"refusing symlink {label} parent: {current}")
+    if path.exists() and path.is_symlink():
+        raise IncidentError(f"refusing symlink {label}: {path}")
+    return resolved_path
+
+
+_RESUME_POLICY_BY_WAIT_CLASS = {
+    "setup-wait": "resume-after-operator-setup",
+    "dirty-repo-wait": "resume-after-operator-cleanup",
+    "external-wait": "retry-after-external-wait",
+    "approval-wait": "resume-after-explicit-approval",
+}
+
+_APPROVAL_WAIT_PATTERNS = (
+    r"\bdestructive\b",
+    r"\bsecurity\b",
+    r"\bscope\b",
+    r"\bforce(?:_|-| )push\b",
+    r"\bdelete\b",
+    r"\bdb(?:_|-| )reset\b",
+    r"\bdatabase\s+reset\b",
+    r"\bdrop\s+database\b",
+    r"\benv(?:ironment)?\s+mutation\b",
+    r"\bmutat(?:e|es|ed|ing|ion)\s+(?:the\s+)?(?:env|environment)\b",
+)
+_DIRTY_REPO_WAIT_PATTERNS = (
+    r"\bdirty\s+(?:repo|repository|worktree|working tree)\b",
+    r"\b(?:repo|repository|worktree|working tree)\s+dirty\b",
+    r"\buncommitted\s+changes\b",
+    r"\bworking tree has modifications\b",
+)
+_SETUP_WAIT_PATTERNS = (
+    r"\btoken\b",
+    r"\bcredentials?\b",
+    r"\bauth(?:entication|orization)?\b",
+    r"\bunauthori[sz]ed\b",
+    r"\bpermissions?(?:\s+denied)?\b",
+    r"\bgh auth\b",
+    r"\bmissing\s+(?:required\s+)?(?:env|environment|variable)\b",
+    r"\brequired\s+(?:env|environment|variable)\b",
+    r"\.env\s+(?:missing|required|not found)\b",
+)
+_EXTERNAL_WAIT_PATTERNS = (
+    r"\btimeout\b",
+    r"\btimed out\b",
+    r"\b429\b",
+    r"\b503\b",
+    r"\brate(?:_|-| )limit(?:ed)?\b",
+    r"\btoo many requests\b",
+    r"\btemporarily\b",
+)
+
+
+def _matches_any(text: str, patterns: Sequence[str]) -> bool:
+    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _operator_metadata(wait_class: str | None, resume_policy: str = "none") -> tuple[bool, str | None, str]:
+    if wait_class is None:
+        return False, None, resume_policy
+    return True, wait_class, _RESUME_POLICY_BY_WAIT_CLASS[wait_class]
+
+
 def classify_error(error: BaseException | str, *, stage: str = "") -> IncidentClassification:
     text = str(error).lower()
     stage_text = stage.lower()
-    if any(token in text for token in ("token", "credential", "permission denied", "authentication", "gh cli is not available")):
-        return IncidentClassification("credentials", True, False, "credential or permission blocker")
+    combined = f"{stage_text} {text}"
+    if _matches_any(combined, _APPROVAL_WAIT_PATTERNS):
+        return IncidentClassification(
+            "operator-approval",
+            True,
+            False,
+            "operator approval required for destructive, security, or scope-sensitive action",
+            *_operator_metadata("approval-wait"),
+        )
+    if _matches_any(combined, _DIRTY_REPO_WAIT_PATTERNS) or any(token in text for token in ("dirty", "worktree", "target verification", "detached head")):
+        return IncidentClassification(
+            "target-precondition",
+            True,
+            False,
+            "target repo precondition blocker",
+            *_operator_metadata("dirty-repo-wait"),
+        )
+    if _matches_any(combined, _SETUP_WAIT_PATTERNS) or "gh cli is not available" in text:
+        return IncidentClassification(
+            "credentials",
+            True,
+            False,
+            "credential, auth, env, or permission setup blocker",
+            *_operator_metadata("setup-wait"),
+        )
     if any(token in text for token in ("remote head", "push", "pr-blocked", "publication")) or "push" in stage_text:
         return IncidentClassification("publication", False, False, "publication can be retried or isolated")
     if any(token in text for token in ("controller", "sidecar", "generated evidence", "implementation evidence", "schema", "parser")):
-        return IncidentClassification("controller-contract", False, True, "controller contract or evidence issue")
-    if any(token in text for token in ("dirty", "worktree", "target verification", "detached head")):
-        return IncidentClassification("target-precondition", True, False, "target repo precondition blocker")
-    if any(token in text for token in ("timeout", "rate limit", "runner", "codex", "temporarily")):
-        return IncidentClassification("runner-transient", False, False, "runner may succeed on retry")
+        return IncidentClassification("controller-contract", False, True, "controller contract or evidence issue", resume_policy="controller-repair")
+    if _matches_any(combined, _EXTERNAL_WAIT_PATTERNS) or any(token in text for token in ("runner", "codex")):
+        return IncidentClassification(
+            "runner-transient",
+            False,
+            False,
+            "runner or external service may succeed after waiting",
+            *_operator_metadata("external-wait"),
+        )
     return IncidentClassification("product-implementation", False, False, "implementation failure should create correction work")
 
 
@@ -111,43 +257,66 @@ def classify_external_incident(
 ) -> ExternalIncidentClassification:
     command_text = " ".join(command or ())
     lower = f"{stage} {error} {command_text}".lower()
-    if any(token in lower for token in ("token", "credential", "authentication", "permission denied", "gh auth")):
+    wait_class: str | None = None
+    resume_policy = "none"
+    if _matches_any(lower, _APPROVAL_WAIT_PATTERNS):
+        kind = "operator-approval"
+        hard_stop = True
+        repairable = False
+        reason = "operator approval required for destructive, security, or scope-sensitive action"
+        confidence = "high"
+        wait_class = "approval-wait"
+    elif _matches_any(lower, _DIRTY_REPO_WAIT_PATTERNS) or "dirty worktree" in lower or "target preflight" in lower or "detached head" in lower:
+        kind = "target-precondition"
+        hard_stop = True
+        repairable = False
+        reason = "target repo precondition blocker"
+        confidence = "high"
+        wait_class = "dirty-repo-wait"
+    elif _matches_any(lower, _SETUP_WAIT_PATTERNS):
         kind = "credentials"
         hard_stop = True
         repairable = False
-        reason = "credential or permission blocker"
+        reason = "credential, auth, env, or permission setup blocker"
         confidence = "high"
+        wait_class = "setup-wait"
     elif "controller" in lower or "contract" in lower or "schema" in lower or "parser" in lower or "required field" in lower:
         kind = "controller-contract"
         hard_stop = False
         repairable = True
         reason = "controller contract issue"
         confidence = "high"
+        resume_policy = "controller-repair"
     elif "publication" in lower or "git push" in lower or " remote rejected" in lower or "pr " in lower:
         kind = "publication"
         hard_stop = False
         repairable = False
         reason = "publication can be retried or isolated"
         confidence = "high"
-    elif "dirty worktree" in lower or "target preflight" in lower or "detached head" in lower:
-        kind = "target-precondition"
-        hard_stop = True
-        repairable = False
-        reason = "target repo precondition blocker"
-        confidence = "high"
-    elif "timeout" in lower or "timed out" in lower or " 503" in lower or "runner" in lower:
+    elif _matches_any(lower, _EXTERNAL_WAIT_PATTERNS) or "runner" in lower:
         kind = "runner-transient"
         hard_stop = False
         repairable = False
-        reason = "runner may succeed on retry"
+        reason = "runner or external service may succeed after waiting"
         confidence = "medium"
+        wait_class = "external-wait"
     else:
         kind = "product-implementation"
         hard_stop = False
         repairable = False
         reason = "implementation failure should create correction work"
         confidence = "medium"
-    return ExternalIncidentClassification(kind, hard_stop, repairable, confidence, reason)
+    operator_actionable, wait_class, wait_resume_policy = _operator_metadata(wait_class, resume_policy)
+    return ExternalIncidentClassification(
+        kind,
+        hard_stop,
+        repairable,
+        confidence,
+        reason,
+        operator_actionable,
+        wait_class,
+        wait_resume_policy,
+    )
 
 
 def incident_signature(
@@ -174,9 +343,8 @@ def incident_signature(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _write_json(path: Path, payload: Mapping[str, object]) -> None:
-    if path.exists() and path.is_symlink():
-        raise IncidentError(f"refusing symlink incident artifact: {path}")
+def _write_json(state_root: Path, path: Path, payload: Mapping[str, object]) -> None:
+    _ensure_sidecar_path(state_root, path, label="incident artifact")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(dict(payload), ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -258,6 +426,9 @@ def record_external_incident(
         "repairable": classification.repairable,
         "confidence": classification.confidence,
         "reason": classification.reason,
+        "operator_actionable": classification.operator_actionable,
+        "wait_class": classification.wait_class,
+        "resume_policy": classification.resume_policy,
         "count": count,
         "first_seen": previous.get("first_seen") or timestamp,
         "last_seen": timestamp,
@@ -278,6 +449,7 @@ def record_external_incident(
             "status": "queued",
             "incident_signature": signature,
             "incident_path": incident_path.as_posix(),
+            "resume_policy": classification.resume_policy,
             "product_checkpoint": checkpoint,
             "resume_instructions": [
                 "Resume the recorded target backlog/run after controller repair verifies.",
@@ -285,9 +457,9 @@ def record_external_incident(
             ],
             "created_at": timestamp,
         }
-        _write_json(repair_task_path, repair_payload)
+        _write_json(state_root, repair_task_path, repair_payload)
         payload["controller_repair_task_path"] = repair_task_path.as_posix()
-    _write_json(incident_path, payload)
+    _write_json(state_root, incident_path, payload)
     return ExternalIncidentRecord(classification.incident_class, incident_path, repair_task_path, payload)
 
 
@@ -321,6 +493,9 @@ def record_incident(
         "hard_stop": classification.hard_stop,
         "repairable": classification.repairable,
         "reason": classification.reason,
+        "operator_actionable": classification.operator_actionable,
+        "wait_class": classification.wait_class,
+        "resume_policy": classification.resume_policy,
         "count": count,
         "first_seen": previous.get("first_seen") or utc_timestamp(),
         "last_seen": utc_timestamp(),
@@ -330,7 +505,7 @@ def record_incident(
         "run_id": run_id,
         "product_checkpoint": _redact_value(dict(product_checkpoint or {})),
     }
-    _write_json(path, payload)
+    _write_json(state_root, path, payload)
     return {**payload, "path": path.as_posix()}
 
 
@@ -386,6 +561,7 @@ def materialize_controller_repair_task(
         "",
     ]
     _write_json(
+        state_root,
         state_root / "state" / "doctor" / f"{task_id}.json",
         {
             "schema_version": 1,
@@ -395,8 +571,7 @@ def materialize_controller_repair_task(
             "created_at": utc_timestamp(),
         },
     )
-    if path.exists() and path.is_symlink():
-        raise IncidentError(f"refusing symlink repair task: {path}")
+    _ensure_sidecar_path(state_root, path, label="repair task")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
