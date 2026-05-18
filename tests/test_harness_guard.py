@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -121,3 +122,113 @@ def test_workflow_tab_violations_are_reported(tmp_path: Path) -> None:
     violations = module._collect_workflow_tab_violations(tmp_path)
 
     assert violations == (".github/workflows/ci.yml:4",)
+
+
+def test_controller_sanitization_report_allows_only_legacy_historical_path() -> None:
+    module = _load_module()
+
+    assert (
+        module._controller_sanitization_report_failures(
+            {
+                "ok": True,
+                "blockers": [],
+                "controller_surface_mentions": [],
+                "historical_mentions": [{"path": "tests/test_harness_autonomy.py"}],
+                "historical_mentions_truncated": False,
+            }
+        )
+        == ()
+    )
+
+    failures = module._controller_sanitization_report_failures(
+        {
+            "ok": True,
+            "blockers": [],
+            "controller_surface_mentions": [],
+            "historical_mentions": [{"path": "tests/test_harness_incident.py"}],
+            "historical_mentions_truncated": True,
+        }
+    )
+
+    assert any("unexpected historical mention paths" in failure for failure in failures)
+    assert any("truncated" in failure for failure in failures)
+
+
+def test_controller_sanitization_self_test_exports_and_tests_bundle(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    calls: list[tuple[str, tuple[str, ...], str]] = []
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(command, cwd, check=False, **kwargs):
+        command_tuple = tuple(str(part) for part in command)
+        calls.append(("run", command_tuple, Path(cwd).as_posix()))
+        if command_tuple[:4] == (sys.executable, "harness", "controller", "export"):
+            bundle = Path(command_tuple[4])
+            bundle.mkdir(parents=True)
+            report = Path(command_tuple[command_tuple.index("--sanitize-report") + 1])
+            report.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "blockers": [],
+                        "controller_surface_mentions": [],
+                        "historical_mentions": [{"path": "tests/test_harness_autonomy.py"}],
+                        "historical_mentions_truncated": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+        return Result()
+
+    def fake_pytest(command, *, cwd):
+        calls.append(("pytest", tuple(str(part) for part in command), Path(cwd).as_posix()))
+        return 0
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "run_pytest", fake_pytest)
+
+    assert module.run_controller_sanitization_self_test(tmp_path) == 0
+
+    assert calls[0][1][:4] == (sys.executable, "harness", "controller", "export")
+    assert calls[1][1] == ("git", "init", "-b", "main")
+    assert calls[2][0] == "pytest"
+    assert "tests/test_harness_export.py" in calls[2][1]
+    assert calls[2][1][-1] == "-q"
+
+
+def test_main_runs_controller_sanitization_self_test_only_for_pre_push(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_module()
+
+    class Report:
+        lint_command = ("lint",)
+        pytest_command = ("pytest",)
+
+    calls: list[str] = []
+    monkeypatch.setattr(module, "discover_changed_paths", lambda *args, **kwargs: ())
+    monkeypatch.setattr(module, "build_report", lambda *args, **kwargs: Report())
+    monkeypatch.setattr(module, "render_report", lambda *args, **kwargs: "report")
+    monkeypatch.setattr(module, "run_lint", lambda *args, **kwargs: calls.append("lint") or 0)
+    monkeypatch.setattr(module, "run_pytest", lambda *args, **kwargs: calls.append("pytest") or 0)
+    monkeypatch.setattr(
+        module,
+        "run_controller_sanitization_self_test",
+        lambda *args, **kwargs: calls.append("sanitize") or 0,
+    )
+    monkeypatch.setattr(module, "should_fail", lambda *args, **kwargs: False)
+
+    assert module.main(["--mode", "pre-commit", "--root", str(tmp_path), "--run-lint", "--run-pytest"]) == 0
+    assert calls == ["lint", "pytest"]
+
+    calls.clear()
+    assert module.main(["--mode", "pre-push", "--root", str(tmp_path), "--run-lint", "--run-pytest"]) == 0
+    assert calls == ["lint", "pytest", "sanitize"]
