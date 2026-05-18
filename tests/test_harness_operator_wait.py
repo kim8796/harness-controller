@@ -67,7 +67,7 @@ def test_record_json_markdown_and_prompt_are_secret_safe(tmp_path: Path) -> None
         next_action='Set {"client_secret": "json-secret"} in provider UI, not chat.',
         context={
             "chat_id": "123456789",
-            "operator_id": "kimyong",
+            "operator_id": "sample-operator",
             "actor_user_id": "987654321",
             "client_secret": "context-secret",
             "note": "safe visible note",
@@ -88,7 +88,7 @@ def test_record_json_markdown_and_prompt_are_secret_safe(tmp_path: Path) -> None
     assert "json-secret" not in rendered
     assert "context-secret" not in rendered
     assert "123456789" not in rendered
-    assert "kimyong" not in rendered
+    assert "sample-operator" not in rendered
     assert "quoted-operator" not in rendered
     assert "json-operator" not in rendered
     assert "987654321" not in rendered
