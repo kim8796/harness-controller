@@ -1,5 +1,11 @@
 # Harness Changelog
 
+## 1.8.28 - 2026-05-18
+
+- Extracted beginner watch/run orchestration into `scripts/harness_watch.py`.
+- Kept `scripts/harness_cli.py` as the public compatibility facade for parser bindings and existing tests.
+- Added the new watch module and focused tests to starter/controller export coverage and release-check lint paths.
+
 ## 1.8.27 - 2026-05-18
 
 - Added visible bounded smoke controls for `./harness watch`.

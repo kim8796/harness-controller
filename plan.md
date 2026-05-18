@@ -1,116 +1,96 @@
-# Watch Observability And Safe Smoke Plan
+# Watch Code Diet Phase 1 Plan
 
 ## Objective
 
-Keep the beginner UX as `install -> goal -> watch`, while making `watch` safe to test on a real target and easy to inspect while it runs.
+Keep the user-facing UX exactly `install -> goal -> watch`, while reducing `scripts/harness_cli.py` by moving watch/run orchestration into a dedicated module.
+
+This is a code diet PR only. It must not change product behavior, target sidecar layout, publication behavior, Telegram behavior, or goal planning behavior.
 
 ## Decisions
 
-- Expose bounded watch controls in `./harness watch --help`: `--max-cycles`, `--idle-seconds`, `--no-telegram-drain`, and `--stop-on-idle`.
-- Add `./harness watch --status` for target-scoped watch status only; leave the existing `./harness status` behavior unchanged.
-- Persist stable watch status artifacts under controller sidecar only:
-  - `targets/<target-id>/watch/latest.json`
-  - `targets/<target-id>/watch/latest.md`
-- Never write watch status, harness runtime, or env/secrets into the product repo.
-- Keep default `./harness watch` as a long-running loop.
-- Use `./harness watch --max-cycles 1 --no-telegram-drain` for bounded real smoke testing.
-- Keep code diet as a follow-up PR; do not extract `harness_watch.py` in this change.
+- Add `scripts/harness_watch.py`.
+- Move watch status helpers and the beginner run/watch loop into the new module.
+- Keep `scripts/harness_cli.py` as the public CLI entrypoint and compatibility surface.
+- Preserve monkeypatch compatibility for existing tests by keeping CLI-level names such as:
+  - `_write_watch_status`
+  - `_refill_goal_if_idle`
+  - `_run_autopilot_transaction`
+  - `command_run`
+  - `command_watch`
+- Do not touch `scripts/harness_autonomy/core.py` in this PR.
+- Do not change product repos.
+- Do not add new public commands or options.
 
 ## Implementation Plan
 
-1. Watch status artifacts:
-   - Add small helpers in `scripts/harness_cli.py` to build, redact, write, read, and render watch status.
-   - Record target id, active goal id, phase, selected backlog id, run id, transaction status, commit sha, publication branch, PR URL or pending reason, heartbeat time, idle count, processed count, and next action.
-   - Keep payload secret-safe by sanitizing text fields before writing JSON or markdown.
+1. Dependency boundary:
+   - Introduce a small `WatchRuntime` dataclass in `scripts/harness_watch.py`.
+   - Pass CLI helper functions into the new module as callbacks.
+   - Avoid importing `harness_cli` from `harness_watch.py` to prevent circular imports.
+   - Pass `sleep` as a callback so existing tests that monkeypatch `module.time.sleep` still control watch idle behavior.
 
-2. Watch CLI surface:
-   - Make bounded watch options visible in help.
-   - Add `--stop-on-idle`.
-   - Add `--status`.
-   - Keep hidden runner/model/template controls hidden.
+2. Move status helpers:
+   - Move watch status path/read/write/render/redaction helpers to `harness_watch.py`.
+   - Re-export or alias them from `harness_cli.py` so tests and advanced callers keep working.
+   - Preserve symlink rejection and secret redaction behavior from v1.8.27.
 
-3. Watch loop behavior:
-   - Write a startup status before loop work.
-   - Update status at Telegram drain, planner refill, pending publication, selected backlog, transaction failure, transaction publication, maintenance, idle, and exit.
-   - If no active goal and no executable backlog exists, print that explicitly.
-   - If `--stop-on-idle` is set, return 0 instead of sleeping.
-   - If active goal exists but planner cannot queue executable work, record `manual_review_only` or `planner_refill_failed` instead of looking like useful work is running.
-   - Surface GitHub publication readiness before a transaction in watch output/status; do not change product files just to check readiness.
+3. Move orchestration:
+   - Move the body of `command_run` into `harness_watch.command_run(args, runtime)`.
+   - Move the body of `command_watch` into `harness_watch.command_watch(args, runtime)`.
+   - Keep CLI functions as thin wrappers that build the runtime and delegate.
 
-4. Docs/export/tests:
-   - Update beginner docs to show bounded watch smoke and `watch --status`.
-   - Keep `install -> goal -> watch` as the first path.
-   - Update export tests if help/docs assertions need new text.
+4. Export/docs/tests:
+   - Add `scripts/harness_watch.py` to release checks and export allowlists if required.
+   - Add focused tests that confirm `harness_cli.command_run` and `command_watch` delegate through the new module while existing behavior tests continue passing.
+   - Update framework manifest/release note/version only if export/version policy requires it for new source files.
 
 5. Agent/review loop:
-   - Worker A: watch CLI options/status command.
-   - Worker B: watch status artifact writer and redaction.
-   - Worker C: idle/publication blocker behavior.
-   - Worker D: docs/help/export tests.
-   - Reviewer E: watch UX/no-op/manual-review dead-end.
-   - Reviewer F: secret/status safety.
-   - Reviewer G: code diet boundary.
-   - If a reviewer finds a blocker, write a short correction section here, patch, rerun focused tests, and review again.
+   - Explorer A checks existing monkeypatch compatibility.
+   - Explorer B checks export/version/docs implications.
+   - Explorer C checks code diet risk boundaries.
+   - If a blocker is found, add a correction loop section here, patch, rerun focused tests, and re-review.
 
 ## Verification
 
-- `python3 -m pytest tests/test_harness_cli.py tests/test_harness_goal.py tests/test_harness_export.py`
+- `python3 -m pytest tests/test_harness_cli.py tests/test_harness_goal.py tests/test_harness_export.py -q`
+- `python3 scripts/harness_export.py --check`
 - `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
-- Real smoke after tests pass:
-  - `./harness target status @default`
-  - `./harness goal "racegame을 1인 플레이 가능한 완성도 있는 MVP로 만든다" --replace`
-  - `./harness watch --max-cycles 1 --no-telegram-drain`
-  - `./harness watch --status`
-  - `git -C /Users/kimyong/WorkSpace/racegame status --short`
 
 ## Acceptance Criteria
 
-- `watch --help` shows bounded smoke options.
-- `watch --status` works before and after a watch run.
-- `watch --max-cycles 1 --no-telegram-drain` cannot sleep forever after one processed transaction.
-- `watch --stop-on-idle` exits 0 when no goal/backlog/inbox work exists.
-- Status artifacts are created under `targets/<target-id>/watch/`.
-- Status artifacts and stdout do not expose secret-like values.
-- Product repo remains free of controller runtime/state files.
-- Code diet follow-up is documented but not performed in this PR.
+- `scripts/harness_cli.py` is smaller and watch/run orchestration lives in `scripts/harness_watch.py`.
+- Existing watch/run behavior and output remain unchanged.
+- Existing tests that monkeypatch CLI-level helpers still work.
+- Export includes the new module where needed.
+- Product repos remain untouched.
 
 ## Correction Loop 1
 
-Reviewer blockers:
+Issue found during focused pytest:
 
-- Watch status string redaction can miss JSON-shaped quoted secrets and persisted status is printed without re-redaction.
-- Watch status artifacts include absolute controller paths and raw `extra.refill.queue_report_path`, which exposes local layout.
-- Manual-review-only or planner-generated-but-not-executable states can be overwritten by generic idle status.
-- Goal planner exceptions can escape without a clean `planner-refill-failed` watch status.
+- The first mechanical extraction cut through the range between `command_watch` and `command_run`, temporarily removing task interview prompt helpers and task subcommand implementations from `scripts/harness_cli.py`.
 
-Patch plan:
+Patch:
 
-- Add a stronger watch redactor for quoted mappings, assignments, bearer tokens, GitHub tokens, and URL userinfo.
-- Store status artifact paths as sidecar-relative paths and sanitize persisted status again before printing.
-- Remove raw `extra` from watch status; keep only compact status fields.
-- Track planner/refill blocked reasons through the loop and preserve `manual-review-only` or `planner-refill-failed` as the final status under `--stop-on-idle`.
-- Wrap `harness_goal.GoalError` and `harness_task_intake.TaskIntakeError` from refill into clean `HarnessCliError` handling.
-- Add regression tests for JSON-shaped secret redaction, no absolute path leakage, manual-review-only status, and planner failure status.
+- Restored the task command/helper block from the previous committed CLI implementation.
+- Kept only watch/run orchestration and watch status helpers in `scripts/harness_watch.py`.
+- Preserved the old `_refill_goal_if_idle` memory append in the CLI compatibility wrapper.
 
 ## Correction Loop 2
 
-Reviewer blockers:
+Issue found during pre-push guard:
 
-- Export/version docs still reference v1.8.26 and exported README generation omits bounded watch/status guidance.
-- Existing goal tasks with fallback already attempted can still surface as generic planner-empty instead of a clear manual-review/no-executable dead end.
-- Standalone provider tokens such as `sk-proj-*`, `sk-ant-*`, JWTs, and `AIza*` can appear without key names in watch status text.
-- `watch --status` can print stale persisted absolute path fields from older status artifacts.
+- `scripts/harness_watch.py` had no direct related test file, so guard treated the extracted module as untested even though CLI tests covered behavior.
 
-Patch plan:
+Patch:
 
-- Sync `FRAMEWORK_EXPORT.md`, root `START_HERE.md`, docs `START_HERE.md`, generated bundle README text, changelog, manifest, version, and release note to v1.8.27 watch status behavior.
-- Normalize non-executable existing goal tasks to an explicit `manual-review-only` status/reason when no executable backlog exists.
-- Extend watch redaction for standalone provider token shapes and add status stdout checks.
-- Ignore persisted `json_path` and `markdown_path` fields during status rendering; always render sidecar-relative paths.
+- Added `tests/test_harness_watch.py`.
+- Added `tests/test_harness_watch.py` to controller export and release-check paths.
+- Kept starter bundles test-free by adding the new test to `STARTER_CONTROLLER_ONLY_SOURCE_PATHS`.
 
-Result:
+## Result
 
-- Reviewers reported no remaining blocker after correction loop 2.
-- Focused pytest passed: `194 passed`.
-- Pre-push guard passed: `175 passed`.
-- Harness diet budget increase is warning-only; code diet remains the next PR.
+- Focused suite passed: `197 passed`.
+- Export check passed: `python3 scripts/harness_export.py --check`.
+- Pre-push guard passed: `17 passed` in guard-selected tests, lint clean.
+- `scripts/harness_cli.py` is reduced by moving watch/run orchestration into `scripts/harness_watch.py`.

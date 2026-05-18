@@ -63,6 +63,7 @@ STATIC_EXPORT_SOURCE_PATHS = (
     Path("scripts/harness_relay_store.py"),
     Path("scripts/harness_shared.py"),
     Path("scripts/harness_task_intake.py"),
+    Path("scripts/harness_watch.py"),
     Path("scripts/harness_autonomy/__init__.py"),
     Path("scripts/harness_autonomy/core.py"),
     Path("scripts/harness_autonomy/contracts.py"),
@@ -129,6 +130,7 @@ STATIC_EXPORT_SOURCE_PATHS = (
     Path("tests/test_harness_task_intake.py"),
     Path("tests/test_harness_telegram_bridge.py"),
     Path("tests/test_harness_telegram_setup.py"),
+    Path("tests/test_harness_watch.py"),
     Path("tests/test_redis_relay.py"),
 )
 GENERATED_EXPORT_TEMPLATE_PATHS = (
@@ -172,6 +174,7 @@ STARTER_CONTROLLER_ONLY_SOURCE_PATHS = frozenset(
         Path("tests/test_harness_task_intake.py"),
         Path("tests/test_harness_telegram_bridge.py"),
         Path("tests/test_harness_telegram_setup.py"),
+        Path("tests/test_harness_watch.py"),
         Path("tests/test_redis_relay.py"),
     }
 )
