@@ -1,3 +1,26 @@
+# Guard Sanitizer Code Diet Plan
+
+## Correction 1
+
+Reviewer found that CI focused lint/test lists still omitted the extracted sanitizer module and tests. Add `scripts/harness_controller_sanitization.py` and `tests/test_harness_controller_sanitization.py` to CI lint, CI focused pytest, and exported-bundle self-test targets, then rerun focused tests and pre-push guard.
+
+## Objective
+
+Keep the PR #12 pre-push CI parity behavior while moving controller export sanitizer/self-test code out of `scripts/harness_guard.py`.
+
+## Fix
+
+1. Add `scripts/harness_controller_sanitization.py` for controller sanitizer constants, report assertion, and exported-bundle self-test runner.
+2. Keep `run_pytest` and process cleanup in `scripts/harness_guard.py`; pass it into the new runner.
+3. Move sanitizer unit tests into `tests/test_harness_controller_sanitization.py` and leave only guard CLI integration coverage in `tests/test_harness_guard.py`.
+4. Add the new module/test to controller export source lists and manifest references.
+5. Preserve `.githooks/pre-push` and user-facing guard command unchanged.
+
+## Validation Commands
+
+- `python3 -m pytest tests/test_harness_controller_sanitization.py tests/test_harness_guard.py tests/test_harness_export.py -q`
+- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+
 # Pre-Push CI Sanitizer Parity Plan
 
 ## Objective
