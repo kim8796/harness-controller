@@ -12,6 +12,7 @@ Telegram은 하네스 운영 알림과 owner instruction transport다. 실행기
 - external controller mode는 `targets/<id>/operator-inbox/*.md`를 쓴다.
 - local loop/controller가 다음 safe point에서 읽고 처리한다.
 - Telegram 알림은 짧은 한국어 operator cue로 유지한다. 상세 증거는 local report/outbox/dashboard를 본다.
+- Operator-wait 알림은 watch가 만든 내부 wait record의 요약이다. 답장은 `resolved`, `approved`, `rejected`, `stop` 같은 짧은 의사표시로만 보낸다.
 - Product bot, controller, Vercel, Upstash 어디에도 raw secret을 문서, chat, receipt, report로 남기지 않는다.
 
 ## 자동화 경계
@@ -516,6 +517,8 @@ Telegram outbox는 상세 로그를 복사하지 않는다. 아래 정도만 보
 - `repo://...` 또는 report/dashboard 링크
 
 Manual-review dashboard, Cleanup Decision Packet, Operator Dashboard 본문은 Telegram에 통째로 붙이지 않는다.
+
+Operator-wait cue도 같은 원칙을 따른다. Credential이나 provider 설정이 막히면 canonical 기록은 `targets/<target-id>/operator-waits/`와 `watch --status`이고, local cue는 `targets/<target-id>/operator-outbox/`에 남는다. Telegram으로 전달되더라도 notification-only다. Secret 값은 Telegram 답장으로 받지 않으며, 사용자는 `.env` 또는 provider secret UI에서 값을 고친 뒤 controller에서 기존 `./harness watch`를 다시 실행한다. `approved`는 operator intent 기록일 뿐 Harness guard를 우회하지 않는다.
 
 ## Troubleshooting
 

@@ -1231,7 +1231,7 @@ def test_beginner_run_once_autopilot_completes_and_commits_before_push_block(
     assert (product / "next.txt").exists()
 
 
-def test_beginner_run_hard_stops_on_previous_credential_blocked_publication(
+def test_beginner_run_projects_operator_wait_on_previous_credential_blocked_publication(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
     module = _load_module()
@@ -1266,8 +1266,108 @@ def test_beginner_run_hard_stops_on_previous_credential_blocked_publication(
 
     assert module.main(["run", "--once"]) == 2
     output = capsys.readouterr().out
-    assert "publication 중단: GitHub credential/gh CLI가 필요합니다." in output
+    assert "publication operator-wait: GitHub credential/gh CLI가 필요합니다." in output
+    assert "operator-wait" in output
     assert "gh auth status" in output
+    wait_files = tuple((controller / "targets" / "demo" / "operator-waits").glob("*.json"))
+    assert len(wait_files) == 1
+    wait = json.loads(wait_files[0].read_text(encoding="utf-8"))
+    assert wait["wait_class"] == "setup-wait"
+    assert wait["status"] == "waiting"
+    status = json.loads((controller / "targets" / "demo" / "watch" / "latest.json").read_text(encoding="utf-8"))
+    assert status["phase"] == "operator-wait"
+    assert status["operator_wait"]["wait_class"] == "setup-wait"
+    assert status["last_selected_backlog_id"] == "BL-old"
+
+
+def test_watch_operator_wait_timeout_writes_status_without_sleep(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    record = module.harness_controller.TargetRecord(
+        target_id="demo",
+        repo=product,
+        branch="main",
+        state_root=controller / "targets" / "demo",
+        controller_version="test",
+        created_at="",
+        updated_at="",
+        is_default=True,
+    )
+    record.state_root.mkdir(parents=True)
+
+    def fail_sleep(_seconds: int) -> None:
+        raise AssertionError("operator-wait timeout smoke must not sleep")
+
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_controller, "default_target", lambda root: record)
+    monkeypatch.setattr(
+        module.harness_controller,
+        "pending_backlog_product_pushes",
+        lambda **kwargs: [{"run_id": "run-old", "backlog_id": "BL-old", "status": "credential-blocked"}],
+    )
+    monkeypatch.setattr(module, "_github_credentials_ready", lambda **kwargs: False)
+    monkeypatch.setattr(module.harness_watch, "OPERATOR_WAIT_DEFAULT_SECONDS", 0)
+    monkeypatch.setattr(module.time, "sleep", fail_sleep)
+    monkeypatch.setattr(
+        module,
+        "_target_next_auto_backlog_item",
+        lambda _record: pytest.fail("operator-wait timeout must stop before selecting the next task"),
+    )
+
+    assert module.main(["watch", "--no-telegram-drain"]) == 2
+    output = capsys.readouterr().out
+    assert "operator-wait timeout" in output
+    status = json.loads((controller / "targets" / "demo" / "watch" / "latest.json").read_text(encoding="utf-8"))
+    assert status["phase"] == "operator-timeout"
+    assert status["status"] == "blocked"
+    assert status["operator_wait"]["status"] == "timeout"
+
+
+def test_watch_bounded_credential_operator_wait_does_not_poll(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    record = module.harness_controller.TargetRecord(
+        target_id="demo",
+        repo=product,
+        branch="main",
+        state_root=controller / "targets" / "demo",
+        controller_version="test",
+        created_at="",
+        updated_at="",
+        is_default=True,
+    )
+    record.state_root.mkdir(parents=True)
+
+    def fail_sleep(_seconds: int) -> None:
+        raise AssertionError("bounded watch must not poll operator-wait readiness")
+
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_controller, "default_target", lambda root: record)
+    monkeypatch.setattr(
+        module.harness_controller,
+        "pending_backlog_product_pushes",
+        lambda **kwargs: [{"run_id": "run-old", "backlog_id": "BL-old", "status": "credential-blocked"}],
+    )
+    monkeypatch.setattr(module, "_github_credentials_ready", lambda **kwargs: False)
+    monkeypatch.setattr(module.time, "sleep", fail_sleep)
+    monkeypatch.setattr(
+        module,
+        "_target_next_auto_backlog_item",
+        lambda _record: pytest.fail("bounded credential wait must stop before selecting the next task"),
+    )
+
+    assert module.main(["watch", "--max-cycles", "1", "--no-telegram-drain"]) == 2
+    output = capsys.readouterr().out
+    assert "publication operator-wait" in output
+    status = json.loads((controller / "targets" / "demo" / "watch" / "latest.json").read_text(encoding="utf-8"))
+    assert status["phase"] == "operator-wait"
+    assert status["operator_wait"]["status"] == "waiting"
 
 
 def test_beginner_run_continues_after_old_credential_blocker_when_gh_auth_is_ready(

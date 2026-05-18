@@ -1,7 +1,7 @@
 # Harness Start Here
 
 이 파일은 bundle root 에서 열리는 짧은 입구 문서다.
-현재 기준은 `v1.8.30` 이다.
+현재 기준은 `v1.8.31` 이다.
 
 ## 먼저 볼 문서
 
@@ -24,5 +24,7 @@
 ```
 
 한 번만 검증하려면 `./harness watch --max-cycles 1 --no-telegram-drain` 을 쓰고, 상태는 `./harness watch --status` 로 본다.
+
+`watch`가 사용자가 풀 수 있는 외부 blocker를 만나면 새 명령을 요구하지 않고 controller sidecar의 operator-wait 상태로 표시한다. Secret은 chat에 붙이지 말고 `.env` 또는 provider secret UI에서만 고친 뒤 기존 `watch` 흐름을 재개한다.
 
 자세한 설명은 [docs/harness/START_HERE.md](docs/harness/START_HERE.md)를 본다.

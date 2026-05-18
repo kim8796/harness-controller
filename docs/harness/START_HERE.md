@@ -2,7 +2,7 @@
 
 하네스를 처음 쓰는 사람이 보는 입구 문서다. 이 파일은 짧게 유지하고, 자세한 운영/설정/문제 해결은 아래 문서로 연결한다.
 
-현재 기준은 `v1.8.30` 이다. 전체 변경 이력은 [VERSION.md](VERSION.md), export 계약은 [FRAMEWORK_EXPORT.md](FRAMEWORK_EXPORT.md), starter 파일 구조는 [STARTER_SCAFFOLD.md](STARTER_SCAFFOLD.md)를 본다. Telegram/Redis relay drain 은 controller-owned Upstash adapter 를 사용하며 외부 app 내부 RedisStore 를 요구하지 않는다.
+현재 기준은 `v1.8.31` 이다. 전체 변경 이력은 [VERSION.md](VERSION.md), export 계약은 [FRAMEWORK_EXPORT.md](FRAMEWORK_EXPORT.md), starter 파일 구조는 [STARTER_SCAFFOLD.md](STARTER_SCAFFOLD.md)를 본다. Telegram/Redis relay drain 은 controller-owned Upstash adapter 를 사용하며 외부 app 내부 RedisStore 를 요구하지 않는다.
 
 ## 어디부터 보면 되나
 
@@ -86,6 +86,8 @@ Telegram/Redis relay를 새 컴퓨터에서 붙일 때는 controller local runti
 ```
 
 `watch --status`는 `targets/<target-id>/watch/latest.json` 과 `latest.md`를 읽어 active goal, 현재 backlog/run, 마지막 published transaction, commit, PR publication 상태와 다음 조치를 보여준다. 실행할 goal/backlog가 없을 때 바로 종료시키려면 `./harness watch --stop-on-idle --no-telegram-drain`을 쓴다.
+
+사용자가 해결할 수 있는 외부 blocker가 있으면 `watch`는 내부 operator-wait 상태를 `targets/<target-id>/operator-waits/`와 watch status에 남긴다. 예시는 credential setup, provider outage 대기, dirty repo 정리, 명시 승인이 필요한 위험 판단이다. 새 beginner command는 없고, 안내된 조치를 끝낸 뒤 기존 `./harness watch` 또는 bounded smoke를 다시 실행한다. Secret은 답장이나 문서에 쓰지 않고 `.env` 또는 provider secret UI에만 둔다.
 
 5. 단일 작업만 즉시 처리하고 싶을 때만 `do`를 쓴다.
 
@@ -210,6 +212,7 @@ cd /path/to/harness-starter
 - active goal이 있거나 queued auto task가 있다: `./harness goal`, `./harness task list`
 - 필요한 secret은 `.env` 또는 환경변수에만 있다.
 - Telegram/Redis를 쓴다면 `./harness telegram setup --target-id <id> --repo-id <repo> --dry-run`과 [TELEGRAM.md](TELEGRAM.md)의 env가 준비돼 있다.
+- operator-wait가 표시되면 기록의 next action만 수행한다. Approval 답장은 의도를 남길 뿐 guard를 우회하지 않는다.
 
 문제가 생기면 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)를 먼저 본다.
 

@@ -76,6 +76,18 @@ active goal이 있다면 먼저 watch가 planner refill을 하게 둔다.
 
 자세한 설정은 [TELEGRAM.md](TELEGRAM.md)를 따른다.
 
+## `watch`가 operator-wait를 표시한다
+
+Operator-wait는 `watch` 내부의 bounded 대기 상태다. 새 beginner command가 아니라 controller sidecar의 `targets/<target-id>/operator-waits/` 기록, `targets/<target-id>/operator-outbox/` cue, `watch --status` 안내를 보고 외부 blocker를 해결하라는 뜻이다.
+
+확인 순서:
+
+1. `./harness watch --status`에서 blocker, next action, deadline을 본다.
+2. Credential/setup 문제면 secret 값을 chat이나 문서에 붙이지 말고 `.env` 또는 provider secret UI에서만 고친다.
+3. Dirty repo 문제면 product repo의 의도한 변경을 commit/stash/정리한다.
+4. Approval 문제면 의사표시만 남긴다. Approval은 guard 우회가 아니다.
+5. 해결 후 기존 `./harness watch` 또는 `./harness watch --max-cycles 1 --no-telegram-drain`을 다시 실행한다.
+
 ## `selected model is at capacity`
 
 Codex/provider 가용성 문제다. 하네스 cleanup debt나 repo state 문제로 기록하지 않는다. 잠시 후 재시도하거나 explicit model override를 쓴다.
