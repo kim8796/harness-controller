@@ -78,6 +78,7 @@
 - `scripts/harness_watch.py`
 - `scripts/harness_task_cli.py`
 - `scripts/harness_controller.py`
+- `scripts/harness_controller_sanitization.py`
 - `scripts/harness_goal.py`
 - `scripts/harness_publication.py`
 - `scripts/harness_incident.py`
