@@ -248,6 +248,229 @@ def _github_credentials_ready(*, cwd: Path | None = None) -> bool:
     return result.returncode == 0
 
 
+def _watch_status_paths(record: harness_controller.TargetRecord) -> tuple[Path, Path]:
+    watch_dir = record.state_root / "watch"
+    return watch_dir / "latest.json", watch_dir / "latest.md"
+
+
+def _watch_safe_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        safe: dict[str, object] = {}
+        sensitive_key = re.compile(
+            r"(?i)(api[_-]?key|access[_-]?key|client[_-]?secret|refresh[_-]?token|"
+            r"secret|token|password|passwd|credential|private[_-]?key|signing[_-]?key)"
+        )
+        for key, item in value.items():
+            key_text = str(key)
+            safe[key_text] = "<redacted>" if sensitive_key.search(key_text) else _watch_safe_value(item)
+        return safe
+    if isinstance(value, (list, tuple)):
+        return [_watch_safe_value(item) for item in value]
+    if isinstance(value, Path):
+        return value.as_posix()
+    if isinstance(value, str):
+        return _redact_watch_text(value)
+    return value
+
+
+def _redact_watch_text(text: str) -> str:
+    redacted = sanitize_for_outbox(text)
+    secret_key_pattern = (
+        r"[A-Za-z0-9_.-]*(?:api[_-]?key|access[_-]?key|access[_-]?token|client[_-]?secret|"
+        r"refresh[_-]?token|secret|token|password|passwd|credential|private[_-]?key|"
+        r"service[_-]?role[_-]?key|signing[_-]?key)[A-Za-z0-9_.-]*"
+    )
+    secret_url_key_pattern = (
+        r"[A-Za-z0-9_.-]*(?:database|redis|postgres|mongo|supabase|webhook|callback)"
+        r"[A-Za-z0-9_.-]*(?:url|uri|endpoint)?[A-Za-z0-9_.-]*"
+    )
+    patterns = (
+        (rf"({secret_key_pattern}\s*=\s*)([\"']).*?(\2)", r"\1\2<redacted>\3"),
+        (rf"({secret_key_pattern}\s*:\s*)([\"']).*?(\2)", r"\1\2<redacted>\3"),
+        (rf"({secret_url_key_pattern}\s*=\s*)([\"']).*?(\2)", r"\1\2<redacted>\3"),
+        (rf"({secret_url_key_pattern}\s*:\s*(?!//))([\"']).*?(\2)", r"\1\2<redacted>\3"),
+        (rf"({secret_url_key_pattern}\s*=\s*)[^\s\"']+", r"\1<redacted>"),
+        (rf"({secret_url_key_pattern}\s*:\s*(?!//))[^\s\"']+", r"\1<redacted>"),
+        (rf"({secret_key_pattern}\s*=\s*)[^\s\"']+", r"\1<redacted>"),
+        (rf"({secret_key_pattern}\s*:\s*)[^\s\"']+", r"\1<redacted>"),
+        (rf'("{secret_key_pattern}"\s*:\s*")[^"]+(")', r"\1<redacted>\2"),
+        (rf"('{secret_key_pattern}'\s*:\s*')[^']+(')", r"\1<redacted>\2"),
+        (rf'("{secret_url_key_pattern}"\s*:\s*")[^"]+(")', r"\1<redacted>\2"),
+        (rf"('{secret_url_key_pattern}'\s*:\s*')[^']+(')", r"\1<redacted>\2"),
+    )
+    for pattern, replacement in patterns:
+        redacted = re.sub(pattern, replacement, redacted, flags=re.IGNORECASE)
+    redacted = re.sub(r"gh[pousr]_[0-9A-Za-z_]{8,}", "<redacted-github-token>", redacted)
+    redacted = re.sub(r"\bsk-(?:(?:proj|ant|live|test)-)?[A-Za-z0-9._-]{12,}\b", "<redacted-provider-token>", redacted)
+    redacted = re.sub(r"\bAIza[0-9A-Za-z_-]{20,}\b", "<redacted-google-api-key>", redacted)
+    redacted = re.sub(
+        r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b",
+        "<redacted-jwt>",
+        redacted,
+    )
+    redacted = re.sub(r"(authorization:\s*bearer\s+)[^\s\"']+", r"\1<redacted>", redacted, flags=re.IGNORECASE)
+    redacted = re.sub(r"(bearer\s+)[A-Za-z0-9._~+/=-]{12,}", r"\1<redacted>", redacted, flags=re.IGNORECASE)
+    redacted = re.sub(r"([A-Za-z][A-Za-z0-9+.-]*://)[^@\s/]*@", r"\1<redacted>@", redacted)
+    return redacted
+
+
+def _watch_sidecar_relative(record: harness_controller.TargetRecord, path: Path) -> str:
+    try:
+        return path.relative_to(record.state_root).as_posix()
+    except ValueError:
+        return path.name
+
+
+def _watch_active_goal_id(record: harness_controller.TargetRecord) -> str:
+    try:
+        active = harness_goal.load_active_goal(record.state_root)
+    except harness_goal.GoalError:
+        return ""
+    if active is None or active.status != "active":
+        return ""
+    return active.goal_id
+
+
+def _write_watch_status(
+    record: harness_controller.TargetRecord,
+    *,
+    phase: str,
+    status: str = "running",
+    active_goal_id: str | None = None,
+    selected_backlog_id: str = "",
+    run_id: str = "",
+    transaction_status: str = "",
+    commit_sha: str = "",
+    publication_branch: str = "",
+    pr_url: str = "",
+    pending_reason: str = "",
+    next_action: str = "",
+    processed_count: int = 0,
+    idle_count: int = 0,
+) -> Mapping[str, object]:
+    json_path, md_path = _watch_status_paths(record)
+    watch_dir = json_path.parent
+    if watch_dir.exists() and watch_dir.is_symlink():
+        raise HarnessCliError("watch status directory must not be a symlink")
+    watch_dir.mkdir(parents=True, exist_ok=True)
+    if json_path.exists() and json_path.is_symlink():
+        raise HarnessCliError("watch status JSON must not be a symlink")
+    if md_path.exists() and md_path.is_symlink():
+        raise HarnessCliError("watch status markdown must not be a symlink")
+    now = datetime.now().isoformat(timespec="seconds")
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "target_id": record.target_id,
+        "phase": phase,
+        "status": status,
+        "active_goal_id": active_goal_id if active_goal_id is not None else _watch_active_goal_id(record),
+        "selected_backlog_id": selected_backlog_id,
+        "run_id": run_id,
+        "transaction_status": transaction_status,
+        "commit_sha": commit_sha,
+        "publication_branch": publication_branch,
+        "pr_url": pr_url,
+        "pending_reason": pending_reason,
+        "last_heartbeat_at": now,
+        "processed_count": processed_count,
+        "idle_count": idle_count,
+        "next_action": next_action,
+        "json_path": _watch_sidecar_relative(record, json_path),
+        "markdown_path": _watch_sidecar_relative(record, md_path),
+    }
+    safe_payload = _watch_safe_value(payload)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=watch_dir, delete=False) as handle:
+        json.dump(safe_payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.write("\n")
+        temp_json = handle.name
+    os.replace(temp_json, json_path)
+    md_text = _render_watch_status_markdown(safe_payload if isinstance(safe_payload, Mapping) else payload)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=watch_dir, delete=False) as handle:
+        handle.write(md_text)
+        temp_md = handle.name
+    os.replace(temp_md, md_path)
+    return safe_payload if isinstance(safe_payload, Mapping) else payload
+
+
+def _render_watch_status_markdown(payload: Mapping[str, object]) -> str:
+    def value(key: str, default: str = "") -> str:
+        raw = payload.get(key, default)
+        return str(raw) if raw not in (None, "") else default
+
+    lines = [
+        "# Harness Watch Status",
+        "",
+        f"- Target: `{value('target_id', 'unknown')}`",
+        f"- Status: `{value('status', 'unknown')}`",
+        f"- Phase: `{value('phase', 'unknown')}`",
+        f"- Active goal: `{value('active_goal_id', 'none')}`",
+        f"- Backlog: `{value('selected_backlog_id', 'none')}`",
+        f"- Run: `{value('run_id', 'none')}`",
+        f"- Transaction: `{value('transaction_status', 'none')}`",
+        f"- Commit: `{value('commit_sha', 'none')}`",
+        f"- Publication branch: `{value('publication_branch', 'none')}`",
+        f"- PR: `{value('pr_url', 'none')}`",
+        f"- Pending reason: {value('pending_reason', 'none')}",
+        f"- Processed: {value('processed_count', '0')}",
+        f"- Idle count: {value('idle_count', '0')}",
+        f"- Last heartbeat: `{value('last_heartbeat_at', 'unknown')}`",
+        f"- Next action: {value('next_action', 'none')}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _load_watch_status(record: harness_controller.TargetRecord) -> Mapping[str, object] | None:
+    json_path, _ = _watch_status_paths(record)
+    if not json_path.exists():
+        if _watch_status_paths(record)[1].exists():
+            raise HarnessCliError("watch status JSON is missing while markdown exists")
+        return None
+    if json_path.is_symlink():
+        raise HarnessCliError("watch status JSON must not be a symlink")
+    try:
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HarnessCliError(f"watch status를 읽지 못했습니다: {exc}") from exc
+    if not isinstance(payload, Mapping):
+        raise HarnessCliError("watch status JSON 형식이 올바르지 않습니다")
+    safe = _watch_safe_value(payload)
+    if not isinstance(safe, Mapping):
+        raise HarnessCliError("watch status JSON 형식이 올바르지 않습니다")
+    return safe
+
+
+def _print_watch_status(record: harness_controller.TargetRecord) -> int:
+    payload = _load_watch_status(record)
+    if payload is None:
+        print("하네스 watch 상태")
+        print(f"- 대상: `{record.target_id}`")
+        print("- 상태: 아직 watch 실행 기록 없음")
+        print("다음 명령: `./harness watch --max-cycles 1 --no-telegram-drain`")
+        return 0
+    print("하네스 watch 상태")
+    print(f"- 대상: `{payload.get('target_id', record.target_id)}`")
+    print(f"- 상태: `{payload.get('status', 'unknown')}`")
+    print(f"- 단계: `{payload.get('phase', 'unknown')}`")
+    print(f"- active goal: `{payload.get('active_goal_id') or 'none'}`")
+    print(f"- backlog: `{payload.get('selected_backlog_id') or 'none'}`")
+    print(f"- run: `{payload.get('run_id') or 'none'}`")
+    print(f"- transaction: `{payload.get('transaction_status') or 'none'}`")
+    print(f"- commit: `{payload.get('commit_sha') or 'none'}`")
+    print(f"- publication branch: `{payload.get('publication_branch') or 'none'}`")
+    print(f"- PR: `{payload.get('pr_url') or 'none'}`")
+    pending = str(payload.get("pending_reason") or "")
+    if pending:
+        print(f"- pending: {pending}")
+    print(f"- processed: {int(payload.get('processed_count') or 0)}")
+    print(f"- idle: {int(payload.get('idle_count') or 0)}")
+    print(f"- heartbeat: `{payload.get('last_heartbeat_at') or 'unknown'}`")
+    print(f"- next: {payload.get('next_action') or 'none'}")
+    print(f"- json: `{_watch_sidecar_relative(record, _watch_status_paths(record)[0])}`")
+    print(f"- markdown: `{_watch_sidecar_relative(record, _watch_status_paths(record)[1])}`")
+    return 0
+
+
 def _git_checked(args: Sequence[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
     result = _git(args, cwd=cwd)
     if result.returncode != 0:
@@ -1673,6 +1896,21 @@ def command_goal(args: argparse.Namespace) -> int:
 
 
 def command_watch(args: argparse.Namespace) -> int:
+    if getattr(args, "status", False):
+        try:
+            record = harness_controller.default_target(repo_root())
+        except harness_controller.ControllerError as exc:
+            print(f"error: {exc}")
+            return 2
+        if record is None:
+            print("watch 상태 없음: 기본 대상이 없습니다.")
+            print("다음 명령: `./harness install /path/to/product`")
+            return 2
+        try:
+            return _print_watch_status(record)
+        except (HarnessCliError, harness_controller.ControllerError) as exc:
+            print(f"error: {exc}")
+            return 2
     return command_run(
         argparse.Namespace(
             extra=[],
@@ -1680,6 +1918,7 @@ def command_watch(args: argparse.Namespace) -> int:
             watch=True,
             max_cycles=getattr(args, "max_cycles", 0),
             idle_seconds=getattr(args, "idle_seconds", 60),
+            stop_on_idle=bool(getattr(args, "stop_on_idle", False)),
             runner=getattr(args, "runner", "codex"),
             runner_model=getattr(args, "runner_model", None),
             runner_reasoning_effort=getattr(args, "runner_reasoning_effort", "xhigh"),
@@ -1699,24 +1938,38 @@ def _refill_goal_if_idle(record: harness_controller.TargetRecord) -> Mapping[str
         raise HarnessCliError(str(exc)) from exc
     if active is None or active.status != "active":
         return None
-    result = harness_goal.refill_goal_tasks(
-        state_root=record.state_root,
-        target_id=record.target_id,
-        target_repo=record.repo,
-        goal=active,
-    )
+    try:
+        result = harness_goal.refill_goal_tasks(
+            state_root=record.state_root,
+            target_id=record.target_id,
+            target_repo=record.repo,
+            goal=active,
+        )
+    except (harness_goal.GoalError, harness_task_intake.TaskIntakeError) as exc:
+        raise HarnessCliError(f"goal planner refill failed: {exc}") from exc
     if result is None:
         return None
+    queued_count = int(result.queued or 0)
+    manual_review_count = int(result.manual_review or 0)
+    message = result.message
+    if not queued_count and not manual_review_count:
+        try:
+            if harness_goal.load_active_goal(record.state_root) is not None and not _target_executable_backlog_items(record):
+                manual_review_count = len(tuple(result.generated_backlog_ids))
+                if manual_review_count:
+                    message = "goal has generated tasks but none are executable"
+        except (harness_goal.GoalError, harness_loop.LoopError, harness_controller.ControllerError):
+            pass
     payload = {
         "goal_id": result.goal_id,
         "plan_id": result.plan_id,
         "created": result.created,
-        "queued": result.queued,
-        "manual_review": result.manual_review,
+        "queued": queued_count,
+        "manual_review": manual_review_count,
         "completed": result.completed,
         "queue_report_path": result.queue_report_path.as_posix(),
         "generated_backlog_ids": list(result.generated_backlog_ids),
-        "message": result.message,
+        "message": message,
     }
     _append_autopilot_memory(record, "goal-refill", payload)
     return payload
@@ -2517,6 +2770,7 @@ def command_run(args: argparse.Namespace) -> int:
         return 2
     requested_max_cycles = max(0, int(args.max_cycles or 0))
     max_cycles = 1 if args.once else requested_max_cycles
+    stop_on_idle = bool(getattr(args, "stop_on_idle", False))
     if not args.watch and not max_cycles:
         try:
             max_cycles = len(_target_executable_backlog_items(record))
@@ -2527,6 +2781,10 @@ def command_run(args: argparse.Namespace) -> int:
             return 2
     idle_seconds = max(0, int(args.idle_seconds or 0))
     processed = 0
+    idle_count = 0
+    last_idle_phase = ""
+    last_idle_reason = ""
+    last_idle_next_action = ""
     print("하네스 autopilot run 시작")
     print(f"- 대상: `{record.target_id}`")
     if args.watch:
@@ -2540,9 +2798,27 @@ def command_run(args: argparse.Namespace) -> int:
     if getattr(args, "auto_maintenance", False):
         print("- 정리: compact memory + safe sidecar maintenance enabled")
     print(f"- publication 주의: {FINISH_PUSH_CAUTION_KO}")
+    if args.watch:
+        _write_watch_status(
+            record,
+            phase="starting",
+            status="running",
+            processed_count=processed,
+            idle_count=idle_count,
+            next_action="watch loop starting",
+        )
     while True:
         try:
             if getattr(args, "drain_telegram", False):
+                if args.watch:
+                    _write_watch_status(
+                        record,
+                        phase="drain-inputs",
+                        status="running",
+                        processed_count=processed,
+                        idle_count=idle_count,
+                        next_action="draining Telegram relay and operator task inbox",
+                    )
                 relay_result = _drain_telegram_relay_for_record(record)
                 relay_materialized = int(relay_result.get("materialized") or 0)
                 relay_failed = int(relay_result.get("failed") or 0)
@@ -2567,6 +2843,29 @@ def command_run(args: argparse.Namespace) -> int:
                         f"goal={refill.get('goal_id')}, queued={refill.get('queued')}, "
                         f"manual-review={refill.get('manual_review')}"
                     )
+                    _write_watch_status(
+                        record,
+                        phase="planner-refill",
+                        status="running",
+                        active_goal_id=str(refill.get("goal_id") or ""),
+                        processed_count=processed,
+                        idle_count=idle_count,
+                        next_action="select generated backlog",
+                    )
+                elif refill:
+                    last_idle_phase = "manual-review-only" if int(refill.get("manual_review") or 0) else "planner-refill-empty"
+                    last_idle_reason = str(refill.get("message") or "goal planner did not queue executable work")
+                    last_idle_next_action = "inspect generated manual-review tasks or adjust the goal"
+                    _write_watch_status(
+                        record,
+                        phase=last_idle_phase,
+                        status="idle",
+                        active_goal_id=str(refill.get("goal_id") or ""),
+                        pending_reason=last_idle_reason,
+                        processed_count=processed,
+                        idle_count=idle_count,
+                        next_action=last_idle_next_action,
+                    )
             pending_pushes = harness_controller.pending_backlog_product_pushes(
                 controller_root=repo_root(),
                 record=record,
@@ -2580,6 +2879,18 @@ def command_run(args: argparse.Namespace) -> int:
                     print("publication 중단: GitHub credential/gh CLI가 필요합니다.")
                     print(f"- 구현 기록: `{credential_blocker['run_id']}`")
                     print(f"- 작업 항목: `{credential_blocker['backlog_id']}`")
+                    if args.watch:
+                        _write_watch_status(
+                            record,
+                            phase="publication-credential-blocked",
+                            status="blocked",
+                            selected_backlog_id=str(credential_blocker["backlog_id"]),
+                            run_id=str(credential_blocker["run_id"]),
+                            pending_reason="GitHub credential/gh CLI is required for PR publication",
+                            processed_count=processed,
+                            idle_count=idle_count,
+                            next_action="run `gh auth status` and authenticate GitHub CLI",
+                        )
                     diagnosis = _record_autopilot_doctor_diagnosis(
                         record=record,
                         stage="publication-credential-blocked",
@@ -2607,7 +2918,27 @@ def command_run(args: argparse.Namespace) -> int:
                 _append_autopilot_memory(record, "doctor-diagnosis", diagnosis)
                 print(f"- doctor diagnosis: `{diagnosis['path']}`")
                 print("- pending publication은 run/watch 전체를 멈추지 않고 다음 executable 작업을 계속 찾습니다.")
+                if args.watch:
+                    _write_watch_status(
+                        record,
+                        phase="publication-pending",
+                        status="running",
+                        selected_backlog_id=str(latest["backlog_id"]),
+                        run_id=str(latest["run_id"]),
+                        pending_reason="previous product publication is still pending",
+                        processed_count=processed,
+                        idle_count=idle_count,
+                        next_action="continue selecting executable work; retry publication when ready",
+                    )
             if args.watch and max_cycles and processed >= max_cycles:
+                _write_watch_status(
+                    record,
+                    phase="max-cycles-complete",
+                    status="stopped",
+                    processed_count=processed,
+                    idle_count=idle_count,
+                    next_action="inspect `./harness watch --status`",
+                )
                 print(f"watch 종료: max-cycles={max_cycles}, 처리한 backlog {processed}개")
                 return 0
             if not args.watch and processed >= max_cycles:
@@ -2618,10 +2949,20 @@ def command_run(args: argparse.Namespace) -> int:
                     print('다음 작업을 넣으려면 `./harness do "요청"`을 사용하세요.')
                 return 0
             item = _target_next_auto_backlog_item(record)
-        except (harness_loop.LoopError, harness_controller.ControllerError) as exc:
+        except (HarnessCliError, harness_loop.LoopError, harness_controller.ControllerError) as exc:
             incident = _record_autopilot_incident(record=record, stage="discover", error=exc)
             print(f"run 중단: backlog 상태를 읽지 못했습니다. {exc}")
             print(f"- incident: `{incident['signature']}` count={incident['count']}")
+            if args.watch:
+                _write_watch_status(
+                    record,
+                    phase="discover-error",
+                    status="blocked",
+                    pending_reason=str(exc),
+                    processed_count=processed,
+                    idle_count=idle_count,
+                    next_action="inspect incident and target dashboard",
+                )
             return 2
         if item is None:
             if args.watch:
@@ -2632,9 +2973,52 @@ def command_run(args: argparse.Namespace) -> int:
                         f"goal={refill.get('goal_id')}, queued={refill.get('queued')}, "
                         f"manual-review={refill.get('manual_review')}"
                     )
+                    _write_watch_status(
+                        record,
+                        phase="planner-refill",
+                        status="running",
+                        active_goal_id=str(refill.get("goal_id") or ""),
+                        processed_count=processed,
+                        idle_count=idle_count,
+                        next_action="select generated backlog",
+                    )
                     continue
-                print("대기: queued auto backlog가 없습니다.")
-                print('새 목표를 넣으려면 `./harness goal "제품 목표"`을 사용하세요.')
+                idle_count += 1
+                active_goal_id = _watch_active_goal_id(record)
+                if active_goal_id:
+                    print("대기: queued auto backlog가 없습니다.")
+                    next_action = last_idle_next_action or "wait for planner/task intake or inspect `./harness task list`"
+                    phase = last_idle_phase or "idle-no-backlog"
+                    pending_reason = last_idle_reason
+                else:
+                    print("대기: active goal과 queued auto backlog가 없습니다.")
+                    print('새 목표를 넣으려면 `./harness goal "제품 목표"`을 사용하세요.')
+                    next_action = './harness goal "제품 목표"'
+                    phase = "idle-no-goal"
+                    pending_reason = ""
+                _write_watch_status(
+                    record,
+                    phase=phase,
+                    status="idle",
+                    active_goal_id=active_goal_id,
+                    pending_reason=pending_reason,
+                    processed_count=processed,
+                    idle_count=idle_count,
+                    next_action=next_action,
+                )
+                if stop_on_idle:
+                    _write_watch_status(
+                        record,
+                        phase="stopped-idle",
+                        status="stopped",
+                        active_goal_id=active_goal_id,
+                        pending_reason=pending_reason,
+                        processed_count=processed,
+                        idle_count=idle_count,
+                        next_action=next_action,
+                    )
+                    print("watch 종료: stop-on-idle, 실행할 작업이 없습니다.")
+                    return 0
                 print(f"- watch 대기: {idle_seconds}초 후 다시 확인합니다.")
                 time.sleep(idle_seconds)
                 continue
@@ -2648,10 +3032,36 @@ def command_run(args: argparse.Namespace) -> int:
             return 0
         backlog_id = str(getattr(item, "item_id", ""))
         print(f"transaction 시작: `{backlog_id}`")
+        if args.watch:
+            gh_ready = _github_credentials_ready(cwd=record.repo)
+            if not gh_ready:
+                print("- publication readiness: GitHub credential/gh CLI가 준비되지 않아 PR publication이 막힐 수 있습니다.")
+                print("- 다음 조치: `gh auth status`")
+            _write_watch_status(
+                record,
+                phase="transaction-selected",
+                status="running",
+                selected_backlog_id=backlog_id,
+                processed_count=processed,
+                idle_count=idle_count,
+                pending_reason="" if gh_ready else "GitHub credential/gh CLI is not ready for PR publication",
+                next_action="run implementation transaction",
+            )
         incident_blocker = _target_open_incident_blocker(record, backlog_id)
         if incident_blocker:
             print("run 중단: 같은 작업의 반복 실패가 threshold에 도달했습니다.")
             print(f"- incident: `{incident_blocker['signature']}` count={incident_blocker['count']}")
+            if args.watch:
+                _write_watch_status(
+                    record,
+                    phase="incident-blocked",
+                    status="blocked",
+                    selected_backlog_id=backlog_id,
+                    pending_reason=f"repeated incident {incident_blocker['signature']}",
+                    processed_count=processed,
+                    idle_count=idle_count,
+                    next_action="quarantine repeated-failure backlog and continue",
+                )
             if args.watch:
                 blocked_ok, blocked_path = _block_sidecar_backlog_for_incident(
                     record=record,
@@ -2721,6 +3131,17 @@ def command_run(args: argparse.Namespace) -> int:
                     if not blocked_ok:
                         print("- watch 중단: 반복 실패 task 격리에 실패했습니다.")
                         return 2
+            if args.watch:
+                _write_watch_status(
+                    record,
+                    phase="transaction-failed",
+                    status="blocked" if bool(incident_record.get("hard_stop")) else "running",
+                    selected_backlog_id=backlog_id,
+                    pending_reason=str(exc),
+                    processed_count=processed,
+                    idle_count=idle_count,
+                    next_action="continue watch if non-hard-stop; inspect doctor diagnosis",
+                )
             if args.watch and not bool(incident_record.get("hard_stop")):
                 continue
             return 2
@@ -2753,6 +3174,21 @@ def command_run(args: argparse.Namespace) -> int:
             )
             _append_autopilot_memory(record, "doctor-diagnosis", diagnosis)
             print(f"- doctor diagnosis: `{diagnosis['path']}`")
+            if args.watch:
+                _write_watch_status(
+                    record,
+                    phase="publication-blocked",
+                    status="blocked" if outcome.status == "credential-blocked" else "running",
+                    selected_backlog_id=outcome.backlog_id,
+                    run_id=outcome.run_id,
+                    transaction_status=outcome.status,
+                    commit_sha=outcome.commit_sha,
+                    publication_branch=outcome.publication_branch,
+                    pending_reason=outcome.message,
+                    processed_count=processed,
+                    idle_count=idle_count,
+                    next_action="run `gh auth status`" if outcome.status == "credential-blocked" else "watch continues to next executable task",
+                )
             if outcome.status == "credential-blocked":
                 print("publication 중단: GitHub credential/gh CLI가 필요합니다.")
                 return 2
@@ -2772,6 +3208,21 @@ def command_run(args: argparse.Namespace) -> int:
                 "publication_branch": outcome.publication_branch,
             },
         )
+        if args.watch:
+            _write_watch_status(
+                record,
+                phase="transaction-published",
+                status="running",
+                selected_backlog_id=outcome.backlog_id,
+                run_id=outcome.run_id,
+                transaction_status=outcome.status,
+                commit_sha=outcome.commit_sha,
+                publication_branch=outcome.publication_branch,
+                pr_url=outcome.pr_url,
+                processed_count=processed,
+                idle_count=idle_count,
+                next_action="continue watch or inspect PR",
+            )
         if getattr(args, "auto_maintenance", False):
             try:
                 maintenance = _run_target_sidecar_maintenance(record)
@@ -2786,6 +3237,20 @@ def command_run(args: argparse.Namespace) -> int:
         print(f"transaction 완료: `{outcome.backlog_id}`")
         if args.once or (max_cycles and processed >= max_cycles):
             if args.watch:
+                _write_watch_status(
+                    record,
+                    phase="max-cycles-complete",
+                    status="stopped",
+                    selected_backlog_id=outcome.backlog_id,
+                    run_id=outcome.run_id,
+                    transaction_status=outcome.status,
+                    commit_sha=outcome.commit_sha,
+                    publication_branch=outcome.publication_branch,
+                    pr_url=outcome.pr_url,
+                    processed_count=processed,
+                    idle_count=idle_count,
+                    next_action="inspect `./harness watch --status`",
+                )
                 print(f"watch 종료: max-cycles={max_cycles}, 처리한 backlog {processed}개")
             else:
                 print(f"run 종료: 처리한 backlog {processed}개")
@@ -4951,9 +5416,11 @@ def build_parser() -> argparse.ArgumentParser:
     do.set_defaults(func=command_do)
 
     watch = subparsers.add_parser("watch", help="Simple long-running autopilot loop for the default target.")
-    watch.add_argument("--idle-seconds", type=int, default=60, help=argparse.SUPPRESS)
-    watch.add_argument("--max-cycles", type=int, default=0, help=argparse.SUPPRESS)
-    watch.add_argument("--no-telegram-drain", action="store_true", help=argparse.SUPPRESS)
+    watch.add_argument("--max-cycles", type=int, default=0, help="Stop after N completed transactions; 0 means keep watching.")
+    watch.add_argument("--idle-seconds", type=int, default=60, help="Seconds to wait between idle polls.")
+    watch.add_argument("--no-telegram-drain", action="store_true", help="Skip Telegram relay drain for local smoke tests.")
+    watch.add_argument("--stop-on-idle", action="store_true", help="Exit 0 instead of sleeping when no executable work exists.")
+    watch.add_argument("--status", action="store_true", help="Show the latest target watch status and exit.")
     watch.add_argument("--runner", choices=("codex", "claude", "custom"), default="codex", help=argparse.SUPPRESS)
     watch.add_argument("--runner-model", default=None, help=argparse.SUPPRESS)
     watch.add_argument(

@@ -1,5 +1,12 @@
 # Harness Changelog
 
+## 1.8.27 - 2026-05-18
+
+- Added visible bounded smoke controls for `./harness watch`.
+- Added target-scoped `./harness watch --status` backed by controller-owned watch status JSON/markdown.
+- Made no-goal and no-backlog idle states explicit, with `--stop-on-idle` for non-sleeping smoke checks.
+- Kept watch status secret-safe and product-repo-free.
+
 ## 1.8.26 - 2026-05-16
 
 - Added `./harness telegram setup` as a secret-safe setup wizard with hard dry-run override.

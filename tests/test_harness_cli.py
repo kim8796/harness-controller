@@ -75,6 +75,16 @@ def test_argparse_help_and_invalid_command_remain_advanced_reference(capsys) -> 
     assert "--branch" not in output
     assert "--default" not in output
 
+    with pytest.raises(SystemExit) as watch_help:
+        module.main(["watch", "--help"])
+    assert watch_help.value.code == 0
+    output = capsys.readouterr().out
+    assert "--max-cycles" in output
+    assert "--idle-seconds" in output
+    assert "--no-telegram-drain" in output
+    assert "--stop-on-idle" in output
+    assert "--status" in output
+
     with pytest.raises(SystemExit) as invalid:
         module.main(["unknown-command"])
     assert invalid.value.code == 2
@@ -235,6 +245,258 @@ def test_watch_public_flow_refills_and_runs_goal_task(monkeypatch, tmp_path: Pat
     assert "transaction 시작:" in output
     assert "watch 종료: max-cycles=1" in output
     assert calls == ["ran"]
+    status_path = controller / "targets" / "demo" / "watch" / "latest.json"
+    assert status_path.exists()
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["target_id"] == "demo"
+    assert status["phase"] == "max-cycles-complete"
+    assert status["status"] == "stopped"
+    assert status["selected_backlog_id"] == "BL-generated"
+    assert status["run_id"] == "run-1"
+    assert (controller / "targets" / "demo" / "watch" / "latest.md").exists()
+
+    assert module.main(["watch", "--status"]) == 0
+    status_output = capsys.readouterr().out
+    assert "하네스 watch 상태" in status_output
+    assert "BL-generated" in status_output
+    _assert_no_product_harness_pollution(product)
+
+
+def test_watch_status_before_run_and_stop_on_idle(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.27")
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: pytest.fail("stop-on-idle must not sleep"))
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    capsys.readouterr()
+
+    assert module.main(["watch", "--status"]) == 0
+    output = capsys.readouterr().out
+    assert "아직 watch 실행 기록 없음" in output
+
+    assert module.main(["watch", "--stop-on-idle", "--no-telegram-drain"]) == 0
+    output = capsys.readouterr().out
+    assert "active goal과 queued auto backlog가 없습니다" in output
+    assert "watch 종료: stop-on-idle" in output
+    status = json.loads((controller / "targets" / "demo" / "watch" / "latest.json").read_text(encoding="utf-8"))
+    assert status["phase"] == "stopped-idle"
+    assert status["status"] == "stopped"
+    assert status["idle_count"] == 1
+    assert status["next_action"] == './harness goal "제품 목표"'
+    _assert_no_product_harness_pollution(product)
+
+
+def test_watch_status_redacts_secrets_and_rejects_symlink(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.27")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    capsys.readouterr()
+    record = module.harness_controller.default_target(controller)
+    module._write_watch_status(
+        record,
+        phase="test",
+        selected_backlog_id='{"OPENAI_API_KEY": "sk-secret"}',
+        publication_branch="ghp_abcdefgh123456789",
+        pending_reason=(
+            "WEBHOOK_URL=https://user:pass@example.com OPENAI_API_KEY=sk-secret "
+            "{'client_secret': 'hidden'} sk-proj-abcdefghijklmnop sk-ant-abcdefghijklmnop "
+            "sk-legacyabcdefghijklmnop "
+            "eyJabcdefghijkl.eyJmnopqrstuvwxyz.signature123456789 AIzaABCDEFGHIJKLMNOPQRSTUV"
+        ),
+        next_action='{"HARNESS_RELAY_SIGNING_KEY": "super-secret-value"}',
+    )
+    json_text = (controller / "targets" / "demo" / "watch" / "latest.json").read_text(encoding="utf-8")
+    md_text = (controller / "targets" / "demo" / "watch" / "latest.md").read_text(encoding="utf-8")
+    assert "super-secret-value" not in json_text
+    assert "super-secret-value" not in md_text
+    assert "sk-secret" not in json_text
+    assert "sk-secret" not in md_text
+    assert "hidden" not in json_text
+    assert "hidden" not in md_text
+    assert "ghp_abcdefgh123456789" not in json_text
+    assert "ghp_abcdefgh123456789" not in md_text
+    assert "sk-proj-abcdefghijklmnop" not in json_text
+    assert "sk-proj-abcdefghijklmnop" not in md_text
+    assert "sk-ant-abcdefghijklmnop" not in json_text
+    assert "sk-ant-abcdefghijklmnop" not in md_text
+    assert "sk-legacyabcdefghijklmnop" not in json_text
+    assert "sk-legacyabcdefghijklmnop" not in md_text
+    assert "eyJabcdefghijkl.eyJmnopqrstuvwxyz.signature123456789" not in json_text
+    assert "eyJabcdefghijkl.eyJmnopqrstuvwxyz.signature123456789" not in md_text
+    assert "AIzaABCDEFGHIJKLMNOPQRSTUV" not in json_text
+    assert "AIzaABCDEFGHIJKLMNOPQRSTUV" not in md_text
+    assert "user:pass" not in json_text
+    assert "user:pass" not in md_text
+    assert str(controller) not in json_text
+    assert str(product) not in json_text
+    assert '"json_path": "watch/latest.json"' in json_text
+    assert "<redacted>" in json_text or "[redacted" in json_text
+
+    (controller / "targets" / "demo" / "watch" / "latest.json").write_text(
+        json.dumps(
+            {
+                "target_id": "demo",
+                "phase": "x",
+                "pending_reason": '{"OPENAI_API_KEY": "sk-leaked"}',
+                "json_path": str(controller / "targets/demo/watch/latest.json"),
+                "markdown_path": str(controller / "targets/demo/watch/latest.md"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert module.main(["watch", "--status"]) == 0
+    output = capsys.readouterr().out
+    assert "sk-leaked" not in output
+    assert str(controller) not in output
+    assert str(product) not in output
+
+    watch_dir = controller / "targets" / "demo" / "watch"
+    shutil.rmtree(watch_dir)
+    outside = tmp_path / "outside-watch"
+    outside.mkdir()
+    watch_dir.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(module.HarnessCliError):
+        module._write_watch_status(record, phase="blocked")
+    _assert_no_product_harness_pollution(product)
+
+
+def test_watch_preserves_manual_review_only_status(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.27")
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: pytest.fail("stop-on-idle must not sleep"))
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    assert module.main(["goal", "manual-review only smoke"]) == 0
+    record = module.harness_controller.default_target(controller)
+
+    def fake_refill(_record):
+        return {
+            "goal_id": "goal-manual",
+            "plan_id": "plan-manual",
+            "created": 1,
+            "queued": 0,
+            "manual_review": 1,
+            "completed": False,
+            "queue_report_path": str(record.state_root / "goals" / "goal-manual" / "queue-report.json"),
+            "generated_backlog_ids": ["BL-manual"],
+            "message": "manual review tasks only",
+        }
+
+    monkeypatch.setattr(module, "_refill_goal_if_idle", fake_refill)
+
+    assert module.main(["watch", "--stop-on-idle", "--no-telegram-drain"]) == 0
+    output = capsys.readouterr().out
+    assert "watch 종료: stop-on-idle" in output
+    status = json.loads((controller / "targets" / "demo" / "watch" / "latest.json").read_text(encoding="utf-8"))
+    assert status["phase"] == "stopped-idle"
+    assert status["pending_reason"] == "manual review tasks only"
+    assert status["next_action"] == "inspect generated manual-review tasks or adjust the goal"
+    assert "queue_report_path" not in json.dumps(status)
+    _assert_no_product_harness_pollution(product)
+
+
+def test_watch_existing_non_executable_goal_tasks_are_explicit(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.27")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    assert module.main(["goal", "existing generated manual-review smoke"]) == 0
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: pytest.fail("stop-on-idle must not sleep"))
+    record = module.harness_controller.default_target(controller)
+    goal = module.harness_goal.load_active_goal(record.state_root)
+    progress = {
+        "schema_version": 1,
+        "goal_id": goal.goal_id,
+        "target_id": "demo",
+        "tasks": [
+            {
+                "task_key": "manual",
+                "packet_id": "task-manual",
+                "queued_backlog_path": str(record.state_root / "backlog" / "queued" / "BL-manual.md"),
+                "backlog_id": "BL-manual",
+                "fallback_created_at": "2026-05-18T00:00:00Z",
+            }
+        ],
+        "events": [],
+    }
+    goal.progress_json.write_text(json.dumps(progress), encoding="utf-8")
+    goal_payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    goal_payload["linked_backlog_ids"] = ["BL-manual"]
+    goal.goal_json.write_text(json.dumps(goal_payload), encoding="utf-8")
+    backlog = record.state_root / "backlog" / "queued" / "BL-manual.md"
+    backlog.parent.mkdir(parents=True, exist_ok=True)
+    backlog.write_text(
+        "\n".join(
+            [
+                "ID: BL-manual",
+                "Title: Manual task",
+                "Status: queued",
+                "Priority: P1",
+                f"Goal: {goal.goal_id}",
+                "Source: test",
+                "Autonomy-Execute: manual-review",
+                "",
+                "## Summary",
+                "- Manual only.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert module.main(["watch", "--stop-on-idle", "--no-telegram-drain"]) == 0
+    output = capsys.readouterr().out
+    assert "watch 종료: stop-on-idle" in output
+    status = json.loads((controller / "targets" / "demo" / "watch" / "latest.json").read_text(encoding="utf-8"))
+    assert status["pending_reason"] == "goal has generated tasks but none are executable"
+    assert status["next_action"] == "inspect generated manual-review tasks or adjust the goal"
+    _assert_no_product_harness_pollution(product)
+
+
+def test_watch_refill_failure_writes_blocked_status(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.27")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    assert module.main(["goal", "planner failure smoke"]) == 0
+
+    def fail_refill(*_args, **_kwargs):
+        raise module.harness_goal.GoalError("planner exploded OPENAI_API_KEY=sk-secret")
+
+    monkeypatch.setattr(module.harness_goal, "refill_goal_tasks", fail_refill)
+
+    assert module.main(["watch", "--stop-on-idle", "--no-telegram-drain"]) == 2
+    output = capsys.readouterr().out
+    assert "run 중단" in output
+    status = json.loads((controller / "targets" / "demo" / "watch" / "latest.json").read_text(encoding="utf-8"))
+    assert status["phase"] == "discover-error"
+    assert status["status"] == "blocked"
+    assert "sk-secret" not in json.dumps(status)
     _assert_no_product_harness_pollution(product)
 
 

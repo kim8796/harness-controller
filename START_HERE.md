@@ -1,7 +1,7 @@
 # Harness Start Here
 
 이 파일은 bundle root 에서 열리는 짧은 입구 문서다.
-현재 기준은 `v1.8.26` 이다.
+현재 기준은 `v1.8.27` 이다.
 
 ## 먼저 볼 문서
 
@@ -22,5 +22,7 @@
 ./harness goal "이 프로젝트를 완성도 있는 MVP로 만든다"
 ./harness watch
 ```
+
+한 번만 검증하려면 `./harness watch --max-cycles 1 --no-telegram-drain` 을 쓰고, 상태는 `./harness watch --status` 로 본다.
 
 자세한 설명은 [docs/harness/START_HERE.md](docs/harness/START_HERE.md)를 본다.
