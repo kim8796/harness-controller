@@ -1,3 +1,33 @@
+# CI Sanitizer Fixture Fix Plan
+
+## Objective
+
+Fix the GitHub Actions failure on PR #10/main without weakening the controller export sanitizer. The failing code path is the CI controller sanitization self-test, not the harness runtime or focused pytest suite.
+
+## Root Cause
+
+New redaction tests used a local personal identifier as sample fixture data. The controller export sanitizer correctly reported those strings as historical mentions in:
+
+- `tests/test_harness_incident.py`
+- `tests/test_harness_operator_wait.py`
+
+The CI workflow only allowlists legacy historical mentions in `tests/test_harness_autonomy.py`, so the sanitizer assertion failed after the tests themselves had already passed.
+
+## Fix
+
+1. Replace the local personal identifier test fixtures with neutral sample identifiers.
+2. Keep the CI sanitizer allowlist unchanged.
+3. Re-run the focused tests that cover incident/operator-wait redaction.
+4. Re-run the controller export sanitization path that failed in CI.
+5. Run the pre-push guard before publishing.
+
+## Validation Commands
+
+- `python3 -m pytest tests/test_harness_incident.py tests/test_harness_operator_wait.py tests/test_harness_export.py -q`
+- `python3 scripts/harness_export.py --check --controller-bundle /tmp/harness-controller-source-check`
+- `python3 harness controller export /tmp/harness-controller-controller-bundle --sanitize-report /tmp/controller-sanitization-report.json`
+- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+
 # Operator-Wait + Superpowers Policy Absorption Plan
 
 ## Objective

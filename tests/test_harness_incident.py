@@ -253,7 +253,7 @@ def test_record_external_incident_redacts_telegram_token_and_private_ids(tmp_pat
         target_id="demo",
         stage="telegram",
         error=(
-            f"telegram failed token={token} operator_id=kimyong "
+            f"telegram failed token={token} operator_id=sample-operator "
             'operator_id="quoted-operator" {"operator_id": "json-operator"} '
             f"https://api.telegram.org/bot{token}/sendMessage "
             "admin_chat_id=123456789 operator_user_ids=987654321"
@@ -264,7 +264,7 @@ def test_record_external_incident_redacts_telegram_token_and_private_ids(tmp_pat
 
     raw = record.incident_path.read_text(encoding="utf-8")
     assert token not in raw
-    assert "kimyong" not in raw
+    assert "sample-operator" not in raw
     assert "quoted-operator" not in raw
     assert "json-operator" not in raw
     assert "123456789" not in raw
