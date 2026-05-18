@@ -1,5 +1,11 @@
 # Harness Changelog
 
+## 1.8.29 - 2026-05-18
+
+- Extracted beginner `do` and `task` command orchestration into `scripts/harness_task_cli.py`.
+- Kept existing `./harness do`, `./harness task ...`, and compatibility wrappers stable.
+- Added focused tests and export coverage for the extracted task CLI module.
+
 ## 1.8.28 - 2026-05-18
 
 - Extracted beginner watch/run orchestration into `scripts/harness_watch.py`.
