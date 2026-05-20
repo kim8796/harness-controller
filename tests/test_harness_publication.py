@@ -26,6 +26,20 @@ class FakeRunner:
         )
 
 
+class OrderedRunner:
+    def __init__(self, responses: dict[tuple[str, ...], list[subprocess.CompletedProcess[str]]]) -> None:
+        self.responses = {key: list(value) for key, value in responses.items()}
+        self.calls: list[tuple[tuple[str, ...], Path]] = []
+
+    def __call__(self, command: Sequence[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+        key = tuple(command)
+        self.calls.append((key, cwd))
+        queue = self.responses.get(key)
+        if queue:
+            return queue.pop(0)
+        return subprocess.CompletedProcess(list(command), 127, "", f"unexpected command: {' '.join(command)}")
+
+
 def _ok(command: Sequence[str], stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(list(command), 0, stdout, stderr)
 
@@ -244,3 +258,236 @@ def test_publish_task_branch_receipt_reuses_successful_existing_receipt(tmp_path
     assert second.receipt["reused"] is True
     assert second.receipt["publication_state"] == "published"
     assert second_runner.calls == []
+
+
+def _pr_payload(
+    *,
+    branch: str,
+    base: str = "main",
+    state: str = "OPEN",
+    mergeable: str = "MERGEABLE",
+    is_draft: bool = False,
+    commits: list[str] | None = None,
+    checks: list[dict[str, str]] | None = None,
+    merge_commit: str = "",
+) -> str:
+    return json.dumps(
+        {
+            "url": "https://github.com/acme/product/pull/7",
+            "state": state,
+            "mergeable": mergeable,
+            "isDraft": is_draft,
+            "headRefName": branch,
+            "baseRefName": base,
+            "commits": [{"oid": oid} for oid in (commits or [])],
+            "statusCheckRollup": checks or [],
+            "mergeCommit": {"oid": merge_commit} if merge_commit else None,
+        }
+    )
+
+
+def test_merge_task_pr_allows_absent_checks_and_syncs_local_base(tmp_path: Path) -> None:
+    module = _load_module()
+    repo = tmp_path / "product"
+    state_root = tmp_path / "targets" / "demo"
+    repo.mkdir(parents=True)
+    branch = module.task_branch_name("demo", "BL-demo")
+    pr_url = "https://github.com/acme/product/pull/7"
+    view_command = module._pr_view_command(pr_url)
+    merge_command = ("gh", "pr", "merge", pr_url, "--merge", "--delete-branch")
+    runner = OrderedRunner(
+        {
+            view_command: [
+                _ok(view_command, stdout=_pr_payload(branch=branch, commits=["abc1234"])),
+                _ok(
+                    view_command,
+                    stdout=_pr_payload(branch=branch, state="MERGED", commits=["abc1234"], merge_commit="merge1234"),
+                ),
+            ],
+            merge_command: [_ok(merge_command)],
+            ("git", "rev-parse", "HEAD"): [
+                _ok(("git", "rev-parse", "HEAD"), stdout="abc1234\n"),
+                _ok(("git", "rev-parse", "HEAD"), stdout="merge1234\n"),
+            ],
+            ("git", "rev-parse", "--abbrev-ref", "HEAD"): [
+                _ok(("git", "rev-parse", "--abbrev-ref", "HEAD"), stdout="main\n")
+            ],
+            ("git", "fetch", "--prune", "origin"): [_ok(("git", "fetch", "--prune", "origin"))],
+            ("git", "merge", "--ff-only", "origin/main"): [_ok(("git", "merge", "--ff-only", "origin/main"))],
+        }
+    )
+
+    result = module.merge_task_pr(
+        controller_root=tmp_path,
+        state_root=state_root,
+        target_repo=repo,
+        target_id="demo",
+        goal_id="goal-1",
+        backlog_id="BL-demo",
+        run_id="run-1",
+        commit_sha="abc1234",
+        branch=branch,
+        base_branch="main",
+        pr_url=pr_url,
+        runner=runner,
+    )
+
+    payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
+    assert result.status == "merged"
+    assert result.merge_commit_sha == "merge1234"
+    assert result.local_head_before == "abc1234"
+    assert result.local_head_after == "merge1234"
+    assert payload["operation"] == "backlog-product-pr-merge"
+    assert payload["checks_state"] == "absent"
+    assert payload["applied"] is True
+    assert [call[0] for call in runner.calls] == [
+        view_command,
+        merge_command,
+        view_command,
+        ("git", "rev-parse", "HEAD"),
+        ("git", "rev-parse", "--abbrev-ref", "HEAD"),
+        ("git", "fetch", "--prune", "origin"),
+        ("git", "merge", "--ff-only", "origin/main"),
+        ("git", "rev-parse", "HEAD"),
+    ]
+
+
+def test_merge_task_pr_blocks_pending_checks_without_merging(tmp_path: Path) -> None:
+    module = _load_module()
+    repo = tmp_path / "product"
+    state_root = tmp_path / "targets" / "demo"
+    repo.mkdir(parents=True)
+    branch = module.task_branch_name("demo", "BL-demo")
+    pr_url = "https://github.com/acme/product/pull/7"
+    view_command = module._pr_view_command(pr_url)
+    runner = FakeRunner(
+        {
+            view_command: _ok(
+                view_command,
+                stdout=_pr_payload(
+                    branch=branch,
+                    commits=["abc1234"],
+                    checks=[{"name": "ci", "status": "IN_PROGRESS", "conclusion": ""}],
+                ),
+            )
+        }
+    )
+
+    result = module.merge_task_pr(
+        controller_root=tmp_path,
+        state_root=state_root,
+        target_repo=repo,
+        target_id="demo",
+        goal_id="goal-1",
+        backlog_id="BL-demo",
+        run_id="run-1",
+        commit_sha="abc1234",
+        branch=branch,
+        base_branch="main",
+        pr_url=pr_url,
+        runner=runner,
+    )
+
+    payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
+    assert result.status == "merge-pending"
+    assert payload["checks_state"] == "pending"
+    assert ("gh", "pr", "merge", pr_url, "--merge", "--delete-branch") not in [call[0] for call in runner.calls]
+
+
+def test_merge_task_pr_rejects_wrong_head_branch(tmp_path: Path) -> None:
+    module = _load_module()
+    repo = tmp_path / "product"
+    state_root = tmp_path / "targets" / "demo"
+    repo.mkdir(parents=True)
+    branch = module.task_branch_name("demo", "BL-demo")
+    pr_url = "https://github.com/acme/product/pull/7"
+    view_command = module._pr_view_command(pr_url)
+    runner = FakeRunner(
+        {
+            view_command: _ok(
+                view_command,
+                stdout=_pr_payload(branch="somebody/feature", commits=["abc1234"]),
+            )
+        }
+    )
+
+    result = module.merge_task_pr(
+        controller_root=tmp_path,
+        state_root=state_root,
+        target_repo=repo,
+        target_id="demo",
+        goal_id="goal-1",
+        backlog_id="BL-demo",
+        run_id="run-1",
+        commit_sha="abc1234",
+        branch=branch,
+        base_branch="main",
+        pr_url=pr_url,
+        runner=runner,
+    )
+
+    assert result.status == "merge-blocked"
+    assert "head branch" in result.message
+
+
+def test_pending_task_pr_merges_skips_successful_merge_receipts(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    first = state_root / "runs" / "harness" / "external-20260520-000001-backlog-pr-BL-one"
+    second = state_root / "runs" / "harness" / "external-20260520-000002-backlog-pr-BL-two"
+    merged = state_root / "runs" / "harness" / "external-20260520-000003-backlog-pr-merge-BL-one"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    merged.mkdir(parents=True)
+    (first / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "operation": "backlog-product-pr",
+                "applied": True,
+                "target_id": "demo",
+                "goal_id": "goal-1",
+                "backlog_id": "BL-one",
+                "implementation_run_id": "run-one",
+                "product_commit_sha": "abc1",
+                "branch": "harness/demo/BL-one",
+                "base": "main",
+                "pr_url": "https://github.com/acme/product/pull/1",
+                "created_at": "2026-05-20T00:00:01Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (second / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "operation": "backlog-product-pr",
+                "applied": True,
+                "target_id": "demo",
+                "goal_id": "goal-1",
+                "backlog_id": "BL-two",
+                "implementation_run_id": "run-two",
+                "product_commit_sha": "abc2",
+                "branch": "harness/demo/BL-two",
+                "base": "main",
+                "pr_url": "https://github.com/acme/product/pull/2",
+                "created_at": "2026-05-20T00:00:02Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (merged / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "operation": "backlog-product-pr-merge",
+                "applied": True,
+                "status": "merged",
+                "target_id": "demo",
+                "implementation_run_id": "run-one",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    pending = module.pending_task_pr_merges(state_root=state_root, target_id="demo")
+
+    assert [item["backlog_id"] for item in pending] == ["BL-two"]

@@ -296,6 +296,81 @@ def test_command_run_projects_operator_wait_for_operator_actionable_transaction(
     assert status["operator_wait"]["backlog_id"] == "BL-dirty"
 
 
+def test_command_run_retries_pending_pr_merge_before_selecting_new_task(tmp_path, capsys) -> None:
+    module = _load_module()
+    module.ERROR_CLASS = RuntimeError
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    state_root = controller / "targets" / "demo"
+    state_root.mkdir(parents=True)
+    product.mkdir(parents=True)
+    record = SimpleNamespace(target_id="demo", repo=product, branch="main", state_root=state_root)
+    merge_results = [
+        {
+            "status": "merge-pending",
+            "branch": "harness/demo/BL-old",
+            "base": "main",
+            "pr_url": "https://github.com/acme/demo/pull/7",
+            "message": "GitHub checks are still pending",
+            "merge_commit_sha": "",
+            "backlog_id": "BL-old",
+            "run_id": "run-old",
+            "commit_sha": "abc1234",
+        }
+    ]
+    runtime = SimpleNamespace(
+        repo_root=lambda: controller,
+        default_target=lambda _root: record,
+        target_executable_backlog_items=lambda _record: [],
+        target_next_auto_backlog_item=lambda _record: (_ for _ in ()).throw(AssertionError("should not select task")),
+        drain_telegram_relay_for_record=lambda _record: {},
+        process_operator_task_inbox=lambda _record: {},
+        refill_goal_if_idle=lambda _record: None,
+        pending_backlog_product_pushes=lambda **_kwargs: [],
+        auto_merge_pending_publications=lambda **_kwargs: merge_results,
+        github_credentials_ready=lambda **_kwargs: True,
+        write_watch_status=module.write_watch_status,
+        watch_active_goal_id=lambda _record: "goal-demo",
+        print_watch_status=lambda _record: 0,
+        record_autopilot_doctor_diagnosis=lambda **_kwargs: {"path": "doctor.json"},
+        append_autopilot_memory=lambda *_args, **_kwargs: state_root / "memory.json",
+        record_autopilot_incident=lambda **_kwargs: {"signature": "sig", "count": 1},
+        target_open_incident_blocker=lambda _record, _backlog_id: None,
+        block_sidecar_backlog_for_incident=lambda **_kwargs: (True, "blocked.md"),
+        run_autopilot_transaction=lambda _record, _args: None,
+        print_beginner_transaction_error=lambda exc: print(f"transaction error: {exc}"),
+        backlog_goal_id=lambda _record, _backlog_id: "goal-demo",
+        run_target_sidecar_maintenance=lambda _record: {},
+        incident_record_incident=lambda **_kwargs: {},
+        materialize_controller_repair_task=lambda **_kwargs: state_root / "repair.md",
+        sleep=lambda _seconds: None,
+        finish_push_caution="push caution",
+        autopilot_incident_threshold=2,
+        controller_errors=(RuntimeError,),
+        discover_errors=(RuntimeError,),
+        transaction_errors=(RuntimeError,),
+    )
+    args = argparse.Namespace(
+        extra=[],
+        once=False,
+        watch=True,
+        max_cycles=0,
+        idle_seconds=1,
+        stop_on_idle=True,
+        drain_telegram=False,
+        auto_maintenance=False,
+        auto_merge=True,
+    )
+
+    assert module.command_run(args, runtime) == 0
+    output = capsys.readouterr().out
+    assert "pending PR auto-merge" in output
+    status = json.loads((state_root / "watch" / "latest.json").read_text(encoding="utf-8"))
+    assert status["phase"] == "merge-pending"
+    assert status["transaction_status"] == "merge-pending"
+    assert status["pr_url"] == "https://github.com/acme/demo/pull/7"
+
+
 def test_command_watch_delegates_to_command_run_for_long_running_mode() -> None:
     module = _load_module()
     calls: list[argparse.Namespace] = []
@@ -309,6 +384,7 @@ def test_command_watch_delegates_to_command_run_for_long_running_mode() -> None:
         runner_reasoning_effort="xhigh",
         command_template=None,
         no_telegram_drain=True,
+        no_auto_merge=False,
     )
 
     result = module.command_watch(args, object(), command_run=lambda namespace: calls.append(namespace) or 0)
@@ -322,3 +398,26 @@ def test_command_watch_delegates_to_command_run_for_long_running_mode() -> None:
     assert delegated.stop_on_idle is True
     assert delegated.drain_telegram is False
     assert delegated.auto_maintenance is True
+    assert delegated.auto_merge is True
+
+
+def test_command_watch_can_disable_auto_merge() -> None:
+    module = _load_module()
+    calls: list[argparse.Namespace] = []
+    args = argparse.Namespace(
+        status=False,
+        max_cycles=1,
+        idle_seconds=1,
+        stop_on_idle=False,
+        runner="codex",
+        runner_model=None,
+        runner_reasoning_effort="xhigh",
+        command_template=None,
+        no_telegram_drain=True,
+        no_auto_merge=True,
+    )
+
+    result = module.command_watch(args, object(), command_run=lambda namespace: calls.append(namespace) or 0)
+
+    assert result == 0
+    assert calls[0].auto_merge is False

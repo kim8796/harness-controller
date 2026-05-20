@@ -1,3 +1,33 @@
+# Watch Auto-Merge + Superpowers Policy Absorption Plan
+
+## Objective
+
+Extend `./harness watch` so harness-created task PRs are automatically merged when they are safe and ready, while keeping the beginner UX as `install -> goal -> watch`. Absorb the useful Superpowers completion principles as internal evidence/finish policy, not as a runtime plugin dependency.
+
+## Implementation Plan
+
+1. Add publication auto-merge support:
+   - Add a helper in `scripts/harness_publication.py` that verifies a harness PR belongs to the expected target/backlog branch, includes the expected commit, is open/non-draft/mergeable, has successful or absent GitHub checks, merges with `gh pr merge --merge --delete-branch`, and syncs local product `main` using fetch + ff-only merge.
+   - Write secret-redacted merge receipts with operation `backlog-product-pr-merge`.
+   - Add pending published-PR discovery so the next watch run can merge older unmerged harness PRs before selecting new work.
+
+2. Wire watch to auto-merge by default:
+   - Add hidden advanced `./harness watch --no-auto-merge`.
+   - After PR create/update, attempt auto-merge before marking the transaction fully complete.
+   - Before selecting a new backlog, retry pending PR merges in oldest-first order.
+   - Reflect `merged`, `merge-pending`, `merge-blocked`, `merge-credential-blocked`, and `merge-sync-blocked` in watch status without claiming success until merge + local sync evidence exists.
+
+3. Preserve safety and UX:
+   - Keep automatic merge limited to `harness/<target>/<backlog>` branches and matching receipts.
+   - Treat GitHub auth/permission failures as operator-wait candidates.
+   - Do not clean worktrees or consume Superpowers as a plugin/runtime dependency.
+   - Keep beginner docs focused on `./harness watch`; document only the `--no-auto-merge` escape hatch.
+
+## Validation Commands
+
+- `python3 -m pytest tests/test_harness_publication.py tests/test_harness_watch.py tests/test_harness_cli.py tests/test_harness_export.py`
+- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+
 # Guard Sanitizer Code Diet Plan
 
 ## Correction 1

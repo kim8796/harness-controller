@@ -39,7 +39,7 @@ python3 -m venv .venv
 ./harness watch
 ```
 
-이 흐름에서 `goal`은 단일 작업이 아니라 제품 완성 목표다. `watch`가 목표를 roadmap/task로 쪼개고, 가능한 task를 queue하고, 구현/검증/commit/task branch push/PR publication receipt를 반복한다. product repo에는 `HARNESS.md`, `harness`, `scripts/harness*`, `runs/**`, `reports/**`, `backlog/**`, `targets/**`, `.env*`, controller `.venv`를 쓰지 않는다. 하네스 상태와 실행 증거는 controller의 `targets/<id>/` 아래에 남는다.
+이 흐름에서 `goal`은 단일 작업이 아니라 제품 완성 목표다. `watch`가 목표를 roadmap/task로 쪼개고, 가능한 task를 queue하고, 구현/검증/commit/task branch push/PR publication/조건부 merge/local sync를 반복한다. product repo에는 `HARNESS.md`, `harness`, `scripts/harness*`, `runs/**`, `reports/**`, `backlog/**`, `targets/**`, `.env*`, controller `.venv`를 쓰지 않는다. 하네스 상태와 실행 증거는 controller의 `targets/<id>/` 아래에 남는다.
 
 ## 5분 시작
 
@@ -76,7 +76,7 @@ Telegram/Redis relay를 새 컴퓨터에서 붙일 때는 controller local runti
 ./harness watch
 ```
 
-`watch`는 Telegram relay, `/harness task` inbox, active goal, queued auto backlog를 계속 감시한다. backlog가 비면 goal planner가 다시 task를 만들고, 실패한 task는 격리하거나 repair/correction 입력으로 남긴 뒤 가능한 다음 작업을 계속 찾는다. 성공하면 complete, product commit, task branch push, PR publication receipt까지 진행한다.
+`watch`는 Telegram relay, `/harness task` inbox, active goal, queued auto backlog를 계속 감시한다. backlog가 비면 goal planner가 다시 task를 만들고, 실패한 task는 격리하거나 repair/correction 입력으로 남긴 뒤 가능한 다음 작업을 계속 찾는다. 성공하면 complete, product commit, task branch push, PR publication receipt, 준비된 PR 자동 머지, product base branch fast-forward sync까지 진행한다.
 
 실제 프로젝트에서 한 번만 안전하게 검증하려면 아래처럼 bounded smoke로 시작한다.
 
@@ -85,7 +85,7 @@ Telegram/Redis relay를 새 컴퓨터에서 붙일 때는 controller local runti
 ./harness watch --status
 ```
 
-`watch --status`는 `targets/<target-id>/watch/latest.json` 과 `latest.md`를 읽어 active goal, 현재 backlog/run, 마지막 published transaction, commit, PR publication 상태와 다음 조치를 보여준다. 실행할 goal/backlog가 없을 때 바로 종료시키려면 `./harness watch --stop-on-idle --no-telegram-drain`을 쓴다.
+`watch --status`는 `targets/<target-id>/watch/latest.json` 과 `latest.md`를 읽어 active goal, 현재 backlog/run, 마지막 transaction, commit, PR publication/merge 상태와 다음 조치를 보여준다. 실행할 goal/backlog가 없을 때 바로 종료시키려면 `./harness watch --stop-on-idle --no-telegram-drain`을 쓴다. 고급 복구에서 PR만 만들고 머지는 멈추고 싶을 때만 `./harness watch --no-auto-merge`를 쓴다.
 
 사용자가 해결할 수 있는 외부 blocker가 있으면 `watch`는 내부 operator-wait 상태를 `targets/<target-id>/operator-waits/`와 watch status에 남긴다. 예시는 credential setup, provider outage 대기, dirty repo 정리, 명시 승인이 필요한 위험 판단이다. 새 beginner command는 없고, 안내된 조치를 끝낸 뒤 기존 `./harness watch` 또는 bounded smoke를 다시 실행한다. Secret은 답장이나 문서에 쓰지 않고 `.env` 또는 provider secret UI에만 둔다.
 

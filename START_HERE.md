@@ -25,6 +25,8 @@
 
 한 번만 검증하려면 `./harness watch --max-cycles 1 --no-telegram-drain` 을 쓰고, 상태는 `./harness watch --status` 로 본다.
 
+`watch`는 하네스가 만든 task PR이 준비되면 기본적으로 merge commit 방식으로 자동 머지하고 product repo의 base branch를 fast-forward로 맞춘다. 고급 복구에서 PR 생성까지만 멈추고 싶을 때만 `./harness watch --no-auto-merge`를 쓴다.
+
 `watch`가 사용자가 풀 수 있는 외부 blocker를 만나면 새 명령을 요구하지 않고 controller sidecar의 operator-wait 상태로 표시한다. Secret은 chat에 붙이지 말고 `.env` 또는 provider secret UI에서만 고친 뒤 기존 `watch` 흐름을 재개한다.
 
 자세한 설명은 [docs/harness/START_HERE.md](docs/harness/START_HERE.md)를 본다.
