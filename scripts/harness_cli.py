@@ -168,6 +168,7 @@ class AutopilotTransaction:
     message: str
     pr_url: str = ""
     publication_branch: str = ""
+    merge_commit_sha: str = ""
 
 
 NaturalTaskOutcome = harness_task_cli.NaturalTaskOutcome
@@ -1533,7 +1534,51 @@ def _watch_runtime() -> harness_watch.WatchRuntime:
         controller_errors=(harness_controller.ControllerError,),
         discover_errors=(HarnessCliError, harness_loop.LoopError, harness_controller.ControllerError),
         transaction_errors=(HarnessCliError, harness_controller.ControllerError, harness_loop.LoopError),
+        auto_merge_pending_publications=_auto_merge_pending_publications,
     )
+
+
+def _auto_merge_pending_publications(
+    *,
+    record: harness_controller.TargetRecord,
+    max_items: int | None = None,
+) -> Sequence[Mapping[str, object]]:
+    items = harness_publication.pending_task_pr_merges(state_root=record.state_root, target_id=record.target_id)
+    if max_items is not None:
+        items = items[:max(0, max_items)]
+    results: list[Mapping[str, object]] = []
+    for item in items:
+        result = harness_publication.merge_task_pr(
+            controller_root=repo_root(),
+            state_root=record.state_root,
+            target_repo=record.repo,
+            target_id=record.target_id,
+            goal_id=str(item.get("goal_id") or ""),
+            backlog_id=str(item.get("backlog_id") or ""),
+            run_id=str(item.get("run_id") or ""),
+            commit_sha=str(item.get("commit_sha") or ""),
+            branch=str(item.get("branch") or ""),
+            base_branch=str(item.get("base") or record.branch),
+            pr_url=str(item.get("pr_url") or ""),
+        )
+        results.append(
+            {
+                "status": result.status,
+                "branch": result.branch,
+                "base": result.base,
+                "pr_url": result.pr_url,
+                "receipt_path": result.receipt_path.as_posix(),
+                "evidence_path": result.evidence_path.as_posix(),
+                "message": result.message,
+                "merge_commit_sha": result.merge_commit_sha,
+                "local_head_before": result.local_head_before,
+                "local_head_after": result.local_head_after,
+                "backlog_id": str(item.get("backlog_id") or ""),
+                "run_id": str(item.get("run_id") or ""),
+                "commit_sha": str(item.get("commit_sha") or ""),
+            }
+        )
+    return results
 
 
 def command_watch(args: argparse.Namespace) -> int:
@@ -1904,6 +1949,46 @@ def _run_autopilot_transaction(record: harness_controller.TargetRecord, args: ar
     if publication.status in {"created", "updated"}:
         print(f"- product branch: `{publication.branch}`")
         print(f"- product PR: `{publication.pr_url}`")
+        if bool(getattr(args, "auto_merge", False)):
+            merge = harness_publication.merge_task_pr(
+                controller_root=repo_root(),
+                state_root=record.state_root,
+                target_repo=record.repo,
+                target_id=record.target_id,
+                goal_id=goal_id,
+                backlog_id=backlog_id,
+                run_id=run_id,
+                commit_sha=commit_sha,
+                branch=publication.branch,
+                base_branch=record.branch,
+                pr_url=publication.pr_url,
+            )
+            print(f"- product PR merge: `{merge.status}`")
+            if merge.merge_commit_sha:
+                print(f"- merge commit: `{merge.merge_commit_sha}`")
+            if merge.status == "merged":
+                return AutopilotTransaction(
+                    "merged",
+                    run_id,
+                    backlog_id,
+                    commit_sha,
+                    merge.local_head_after or merge.merge_commit_sha or commit_sha,
+                    "merged",
+                    pr_url=publication.pr_url,
+                    publication_branch=publication.branch,
+                    merge_commit_sha=merge.merge_commit_sha,
+                )
+            return AutopilotTransaction(
+                merge.status,
+                run_id,
+                backlog_id,
+                commit_sha,
+                "",
+                merge.message,
+                pr_url=publication.pr_url,
+                publication_branch=publication.branch,
+                merge_commit_sha=merge.merge_commit_sha,
+            )
         return AutopilotTransaction(
             "published",
             run_id,
@@ -4107,6 +4192,7 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument("--no-telegram-drain", action="store_true", help="Skip Telegram relay drain for local smoke tests.")
     watch.add_argument("--stop-on-idle", action="store_true", help="Exit 0 instead of sleeping when no executable work exists.")
     watch.add_argument("--status", action="store_true", help="Show the latest target watch status and exit.")
+    watch.add_argument("--no-auto-merge", action="store_true", help=argparse.SUPPRESS)
     watch.add_argument("--runner", choices=("codex", "claude", "custom"), default="codex", help=argparse.SUPPRESS)
     watch.add_argument("--runner-model", default=None, help=argparse.SUPPRESS)
     watch.add_argument(

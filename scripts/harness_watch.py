@@ -62,6 +62,7 @@ class WatchRuntime:
     controller_errors: tuple[type[BaseException], ...]
     discover_errors: tuple[type[BaseException], ...]
     transaction_errors: tuple[type[BaseException], ...]
+    auto_merge_pending_publications: Callable[..., Sequence[Mapping[str, object]]] | None = None
 
 
 def github_credentials_ready(*, cwd: Path | None = None, root: Path | None = None) -> bool:
@@ -749,6 +750,7 @@ def write_watch_status(
     commit_sha: str = "",
     publication_branch: str = "",
     pr_url: str = "",
+    merge_commit_sha: str = "",
     pending_reason: str = "",
     next_action: str = "",
     processed_count: int = 0,
@@ -779,6 +781,7 @@ def write_watch_status(
         "commit_sha": commit_sha,
         "publication_branch": publication_branch,
         "pr_url": pr_url,
+        "merge_commit_sha": merge_commit_sha,
         "pending_reason": pending_reason,
         "last_heartbeat_at": now,
         "processed_count": processed_count,
@@ -842,6 +845,7 @@ def render_watch_status_markdown(payload: Mapping[str, object]) -> str:
         f"- Commit: `{value('commit_sha', 'none')}`",
         f"- Publication branch: `{value('publication_branch', 'none')}`",
         f"- PR: `{value('pr_url', 'none')}`",
+        f"- Merge commit: `{value('merge_commit_sha', 'none')}`",
         f"- Pending reason: {value('pending_reason', 'none')}",
         f"- Processed: {value('processed_count', '0')}",
         f"- Idle count: {value('idle_count', '0')}",
@@ -949,6 +953,7 @@ def print_watch_status(record: harness_controller.TargetRecord) -> int:
     print(f"- commit: `{payload.get('commit_sha') or 'none'}`")
     print(f"- publication branch: `{payload.get('publication_branch') or 'none'}`")
     print(f"- PR: `{payload.get('pr_url') or 'none'}`")
+    print(f"- merge commit: `{payload.get('merge_commit_sha') or 'none'}`")
     operator_wait = payload.get("operator_wait")
     wait_payload = operator_wait if isinstance(operator_wait, Mapping) else {}
     wait_id = str(wait_payload.get("id") or payload.get("operator_wait_id") or "")
@@ -1083,6 +1088,7 @@ def command_watch(
             command_template=getattr(args, "command_template", None),
             drain_telegram=not bool(getattr(args, "no_telegram_drain", False)),
             auto_maintenance=True,
+            auto_merge=not bool(getattr(args, "no_auto_merge", False)),
         )
     )
 
@@ -1209,6 +1215,63 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                         idle_count=idle_count,
                         next_action=last_idle_next_action,
                     )
+            if args.watch and bool(getattr(args, "auto_merge", False)) and runtime.auto_merge_pending_publications:
+                merge_results = list(runtime.auto_merge_pending_publications(record=record))
+                if merge_results:
+                    blocked_merge = next(
+                        (item for item in merge_results if str(item.get("status") or "") != "merged"),
+                        None,
+                    )
+                    for result in merge_results:
+                        print(
+                            "- pending PR auto-merge: "
+                            f"{result.get('status')} `{result.get('backlog_id')}` {result.get('pr_url')}"
+                        )
+                    latest_merge = blocked_merge or merge_results[-1]
+                    runtime.write_watch_status(
+                        record,
+                        phase=str(latest_merge.get("status") or "pending-pr-merge"),
+                        status="running" if blocked_merge is None else "blocked",
+                        selected_backlog_id=str(latest_merge.get("backlog_id") or ""),
+                        run_id=str(latest_merge.get("run_id") or ""),
+                        transaction_status=str(latest_merge.get("status") or ""),
+                        commit_sha=str(latest_merge.get("commit_sha") or ""),
+                        publication_branch=str(latest_merge.get("branch") or ""),
+                        pr_url=str(latest_merge.get("pr_url") or ""),
+                        merge_commit_sha=str(latest_merge.get("merge_commit_sha") or ""),
+                        pending_reason=str(latest_merge.get("message") or ""),
+                        processed_count=processed,
+                        idle_count=idle_count,
+                        next_action=(
+                            "select next executable task"
+                            if blocked_merge is None
+                            else "resolve PR merge blocker or rerun watch to retry"
+                        ),
+                    )
+                    if blocked_merge is not None:
+                        if str(blocked_merge.get("status") or "") == "merge-credential-blocked":
+                            credential_blocker = {
+                                "backlog_id": str(blocked_merge.get("backlog_id") or ""),
+                                "run_id": str(blocked_merge.get("run_id") or ""),
+                                "status": str(blocked_merge.get("status") or ""),
+                                "commit_sha": str(blocked_merge.get("commit_sha") or ""),
+                                "publication_branch": str(blocked_merge.get("branch") or ""),
+                                "message": str(blocked_merge.get("message") or ""),
+                            }
+                            if not _handle_publication_credential_wait(
+                                runtime,
+                                record,
+                                args,
+                                blocker=credential_blocker,
+                                processed_count=processed,
+                                idle_count=idle_count,
+                            ):
+                                return 2
+                        if stop_on_idle or (max_cycles and processed >= max_cycles):
+                            print("watch 종료: pending PR merge가 아직 완료되지 않았습니다.")
+                            return 0
+                        runtime.sleep(idle_seconds)
+                        continue
             pending_pushes = runtime.pending_backlog_product_pushes(
                 controller_root=runtime.repo_root(),
                 record=record,
@@ -1498,35 +1561,51 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
             return 2
 
         processed += 1
-        if outcome.status in {"push-blocked", "publication-blocked", "credential-blocked"}:
+        if outcome.status in {
+            "push-blocked",
+            "publication-blocked",
+            "credential-blocked",
+            "merge-pending",
+            "merge-blocked",
+            "merge-credential-blocked",
+            "merge-sync-blocked",
+        }:
             runtime.record_autopilot_incident(
                 record=record,
-                stage="publication",
+                stage="publication" if not outcome.status.startswith("merge-") else "merge",
                 error=outcome.message,
                 backlog_id=outcome.backlog_id,
                 run_id=outcome.run_id,
             )
             runtime.append_autopilot_memory(
                 record,
-                "publication-credential-blocked" if outcome.status == "credential-blocked" else "publication-blocked",
+                (
+                    "publication-credential-blocked"
+                    if outcome.status in {"credential-blocked", "merge-credential-blocked"}
+                    else "publication-blocked"
+                    if not outcome.status.startswith("merge-")
+                    else outcome.status
+                ),
                 {
                     "backlog_id": outcome.backlog_id,
                     "run_id": outcome.run_id,
                     "product_commit_sha": outcome.commit_sha,
                     "publication_branch": outcome.publication_branch,
+                    "pr_url": outcome.pr_url,
+                    "merge_commit_sha": getattr(outcome, "merge_commit_sha", ""),
                     "reason": sanitize_for_outbox(outcome.message)[:240],
                 },
             )
             diagnosis = runtime.record_autopilot_doctor_diagnosis(
                 record=record,
-                stage="publication-blocked",
+                stage="publication-blocked" if not outcome.status.startswith("merge-") else outcome.status,
                 error=outcome.message,
                 backlog_id=outcome.backlog_id,
                 run_id=outcome.run_id,
             )
             runtime.append_autopilot_memory(record, "doctor-diagnosis", diagnosis)
             print(f"- doctor diagnosis: `{diagnosis['path']}`")
-            if outcome.status == "credential-blocked":
+            if outcome.status in {"credential-blocked", "merge-credential-blocked"}:
                 credential_blocker = {
                     "backlog_id": outcome.backlog_id,
                     "run_id": outcome.run_id,
@@ -1549,26 +1628,49 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
             if args.watch:
                 runtime.write_watch_status(
                     record,
-                    phase="publication-blocked",
+                    phase=outcome.status,
                     status="running",
                     selected_backlog_id=outcome.backlog_id,
                     run_id=outcome.run_id,
                     transaction_status=outcome.status,
                     commit_sha=outcome.commit_sha,
                     publication_branch=outcome.publication_branch,
+                    pr_url=outcome.pr_url,
+                    merge_commit_sha=getattr(outcome, "merge_commit_sha", ""),
                     pending_reason=outcome.message,
                     processed_count=processed,
                     idle_count=idle_count,
-                    next_action="watch continues to next executable task",
+                    next_action="watch will retry PR merge before selecting more work"
+                    if outcome.status.startswith("merge-")
+                    else "watch continues to next executable task",
                 )
-            print("publication 보류: commit은 완료됐고 watch는 다음 작업을 계속 찾습니다.")
+            print("merge 보류: commit/PR은 완료됐고 watch가 다음 실행에서 merge를 재시도합니다." if outcome.status.startswith("merge-") else "publication 보류: commit은 완료됐고 watch는 다음 작업을 계속 찾습니다.")
             if not args.watch:
                 return 2
+            if args.once or (max_cycles and processed >= max_cycles):
+                runtime.write_watch_status(
+                    record,
+                    phase=outcome.status,
+                    status="stopped",
+                    selected_backlog_id=outcome.backlog_id,
+                    run_id=outcome.run_id,
+                    transaction_status=outcome.status,
+                    commit_sha=outcome.commit_sha,
+                    publication_branch=outcome.publication_branch,
+                    pr_url=outcome.pr_url,
+                    merge_commit_sha=getattr(outcome, "merge_commit_sha", ""),
+                    pending_reason=outcome.message,
+                    processed_count=processed,
+                    idle_count=idle_count,
+                    next_action="rerun `./harness watch` to retry pending PR merge",
+                )
+                print(f"watch 종료: max-cycles={max_cycles}, 처리한 backlog {processed}개")
+                return 0
             continue
 
         runtime.append_autopilot_memory(
             record,
-            "transaction-published",
+            "transaction-merged" if outcome.status == "merged" else "transaction-published",
             {
                 "backlog_id": outcome.backlog_id,
                 "run_id": outcome.run_id,
@@ -1576,6 +1678,7 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                 "product_push_sha": outcome.push_sha,
                 "pr_url": outcome.pr_url,
                 "publication_branch": outcome.publication_branch,
+                "merge_commit_sha": getattr(outcome, "merge_commit_sha", ""),
             },
         )
         if args.watch:
@@ -1589,6 +1692,7 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                 commit_sha=outcome.commit_sha,
                 publication_branch=outcome.publication_branch,
                 pr_url=outcome.pr_url,
+                merge_commit_sha=getattr(outcome, "merge_commit_sha", ""),
                 processed_count=processed,
                 idle_count=idle_count,
                 next_action="continue watch or inspect PR",
@@ -1617,6 +1721,7 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                     commit_sha=outcome.commit_sha,
                     publication_branch=outcome.publication_branch,
                     pr_url=outcome.pr_url,
+                    merge_commit_sha=getattr(outcome, "merge_commit_sha", ""),
                     processed_count=processed,
                     idle_count=idle_count,
                     next_action="inspect `./harness watch --status`",

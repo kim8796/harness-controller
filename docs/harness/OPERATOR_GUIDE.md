@@ -56,8 +56,10 @@
 - product local commit
 - task branch push
 - task PR create/update receipt
+- safe PR auto-merge
+- product base branch fast-forward sync
 
-publication이 막히면 해당 task의 receipt/incident로 격리하고 `watch`는 가능한 다음 task를 계속 찾는다. 하위 실행을 직접 확인하려면:
+publication이나 merge가 막히면 해당 task의 receipt/incident로 격리하고 `watch`는 blocker를 status에 남긴다. GitHub checks가 없으면 local validation evidence를 근거로 merge를 허용하고, checks가 있으면 성공/neutral/skipped 상태일 때만 merge한다. 하위 실행을 직접 확인하려면:
 
 ```bash
 ./harness run --once
