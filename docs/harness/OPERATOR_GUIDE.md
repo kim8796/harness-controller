@@ -143,6 +143,14 @@ cleanup은 product repo 파일을 삭제하지 않는다.
 
 target archive는 `targets/<target-id>/` 안의 inactive draft, 처리된 operator inbox task/note, report cache 같은 controller-owned artifact만 다룬다. apply는 저장된 plan의 exact path만 처리하고 receipt를 남긴다. product repo 파일, `.env`, target registry, backlog source of truth, transition/commit/push receipt는 archive 대상이 아니다.
 
+더 이상 관리하지 않을 target은 controller 등록을 제거한다.
+
+```bash
+./harness target remove my-app
+```
+
+`target remove`는 cleanup이 아니라 unregister다. 기본 동작은 `targets/my-app`을 `targets/_archived/my-app-<timestamp>`로 옮기는 reversible archive이며, product repo 파일은 삭제하거나 수정하지 않는다. active goal, queued backlog, operator-wait는 `--force`로 우회할 수 있지만, run lock은 항상 먼저 정리해야 한다.
+
 target을 건드리지 않는 read-only/no-op smoke:
 
 ```bash

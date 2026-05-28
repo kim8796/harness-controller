@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -541,6 +542,21 @@ def test_target_id_casefold_duplicate_fails_closed(tmp_path: Path) -> None:
         )
 
 
+def test_remove_target_rejects_archive_root_symlink(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    outside = tmp_path / "outside"
+    controller.mkdir()
+    outside.mkdir()
+    _init_git_repo(product)
+    module.add_target(controller_root=controller, target_id="demo", repo=product, branch="main", controller_version="1.8.0")
+    (controller / "targets" / "_archived").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(module.ControllerError, match="archive root must not be a symlink"):
+        module.remove_target(controller, "demo")
+
+
 def test_target_registry_invariant_collisions_fail_closed(tmp_path: Path) -> None:
     module = _load_module()
     controller = tmp_path / "controller"
@@ -710,6 +726,36 @@ def test_target_run_lock_rejects_locks_file(tmp_path: Path) -> None:
         assert "sidecar path must be a directory" in str(exc)
     else:
         raise AssertionError("regular-file locks path was accepted")
+
+
+def test_remove_target_compatibility_wrapper_delegates(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_git_repo(product)
+    module.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.0",
+    )
+
+    result = module.remove_target(
+        controller_root=controller,
+        target_id="demo",
+        dry_run=True,
+        now=datetime(2026, 5, 21, 1, 2, 3),
+    )
+
+    assert result.blocked is False
+    assert result.applied is False
+    assert result.action == "would-archive"
+    assert result.operation == "target-remove"
+    assert (controller / "targets" / "demo").exists()
+    assert not (controller / "targets" / "_archived").exists()
+    assert [record.target_id for record in module.list_targets(controller)] == ["demo"]
 
 
 def test_add_target_creates_controller_sidecar_without_product_state(tmp_path: Path) -> None:

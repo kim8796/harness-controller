@@ -132,6 +132,9 @@ def test_export_bundle_copies_sources_and_writes_readme(tmp_path: Path) -> None:
     assert (bundle_dir / "scripts" / "harness_controller.py").read_text(encoding="utf-8") == (
         "scripts/harness_controller.py\n"
     )
+    assert (bundle_dir / "scripts" / "harness_target_remove.py").read_text(encoding="utf-8") == (
+        "scripts/harness_target_remove.py\n"
+    )
     assert (bundle_dir / "scripts" / "harness_starter_install.py").read_text(encoding="utf-8") == (
         "scripts/harness_starter_install.py\n"
     )
@@ -441,10 +444,13 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "scripts" / "harness_task_intake.py").exists()
     assert (bundle / "scripts" / "harness_goal.py").exists()
     assert (bundle / "scripts" / "harness_publication.py").exists()
+    assert (bundle / "scripts" / "harness_target_remove.py").exists()
     assert (bundle / "scripts" / "harness_incident.py").exists()
     assert (bundle / "tests" / "test_harness_task_intake.py").exists()
     assert (bundle / "tests" / "test_harness_goal.py").exists()
     assert (bundle / "tests" / "test_harness_publication.py").exists()
+    assert (bundle / "tests" / "test_harness_target_archive.py").exists()
+    assert (bundle / "tests" / "test_harness_target_remove.py").exists()
     assert (bundle / "tests" / "test_harness_incident.py").exists()
     assert (bundle / "scripts" / "harness_operator_wait.py").exists()
     assert (bundle / "tests" / "test_harness_operator_wait.py").exists()

@@ -131,7 +131,29 @@ def load_active_goal(state_root: Path) -> GoalRecord | None:
     goal_json = state_root / GOALS_DIR / goal_id / "goal.json"
     if not goal_json.exists():
         raise GoalError(f"active goal is missing goal.json: {goal_id}")
-    return _record_from_payload(state_root, _read_json(goal_json))
+    record = _record_from_payload(state_root, _read_json(goal_json))
+    if record.status != "active":
+        return None
+    return record
+
+
+def _active_pointer_goal_id(state_root: Path) -> str:
+    active = _active_path(state_root)
+    if not active.exists():
+        return ""
+    try:
+        pointer = _read_json(active)
+    except GoalError:
+        return ""
+    return str(pointer.get("goal_id") or "").strip()
+
+
+def _clear_active_pointer_if_matches(state_root: Path, goal_id: str) -> None:
+    active = _active_path(state_root)
+    if not active.exists() or active.is_symlink():
+        return
+    if _active_pointer_goal_id(state_root) == goal_id:
+        active.unlink()
 
 
 def create_goal(
@@ -233,8 +255,7 @@ def list_goals(state_root: Path) -> tuple[dict[str, object], ...]:
     root = state_root / GOALS_DIR
     if not root.exists():
         return tuple()
-    active = load_active_goal(state_root)
-    active_id = active.goal_id if active is not None else ""
+    active_id = _active_pointer_goal_id(state_root)
     summaries: list[dict[str, object]] = []
     for goal_dir in sorted(path for path in root.iterdir() if path.is_dir() and not path.is_symlink()):
         goal_json = goal_dir / "goal.json"
@@ -242,7 +263,7 @@ def list_goals(state_root: Path) -> tuple[dict[str, object], ...]:
             continue
         payload = _read_json(goal_json)
         status = str(payload.get("status") or "")
-        if str(payload.get("goal_id") or "") == active_id:
+        if str(payload.get("goal_id") or "") == active_id and status == "active":
             status = "active"
         summaries.append(
             {
@@ -264,11 +285,7 @@ def archive_goal(*, state_root: Path, goal_id: str, status: str = "archived", re
     if reason:
         payload["archive_reason"] = reason
     _write_json(goal_json, payload)
-    active = load_active_goal(state_root)
-    if active and active.goal_id == goal_id:
-        active_path = _active_path(state_root)
-        if active_path.exists():
-            active_path.unlink()
+    _clear_active_pointer_if_matches(state_root, goal_id)
 
 
 def _write_goal_markdown(path: Path, payload: Mapping[str, object], *, queued: int, completed: int) -> None:
@@ -655,6 +672,7 @@ def refresh_progress(*, state_root: Path, goal: GoalRecord) -> dict[str, object]
     goal_payload["linked_backlog_ids"] = linked
     if linked and completed >= len(linked):
         goal_payload["status"] = "completed"
+        _clear_active_pointer_if_matches(state_root, goal.goal_id)
     goal_payload["updated_at"] = utc_timestamp()
     _write_json(goal.goal_json, goal_payload)
     _write_goal_markdown(goal.goal_dir / "goal.md", goal_payload, queued=len(linked) - completed, completed=completed)
@@ -691,6 +709,23 @@ def refill_goal_tasks(
     if active is None or active.status != "active":
         return None
     progress = refresh_progress(state_root=state_root, goal=active)
+    refreshed_goal = _record_from_payload(state_root, _read_json(active.goal_json))
+    if refreshed_goal.status != "active":
+        return GoalRefillResult(
+            goal_id=active.goal_id,
+            plan_id=str(_read_json(active.goal_json).get("active_plan_id") or ""),
+            created=0,
+            queued=0,
+            manual_review=0,
+            completed=refreshed_goal.status == "completed",
+            queue_report_path=active.goal_dir / "queue-report.json",
+            generated_backlog_ids=tuple(
+                str(item.get("backlog_id"))
+                for item in progress.get("tasks") or []
+                if isinstance(item, Mapping) and str(item.get("backlog_id") or "")
+            ),
+            message=f"goal {refreshed_goal.status}",
+        )
     existing_tasks = [item for item in progress.get("tasks") or [] if isinstance(item, Mapping)]
     if existing_tasks:
         executable = _goal_executable_progress_tasks(state_root, existing_tasks)

@@ -166,7 +166,88 @@ def test_target_archive_help_documents_audit_plan_apply(capsys) -> None:
     assert "plan" in output
     assert "apply" in output
     assert "targets/<target-id>" in output
-    assert "product repo" in output
+    assert "product repo" in output.lower()
+
+
+def test_target_remove_help_documents_unregister_vs_archive(capsys) -> None:
+    module = _load_module()
+
+    with pytest.raises(SystemExit) as target_remove_help:
+        module.main(["target", "remove", "--help"])
+
+    assert target_remove_help.value.code == 0
+    output = capsys.readouterr().out
+    assert "--dry-run" in output
+    assert "--force" in output
+    assert "--json" in output
+    assert "targets/_archived" in output
+    assert "different from target archive" in output
+    assert "product repo" in output.lower()
+
+
+def test_target_remove_cli_archives_sidecar_without_product_pollution(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    module.harness_controller.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.0",
+    )
+    module.harness_controller.set_default_target(controller, "demo")
+
+    assert module.main(["target", "remove", "demo", "--dry-run", "--json"]) == 0
+    dry_run = json.loads(capsys.readouterr().out)
+
+    assert dry_run["status"] == "dry-run"
+    assert dry_run["removed"] is False
+    assert dry_run["product_repo_untouched"] is True
+    assert (controller / "targets" / "demo" / "target.json").exists()
+    assert not (controller / "targets" / "_archived").exists()
+
+    assert module.main(["target", "remove", "demo"]) == 0
+    output = capsys.readouterr().out
+
+    archives = tuple((controller / "targets" / "_archived").glob("demo-*"))
+    assert len(archives) == 1
+    assert "product repo 변경: no" in output
+    assert "default selector: cleared" in output
+    assert not (controller / "targets" / "demo").exists()
+    assert (archives[0] / "target.json").exists()
+    assert (archives[0] / "target-remove-receipt.json").exists()
+    assert tuple((controller / "targets" / "_archive-receipts").glob("target-remove-demo-*.json"))
+    assert not (product / "targets").exists()
+    assert (product / "README.md").exists()
+
+
+def test_target_remove_dry_run_force_preserves_force_next_command(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    module.harness_controller.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.0",
+    )
+    state_root = controller / "targets" / "demo"
+    (state_root / "backlog" / "queued" / "BL-demo.md").write_text("Status: queued\n", encoding="utf-8")
+
+    assert module.main(["target", "remove", "demo", "--dry-run", "--force"]) == 0
+    output = capsys.readouterr().out
+
+    assert "다음 명령: `./harness target remove demo --force`" in output
+    assert "제거 차단" not in output
+    assert (state_root / "target.json").exists()
 
 
 def test_goal_command_creates_and_reports_active_goal(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -3100,6 +3181,150 @@ def test_target_archive_audit_plan_apply_stays_inside_sidecar(monkeypatch, tmp_p
     assert not old_draft.exists()
     assert not inbox_note.exists()
     assert not old_report.exists()
+
+
+def test_target_remove_dry_run_renders_concise_human_output(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    record = module.harness_controller.add_target(
+        controller_root=controller,
+        target_id="app",
+        repo=product,
+        branch="main",
+        controller_version="test",
+        force=True,
+    )
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def fake_remove_target(*args: object, **kwargs: object) -> dict[str, object]:
+        calls.append((args, kwargs))
+        return {
+            "schema_version": 1,
+            "operation": "target-remove",
+            "ok": True,
+            "status": "dry-run",
+            "target_id": record.target_id,
+            "state_root_before": record.state_root,
+            "product_repo": product,
+            "archive_path": controller / "targets" / "_archived" / "app-20260521-120000",
+            "dry_run": kwargs["dry_run"],
+            "force": kwargs["force"],
+            "default_cleared": True,
+            "receipt_path": controller / "targets" / "_archive-receipts" / "target-remove-app-20260521-120000.json",
+            "product_repo_untouched": True,
+        }
+
+    monkeypatch.setattr(module.harness_controller, "remove_target", fake_remove_target, raising=False)
+
+    assert module.main(["target", "remove", "app", "--dry-run", "--force"]) == 0
+    output = capsys.readouterr().out
+
+    assert calls
+    assert calls[0][0] == (controller, "app")
+    assert calls[0][1]["dry_run"] is True
+    assert calls[0][1]["force"] is True
+    assert "external target remove dry-run" in output
+    assert "- 대상: `app`" in output
+    assert "- sidecar archive:" in output
+    assert "- default selector: cleared" in output
+    assert "- product repo 변경: no" in output
+    assert "- product repo: redacted (untouched)" in output
+    assert product.as_posix() not in output
+    assert "archive는 sidecar 정리, remove는 target 등록 해제/archive" in output
+    assert (controller / "targets" / "app").exists()
+    assert product.exists()
+    _assert_no_product_harness_pollution(product)
+
+
+def test_target_remove_json_outputs_backend_payload(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    module.harness_controller.add_target(
+        controller_root=controller,
+        target_id="app",
+        repo=product,
+        branch="main",
+        controller_version="test",
+        force=True,
+    )
+
+    monkeypatch.setattr(
+        module.harness_controller,
+        "remove_target",
+        lambda *_args, **_kwargs: {
+            "schema_version": 1,
+            "operation": "target-remove",
+            "ok": True,
+            "status": "archived",
+            "target_id": "app",
+            "dry_run": False,
+            "default_cleared": False,
+            "archive_path": controller / "targets" / "_archived" / "app-20260521-120000",
+            "product_repo_untouched": True,
+        },
+        raising=False,
+    )
+
+    assert module.main(["target", "remove", "app", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["operation"] == "target-remove"
+    assert payload["target_id"] == "app"
+    assert payload["product_repo_untouched"] is True
+    assert payload["archive_path"].endswith("targets/_archived/app-20260521-120000")
+    assert product.exists()
+    _assert_no_product_harness_pollution(product)
+
+
+def test_target_remove_blockers_return_nonzero(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    module.harness_controller.add_target(
+        controller_root=controller,
+        target_id="app",
+        repo=product,
+        branch="main",
+        controller_version="test",
+        force=True,
+    )
+
+    monkeypatch.setattr(
+        module.harness_controller,
+        "remove_target",
+        lambda *_args, **_kwargs: {
+            "schema_version": 1,
+            "operation": "target-remove",
+            "ok": False,
+            "status": "blocked",
+            "target_id": "app",
+            "blockers": ["target-run-lock-active"],
+            "dry_run": False,
+            "product_repo_untouched": True,
+        },
+        raising=False,
+    )
+
+    assert module.main(["target", "remove", "app"]) == 2
+    output = capsys.readouterr().out
+
+    assert "external target remove 중단" in output
+    assert "target-run-lock-active" in output
+    assert "- product repo 변경: no" in output
+    assert (controller / "targets" / "app").exists()
+    assert product.exists()
+    _assert_no_product_harness_pollution(product)
 
 
 def test_target_archive_apply_rejects_mutated_plan(monkeypatch, tmp_path: Path, capsys) -> None:

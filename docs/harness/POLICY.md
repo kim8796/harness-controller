@@ -81,6 +81,12 @@
 - ignored runtime file 은 disposable cache 일 뿐 source of truth 가 아니다.
 - cache 재구성 시 과거 proposal/apply 상태가 잘못 resurrect 되면 안 된다.
 
+## Growth Control
+
+하네스 guard 는 필요한 기능 개발을 막기 위해 “큰 파일 존재”를 실패로 보지 않는다. 실패 조건은 새 Python 파일이 size cap 을 넘으며 생성되거나, 이미 cap 을 넘은 파일이 더 커지거나, `kernel-internal` / `public-contract` / `policy` 변경에서 concrete `Diet-Exception:` 없이 harness runtime/test/doc budget 이 순증하는 경우다.
+
+큰 파일은 하나의 entrypoint/state machine/invariant 를 공유하면 유지할 수 있다. 분리는 파일 수를 늘리기 위한 작업이 아니라, 독립 workflow 를 작은 public surface 로 분리해 다음 AI/사람이 읽어야 할 context 를 줄일 때만 diet 로 인정한다.
+
 ## Operator-Touched Cycle Definition
 
 `operator-touched cycle` 은 아래 둘 중 하나가 cycle 시작 전에 확인되었을 때만 1회로 센다.

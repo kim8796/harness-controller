@@ -23,6 +23,7 @@
 - `scripts/harness_operator_wait.py` 는 `watch`/incident/Telegram이 참조하는 operator-actionable wait record, prompt, reply classification, redaction primitive 의 canonical owner 다. Product repo에는 기록을 쓰지 않는다.
 - `scripts/harness_task_cli.py` 는 beginner `do`/`task` orchestration, operator inbox task receipt, and task-list rendering 의 canonical owner 다. CLI 는 compatibility wrapper 만 유지한다.
 - `scripts/harness_controller.py` 는 external controller preview 의 `RootContext`, `StatePaths`, target registry, sidecar verification, read-only dashboard helper 를 맡는다. 이 helper 는 backlog/GOALS/run parser 를 새로 만들지 않는다.
+- `scripts/harness_target_remove.py` 는 target unregister/archive/remove policy 와 secret-safe receipt contract 의 canonical owner 다. `harness_controller.py` 는 compatibility wrapper 만 유지한다.
 - `scripts/harness_profiles.py` 는 `minimal` / `telegram` starter profile metadata 의 canonical owner 다. CLI 는 이 helper 를 읽고 별도 profile store 를 만들지 않는다.
 - `scripts/harness_starter_install.py` 는 기존 clean git repo 에 starter-safe 파일을 설치하고, `create` subcommand 로 새 git repo 를 만든 뒤 starter 를 설치할 수 있다.
 - `./harness complete-setup` 은 기존 `scripts/harness_bootstrap_wizard.py` 의 draft render 와 deterministic approve 를 감싼 happy-path wrapper 다. 새 bootstrap writer 나 receipt format 을 만들지 않는다.
@@ -36,7 +37,7 @@
 - `./harness upgrade --source <starter-bundle>` 는 설치된 프로젝트의 starter-safe harness 파일을 bundle 기준으로 갱신하는 dry-run-first wrapper 다.
 - `./harness env check --provider vercel|upstash` 와 `./harness env register --provider vercel|upstash --dry-run` 은 provider env 준비 상태와 등록 계획을 값 노출 없이 보여준다. 실제 provider mutation 은 이 release 범위 밖이다.
 - `./harness self doctor|install|uninstall` 은 optional global convenience wrapper 만 다룬다. 설치된 shim 은 current directory 또는 parent repo 의 local `./harness` 로 위임하며, 독립 parser 가 아니다.
-- `./harness controller doctor` 와 `./harness target add|alias|set|set-default|clear-default|list|verify|status|dashboard|run --once` 는 product repo 밖에서 controller 가 target 을 검사하고 sidecar dashboard 를 쓰는 preview surface 다. `target set` 은 `set-default` 의 짧은 alias 다. product repo 에 harness runtime 파일을 자동 설치하지 않는다.
+- `./harness controller doctor` 와 `./harness target add|remove|alias|set|set-default|clear-default|list|verify|status|dashboard|run --once` 는 product repo 밖에서 controller 가 target 을 검사하고 sidecar dashboard 를 쓰는 preview surface 다. `target set` 은 `set-default` 의 짧은 alias 다. `target remove` 는 controller sidecar 등록만 `targets/_archived/` 로 옮기며 product repo 에 harness runtime 파일을 자동 설치하거나 product repo 파일을 삭제하지 않는다.
 - `./harness controller release-check --run-lint --run-pytest` 는 private controller repo release 전용 gate 다. Source repo 의 full `harness_guard` 와 다르게 controller export source, ignored sidecar, tracked forbidden state/secrets, focused lint/test 만 확인한다.
 - `.github/workflows/harness-controller-ci.yml` 은 controller repo 배포 검증용 surface 다. starter bundle 과 product repo `new/init/upgrade` 대상에서는 제외하지만 `./harness controller export <dir>` controller bundle 에는 포함된다.
 - `v1.7.100` 부터 controller bundle 은 이 workflow 가 실행할 focused CI tests 와 generated controller-safe `tests/conftest.py` 를 함께 포함한다. Starter bundle 은 계속 workflow/test files 를 제외한다.

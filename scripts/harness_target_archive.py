@@ -11,6 +11,18 @@ from typing import Mapping
 
 
 SCHEMA_VERSION = 1
+DELETE_SAFE_CLASSES = frozenset({"cold-report", "os-junk", "stale-goal-pointer", "run-cache", "archive-plan"})
+RUN_CACHE_DELETE_FILENAMES = frozenset(
+    {
+        "generated-evidence.md",
+        "report.md",
+        "implementer-stdout.log",
+        "implementer-stderr.log",
+        "implementer-prompt.md",
+        "implementer-response.md",
+        "status.json",
+    }
+)
 
 
 class TargetArchiveError(RuntimeError):
@@ -103,6 +115,12 @@ def _has_run_evidence(state_root: Path) -> bool:
     return runs.exists() and any(path.is_file() for path in runs.glob("*/generated-evidence.json"))
 
 
+def _run_path_has_local_json_evidence(state_root: Path, rel_parts: tuple[str, ...]) -> bool:
+    if len(rel_parts) < 3 or rel_parts[0] != "runs" or rel_parts[1] != "harness":
+        return False
+    return (state_root / "runs" / "harness" / rel_parts[2] / "generated-evidence.json").is_file()
+
+
 def _is_operator_task_instruction(path: Path) -> bool:
     text = _read_text(path)
     for line in text.splitlines():
@@ -117,6 +135,34 @@ def _operator_task_receipt_exists(state_root: Path, rel: str) -> bool:
     return receipt.exists() and receipt.is_file() and not receipt.is_symlink()
 
 
+def _read_json_object(path: Path) -> Mapping[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, Mapping) else {}
+
+
+def _jsonl_retention_class(path: Path) -> str:
+    for line in _read_text(path).splitlines():
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, Mapping):
+            retention = str(payload.get("retention_class") or "").strip()
+            if retention:
+                return retention
+    return ""
+
+
+def _goal_status(state_root: Path, goal_id: str) -> str:
+    if not goal_id:
+        return ""
+    payload = _read_json_object(state_root / "goals" / goal_id / "goal.json")
+    return str(payload.get("status") or "").strip().casefold()
+
+
 def _classify_path(state_root: Path, path: Path, *, active_packet_ids: set[str], has_evidence: bool) -> dict[str, object]:
     rel = path.relative_to(state_root.resolve()).as_posix()
     parts = Path(rel).parts
@@ -124,7 +170,13 @@ def _classify_path(state_root: Path, path: Path, *, active_packet_ids: set[str],
         return {"path": rel, "class": "protected", "action": "protect", "reason": "symlink"}
     if not parts:
         return {"path": rel, "class": "protected", "action": "protect", "reason": "root"}
+    if path.name == ".DS_Store":
+        return {"path": rel, "class": "os-junk", "action": "delete", "reason": "os-junk"}
     if parts[0] in {"archive", "archive-plans", "archive-receipts"}:
+        if parts[0] == "archive-plans" and path.suffix == ".json":
+            receipt = state_root / "archive-receipts" / f"{path.stem}-receipt.json"
+            if receipt.exists() and receipt.is_file() and not receipt.is_symlink():
+                return {"path": rel, "class": "archive-plan", "action": "delete", "reason": "archive-plan-has-receipt"}
         return {"path": rel, "class": "protected", "action": "protect", "reason": "archive-state"}
     if parts[:2] in {("backlog", "queued"), ("backlog", "active"), ("backlog", "completed")}:
         return {"path": rel, "class": "receipt", "action": "protect", "reason": "backlog-source-of-truth"}
@@ -139,7 +191,49 @@ def _classify_path(state_root: Path, path: Path, *, active_packet_ids: set[str],
         if _is_operator_task_instruction(path) and not _operator_task_receipt_exists(state_root, rel):
             return {"path": rel, "class": "active", "action": "protect", "reason": "unprocessed-task-instruction"}
         return {"path": rel, "class": "operator-note", "action": "move", "reason": "operator-note"}
+    if parts[0] == "operator-outbox":
+        if Path(rel).name.upper().startswith("README"):
+            return {"path": rel, "class": "protected", "action": "protect", "reason": "outbox-root"}
+        return {"path": rel, "class": "operator-outbox", "action": "move", "reason": "processed-outbox"}
+    if parts[0] == "goals":
+        if len(parts) == 1:
+            return {"path": rel, "class": "protected", "action": "protect", "reason": "goals-root"}
+        if parts[1] == "active-goal.json":
+            pointer = _read_json_object(path)
+            goal_id = str(pointer.get("goal_id") or "").strip()
+            if _goal_status(state_root, goal_id) == "active":
+                return {"path": rel, "class": "active", "action": "protect", "reason": "active-goal-pointer"}
+            return {"path": rel, "class": "stale-goal-pointer", "action": "delete", "reason": "non-active-goal-pointer"}
+        goal_id = parts[1]
+        status = _goal_status(state_root, goal_id)
+        if status == "active":
+            return {"path": rel, "class": "active", "action": "protect", "reason": "active-goal"}
+        if path.name in {"goal.json", "progress.json", "goal.md"}:
+            return {"path": rel, "class": "receipt", "action": "protect", "reason": "completed-goal-source-of-truth"}
+        if path.name in {"queue-report.json", "roadmap.json"}:
+            return {"path": rel, "class": "completed-goal-cache", "action": "move", "reason": "completed-goal-cache"}
+        return {"path": rel, "class": "protected", "action": "protect", "reason": "goal-artifact"}
+    if parts[0] == "watch":
+        return {"path": rel, "class": "hot-report", "action": "protect", "reason": "watch-status"}
+    if parts[0] == "memory":
+        retention = _jsonl_retention_class(path) if path.suffix == ".jsonl" else str(_read_json_object(path).get("retention_class") or "")
+        return {"path": rel, "class": retention or "compact-memory", "action": "protect", "reason": "compact-memory"}
+    if parts[0] == "locks":
+        return {"path": rel, "class": "active", "action": "protect", "reason": "lock-state"}
+    if parts[:2] in {("state", "doctor"), ("state", "incidents")}:
+        payload = _read_json_object(path)
+        retention = str(payload.get("retention_class") or "").strip()
+        status = str(payload.get("status") or payload.get("state") or "").strip().casefold()
+        if retention:
+            return {"path": rel, "class": retention, "action": "protect", "reason": "compact-state"}
+        if status in {"resolved", "closed", "completed", "timeout", "timed-out", "rejected", "stopped"}:
+            return {"path": rel, "class": "resolved-state", "action": "move", "reason": "resolved-state"}
+        return {"path": rel, "class": "protected", "action": "protect", "reason": "active-state"}
     if parts[0] == "runs":
+        if path.name == "generated-evidence.json" or path.name.endswith("-receipt.json") or "receipt" in path.name:
+            return {"path": rel, "class": "receipt", "action": "protect", "reason": "run-evidence"}
+        if path.name in RUN_CACHE_DELETE_FILENAMES and _run_path_has_local_json_evidence(state_root, parts):
+            return {"path": rel, "class": "run-cache", "action": "delete", "reason": "run-cache-covered-by-json-evidence"}
         return {"path": rel, "class": "receipt", "action": "protect", "reason": "run-evidence"}
     if parts[0] == "reports":
         name = Path(rel).name.lower()
@@ -160,7 +254,7 @@ def _iter_candidate_paths(state_root: Path) -> tuple[Path, ...]:
         if path == root:
             continue
         rel_parts = path.relative_to(root).parts
-        if rel_parts and rel_parts[0] in {"archive", "archive-plans", "archive-receipts"}:
+        if rel_parts and rel_parts[0] in {"archive", "archive-receipts"}:
             continue
         if path.is_dir() and any(child.is_file() for child in path.rglob("*")):
             continue
@@ -292,7 +386,7 @@ def apply_target_archive(
             shutil.move(source.as_posix(), destination.as_posix())
             applied.append({"path": rel, "action": "move", "status": "applied", "destination": destination.as_posix()})
         elif action == "delete":
-            if item.get("class") != "cold-report":
+            if item.get("class") not in DELETE_SAFE_CLASSES:
                 raise TargetArchiveError(f"delete action is not delete-safe: {rel}")
             if source.is_dir():
                 shutil.rmtree(source)

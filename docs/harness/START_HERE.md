@@ -140,6 +140,14 @@ cleanup apply는 controller-owned delete-safe smoke/temp sidecar만 지우며 pr
 
 archive apply는 저장된 plan에 들어 있는 `targets/<target-id>/` 경로만 처리하고 receipt를 남긴다. product repo 파일은 archive 대상이 아니다.
 
+더 이상 관리하지 않을 target은 제거 명령으로 controller 등록만 archive한다.
+
+```bash
+./harness target remove my-app
+```
+
+`target remove`는 `targets/my-app`을 `targets/_archived/my-app-<timestamp>`로 옮겨 `target list`에서 숨긴다. product repo 파일은 삭제하거나 수정하지 않는다. active goal, queued backlog, operator-wait, run lock이 있으면 먼저 이유를 보여주고 멈춘다. 강제로 sidecar 등록만 archive해야 할 때만 `--force`를 쓴다.
+
 ## 자주 쓰는 명령
 
 ```bash
