@@ -35,7 +35,7 @@ product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는�
 - operator-wait는 credential, permission, provider outage, dirty repo, approval-needed risk 같은 외부 blocker를 표현하는 `watch` 내부 상태다. 새 beginner command가 아니며 secret은 `.env` 또는 provider secret UI에서만 고친다.
 - watch는 compact memory, incident, safe sidecar maintenance를 남기고 가능한 경우 다음 task 또는 repair task로 계속 진행한다.
 - `./harness do "요청"` 은 한 작업을 바로 처리하고 싶을 때 쓰는 보조 명령이다.
-- `./harness task`, `./harness task review`, `./harness task queue`, `./harness run`, `./harness finish`, `./harness target archive` 는 복구/고급 명령이다.
+- `./harness task`, `./harness task review`, `./harness task queue`, `./harness run`, `./harness finish`, `./harness target archive`, `./harness target remove` 는 복구/고급 명령이다.
 - 푸시는 배포나 외부 자동화를 트리거할 수 있고 자동 원격 롤백은 없다.
 - `./harness smoke implementation` 은 임시 제품 저장소로 구현 경로가 정상인지 검증하고 기본적으로 smoke sidecar를 정리한다. 남기려면 `--keep`을 붙인다.
 - `./harness controller audit-size` 와 `./harness controller cleanup --dry-run|--apply` 는 controller-owned smoke/temp sidecar 정리 후보만 다룬다. product repo 파일은 지우지 않는다.
@@ -44,6 +44,7 @@ Advanced mapping:
 
 - `./harness target add my-app --repo /path/to/product-repo --branch main` is the lower-level form behind `install`.
 - `./harness target alias add my-app app` and `./harness target set my-app` are available when operators need shorter selectors. `set-default` remains as the long-form alias.
+- `./harness target remove my-app` unregisters a target by archiving controller sidecar state under `targets/_archived/`; it never deletes or edits the product repo.
 - `./harness target verify my-app`, `./harness target dashboard my-app`, and `./harness target run my-app --once` remain the explicit inspection/smoke commands.
 - Bare `./harness goal "product outcome"` writes active goal state under `targets/<target-id>/goals/` only.
 - Bare `./harness do "request"` wraps task text intake, normalization, auto queue, and an autopilot run.
@@ -158,6 +159,7 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `scripts/harness_orchestrator.py`
 - `scripts/harness_starter_install.py`
 - `scripts/harness_target_archive.py`
+- `scripts/harness_target_remove.py`
 - `scripts/harness_telegram_bridge.py`
 - `scripts/harness_workspace.py`
 - `docs/harness/START_HERE.md`
@@ -190,6 +192,8 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `tests/test_harness_publication.py`
 - `tests/test_harness_task_cli.py`
 - `tests/test_harness_task_intake.py`
+- `tests/test_harness_target_archive.py`
+- `tests/test_harness_target_remove.py`
 - `tests/test_harness_telegram_bridge.py`
 - `tests/test_harness_watch.py`
 - `tests/test_redis_relay.py`

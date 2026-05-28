@@ -608,6 +608,10 @@ def _path_is_relative_to(path: Path, parent: Path) -> bool:
     return True
 
 
+def path_is_relative_to(path: Path, parent: Path) -> bool:
+    return _path_is_relative_to(path, parent)
+
+
 def _is_harness_marker_path(path: Path) -> bool:
     normalized = path.as_posix().rstrip("/")
     if path in PRODUCT_HARNESS_MARKERS:
@@ -823,6 +827,59 @@ def remove_target_alias(controller_root: Path, target_id: str, alias: str) -> Ta
     updated = _replace_record(record, aliases=remaining)
     _write_target_record(controller_root, updated)
     return updated
+
+
+def remove_target(
+    controller_root: Path,
+    selector: str | None = None,
+    *,
+    record: TargetRecord | None = None,
+    target_id: str | None = None,
+    dry_run: bool = False,
+    force: bool = False,
+    now: datetime | None = None,
+) -> object:
+    from harness_target_remove import remove_target as _remove_target
+
+    try:
+        return _remove_target(
+            controller_root,
+            selector,
+            record=record,
+            target_id=target_id,
+            dry_run=dry_run,
+            force=force,
+            now=now,
+        )
+    except Exception as exc:
+        if exc.__class__.__name__ == "ControllerError":
+            raise ControllerError(str(exc)) from exc
+        raise
+
+
+def _write_controller_json(root: Path, path: Path, payload: Mapping[str, object], *, label: str) -> None:
+    resolved_root = root.resolve()
+    if path.is_symlink():
+        raise ControllerError(f"{label} must not be a symlink")
+    if path.exists() and not path.is_file():
+        raise ControllerError(f"{label} must be a regular file")
+    resolved_path = path.resolve(strict=False)
+    if not _path_is_relative_to(resolved_path, resolved_root):
+        raise ControllerError(f"{label} must stay inside controller-owned path")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dict(payload), ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def write_controller_json(root: Path, path: Path, payload: Mapping[str, object], *, label: str) -> None:
+    _write_controller_json(root, path, payload, label=label)
+
+
+def __getattr__(name: str) -> object:
+    if name == "TargetRemoveResult":
+        from harness_target_remove import TargetRemoveResult
+
+        return TargetRemoveResult
+    raise AttributeError(name)
 
 
 def _write_target_record(controller_root: Path, record: TargetRecord) -> None:

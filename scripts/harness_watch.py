@@ -1031,7 +1031,8 @@ def refill_goal_if_idle(
     message = result.message
     if not queued_count and not manual_review_count:
         try:
-            if harness_goal.load_active_goal(record.state_root) is not None and not target_executable_backlog_items(record):
+            active = harness_goal.load_active_goal(record.state_root)
+            if active is not None and active.status == "active" and not target_executable_backlog_items(record):
                 manual_review_count = len(tuple(result.generated_backlog_ids))
                 if manual_review_count:
                     message = "goal has generated tasks but none are executable"

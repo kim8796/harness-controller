@@ -235,6 +235,7 @@ class GuardReport:
     related_test_files: tuple[Path, ...]
     python_files_without_related_tests: tuple[Path, ...]
     oversized_files: tuple[tuple[Path, int], ...]
+    oversized_file_blockers: tuple[str, ...]
     changed_harness_artifacts: tuple[Path, ...]
     selected_run_dir: Path | None
     missing_required_artifacts: tuple[str, ...]
@@ -249,6 +250,8 @@ class GuardReport:
     total_budget_delta: int
     diet_exception: str | None
     diet_budget_violations: tuple[str, ...]
+    diet_budget_blockers: tuple[str, ...]
+    diet_exception_blockers: tuple[str, ...]
     current_version: str | None
     previous_version: str | None
     missing_export_sync_files: tuple[str, ...]
@@ -449,6 +452,11 @@ def _guess_related_tests(path: Path, root: Path) -> tuple[Path, ...]:
             Path("tests/test_harness_guard.py"),
         ),
         "scripts/harness_target_archive.py": (
+            Path("tests/test_harness_cli.py"),
+            Path("tests/test_harness_export.py"),
+        ),
+        "scripts/harness_target_remove.py": (
+            Path("tests/test_harness_target_remove.py"),
             Path("tests/test_harness_cli.py"),
             Path("tests/test_harness_export.py"),
         ),
@@ -825,10 +833,18 @@ def _read_change_class(root: Path, selected_run_dir: Path | None) -> str | None:
 
 
 def _read_diet_exception(root: Path, selected_run_dir: Path | None) -> str | None:
-    if selected_run_dir is None:
-        return None
-    for filename in ("plan.md", "manager.md", "implementer.md", "reviewer.md", "verifier.md"):
-        artifact_path = root / selected_run_dir / filename
+    artifact_paths: list[Path] = []
+    if selected_run_dir is not None:
+        artifact_paths.extend(root / selected_run_dir / filename for filename in (
+            "plan.md",
+            "manager.md",
+            "implementer.md",
+            "reviewer.md",
+            "verifier.md",
+        ))
+    artifact_paths.append(root / "plan.md")
+
+    for artifact_path in artifact_paths:
         if not artifact_path.exists():
             continue
         match = DIET_EXCEPTION_PATTERN.search(artifact_path.read_text(encoding="utf-8"))
@@ -840,11 +856,133 @@ def _read_diet_exception(root: Path, selected_run_dir: Path | None) -> str | Non
     return None
 
 
+def _is_valid_diet_exception(reason: str | None) -> bool:
+    text = str(reason or "").strip()
+    if not text:
+        return False
+    normalized = re.sub(r"[\s._-]+", " ", text.casefold()).strip()
+    invalid = {
+        "n/a",
+        "na",
+        "none",
+        "no",
+        "todo",
+        "tbd",
+        "because",
+        "temporary exception",
+        "needed change",
+        "feature work",
+        "because needed",
+        "필요",
+        "필요함",
+    }
+    generic_terms = {"temporary", "exception", "needed", "feature", "work", "change", "필요"}
+    words = tuple(normalized.split())
+    if normalized in invalid or set(words).issubset(generic_terms):
+        return False
+    concrete_markers = (
+        "/",
+        ".py",
+        ".md",
+        "module",
+        "test",
+        "tests",
+        "export",
+        "guard",
+        "target",
+        "sidecar",
+        "archive",
+        "goal",
+        "compat",
+        "compatibility",
+    )
+    return len(text) >= 20 and len(words) >= 4 and any(marker in normalized for marker in concrete_markers)
+
+
+def _collect_diet_exception_blockers(*, diet_exception: str | None, diet_budget_delta: int) -> tuple[str, ...]:
+    if diet_exception is None or diet_budget_delta <= 0:
+        return tuple()
+    if not _is_valid_diet_exception(diet_exception):
+        return (f"invalid Diet-Exception: {diet_exception}",)
+    return tuple()
+
+
 def _line_count(path: Path) -> int:
     try:
         return len(path.read_text(encoding="utf-8").splitlines())
     except (OSError, UnicodeDecodeError):
         return 0
+
+
+def _line_count_text(text: str) -> int:
+    if not text:
+        return 0
+    return len(text.splitlines())
+
+
+def _git_file_text(root: Path, ref: str, path: Path) -> str | None:
+    spec = f":{path.as_posix()}" if ref == ":" else f"{ref}:{path.as_posix()}"
+    result = subprocess.run(
+        ["git", "show", spec],
+        cwd=root,
+        check=False,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def _current_file_line_count(root: Path, path: Path, *, mode: str, staged_only: bool) -> int | None:
+    if staged_only:
+        text = _git_file_text(root, ":", path)
+        return None if text is None else _line_count_text(text)
+    if mode == "pre-push" and not _discover_local_changed_paths(root):
+        text = _git_file_text(root, "HEAD", path)
+        return None if text is None else _line_count_text(text)
+    candidate = root / path
+    if not candidate.exists() or not candidate.is_file():
+        return None
+    return _line_count(candidate)
+
+
+def _previous_file_line_count(root: Path, path: Path, *, mode: str, staged_only: bool) -> int | None:
+    ref = "HEAD"
+    if mode == "pre-push" and not _discover_local_changed_paths(root):
+        ref = _resolve_pre_push_append_only_base(root) or "HEAD"
+    text = _git_file_text(root, ref, path)
+    return None if text is None else _line_count_text(text)
+
+
+def _collect_oversized_file_blockers(
+    root: Path,
+    python_files: Sequence[Path],
+    *,
+    max_file_lines: int,
+    mode: str,
+    staged_only: bool,
+) -> tuple[str, ...]:
+    blockers: list[str] = []
+    for path in python_files:
+        current = _current_file_line_count(root, path, mode=mode, staged_only=staged_only)
+        if current is None:
+            continue
+        previous = _previous_file_line_count(root, path, mode=mode, staged_only=staged_only)
+        if current <= max_file_lines:
+            continue
+        if previous is None:
+            blockers.append(f"new oversized Python file: {path.as_posix()} ({current} lines > {max_file_lines})")
+        elif previous <= max_file_lines:
+            blockers.append(
+                f"Python file crossed size budget: {path.as_posix()} ({previous} -> {current} lines, limit {max_file_lines})"
+            )
+        elif current > previous:
+            blockers.append(
+                f"oversized Python file grew: {path.as_posix()} ({previous} -> {current} lines, limit {max_file_lines})"
+            )
+    return tuple(blockers)
 
 
 def _is_untracked_path(root: Path, path: Path) -> bool:
@@ -976,6 +1114,26 @@ def _collect_diet_budget_violations(
     return (
         "harness diet budget warning: net-positive harness runtime/test/doc diff "
         f"(+{diet_budget_delta} lines) is warning-only{exception_suffix}",
+    )
+
+
+def _collect_diet_budget_blockers(
+    *,
+    change_class: str | None,
+    diet_budget_delta: int,
+    total_budget_delta: int,
+    archive_covered_delete_count: int,
+    diet_exception: str | None,
+) -> tuple[str, ...]:
+    if change_class not in HARNESS_BUDGET_CHANGE_CLASSES or diet_budget_delta <= 0:
+        return tuple()
+    if archive_covered_delete_count > 0 and total_budget_delta <= 0:
+        return tuple()
+    if _is_valid_diet_exception(diet_exception):
+        return tuple()
+    return (
+        "harness diet budget blocker: net-positive harness runtime/test/doc diff "
+        f"(+{diet_budget_delta} lines) requires a concrete Diet-Exception",
     )
 
 
@@ -2092,6 +2250,13 @@ def build_report(
         line_count = len(abs_path.read_text(encoding="utf-8").splitlines())
         if line_count > max_file_lines:
             oversized_files.append((rel_path, line_count))
+    oversized_file_blockers = _collect_oversized_file_blockers(
+        root,
+        python_files,
+        max_file_lines=max_file_lines,
+        mode=mode,
+        staged_only=staged_only,
+    )
 
     local_entries = _discover_local_change_entries(root, staged_only=staged_only)
     controller_distribution_retention_deletes = frozenset(
@@ -2184,12 +2349,25 @@ def build_report(
         1 for path in changed_paths if _is_archive_covered_delete(root, path, archive_covered_deletes)
     )
     diet_exception = _read_diet_exception(root, selected_run_dir)
+    if _is_valid_diet_exception(diet_exception):
+        oversized_file_blockers = tuple()
     diet_budget_violations = _collect_diet_budget_violations(
         change_class=change_class,
         diet_budget_delta=diet_budget_delta,
         total_budget_delta=total_budget_delta,
         archive_covered_delete_count=archive_covered_delete_count,
         diet_exception=diet_exception,
+    )
+    diet_budget_blockers = _collect_diet_budget_blockers(
+        change_class=change_class,
+        diet_budget_delta=diet_budget_delta,
+        total_budget_delta=total_budget_delta,
+        archive_covered_delete_count=archive_covered_delete_count,
+        diet_exception=diet_exception,
+    )
+    diet_exception_blockers = _collect_diet_exception_blockers(
+        diet_exception=diet_exception,
+        diet_budget_delta=diet_budget_delta,
     )
     current_version = _read_current_version(root)
     previous_version = _read_previous_version(root, mode=mode)
@@ -2254,6 +2432,7 @@ def build_report(
         related_test_files=_unique_paths(related_test_candidates),
         python_files_without_related_tests=tuple(python_files_without_related_tests),
         oversized_files=tuple(oversized_files),
+        oversized_file_blockers=oversized_file_blockers,
         changed_harness_artifacts=changed_harness_artifacts,
         selected_run_dir=selected_run_dir,
         missing_required_artifacts=tuple(missing_required_artifacts),
@@ -2268,6 +2447,8 @@ def build_report(
         total_budget_delta=total_budget_delta,
         diet_exception=diet_exception,
         diet_budget_violations=diet_budget_violations,
+        diet_budget_blockers=diet_budget_blockers,
+        diet_exception_blockers=diet_exception_blockers,
         current_version=current_version,
         previous_version=previous_version,
         missing_export_sync_files=tuple(missing_export_sync_files),
@@ -2343,6 +2524,10 @@ def render_report(report: GuardReport, *, max_file_lines: int) -> str:
         lines.append(f"- 큰 파일 {len(report.oversized_files)}개: {', '.join(oversized_lines)}")
     else:
         lines.append("- 큰 파일 없음")
+    if report.oversized_file_blockers:
+        lines.append("- 큰 파일 growth blocker: " + " | ".join(report.oversized_file_blockers))
+    else:
+        lines.append("- 큰 파일 growth blocker 없음")
 
     if report.python_files_without_related_tests:
         lines.append(
@@ -2425,6 +2610,14 @@ def render_report(report: GuardReport, *, max_file_lines: int) -> str:
         lines.append("- harness diet budget 경고: " + " | ".join(report.diet_budget_violations))
     else:
         lines.append("- harness diet budget 상태 정상")
+    if report.diet_budget_blockers:
+        lines.append("- harness diet budget blocker: " + " | ".join(report.diet_budget_blockers))
+    else:
+        lines.append("- harness diet budget blocker 없음")
+    if report.diet_exception_blockers:
+        lines.append("- Diet-Exception blocker: " + " | ".join(report.diet_exception_blockers))
+    else:
+        lines.append("- Diet-Exception blocker 없음")
 
     if report.current_version:
         if report.previous_version:
@@ -2511,6 +2704,7 @@ def should_fail(report: GuardReport) -> bool:
     return any(
         (
             report.python_files_without_related_tests,
+            report.oversized_file_blockers,
             report.missing_required_artifacts,
             report.incomplete_required_artifacts,
             report.artifacts_missing_agent_metadata,
@@ -2520,6 +2714,8 @@ def should_fail(report: GuardReport) -> bool:
             report.missing_export_sync_files,
             report.append_only_violations,
             report.archive_manifest_violations,
+            report.diet_budget_blockers,
+            report.diet_exception_blockers,
             report.generated_evidence_status == "fail",
             report.generated_evidence_status == "invalid",
             report.branch_audit_failures,

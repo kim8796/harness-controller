@@ -83,6 +83,7 @@ CONTROLLER_RELEASE_CHECK_RUFF_PATHS = (
     "scripts/harness_starter_install.py",
     "scripts/harness_task_cli.py",
     "scripts/harness_task_intake.py",
+    "scripts/harness_target_remove.py",
     "scripts/harness_telegram_bridge.py",
     "scripts/harness_telegram_setup.py",
     "scripts/harness_watch.py",
@@ -101,6 +102,8 @@ CONTROLLER_RELEASE_CHECK_RUFF_PATHS = (
     "tests/test_harness_runtime_setup.py",
     "tests/test_harness_task_cli.py",
     "tests/test_harness_task_intake.py",
+    "tests/test_harness_target_archive.py",
+    "tests/test_harness_target_remove.py",
     "tests/test_harness_telegram_bridge.py",
     "tests/test_harness_telegram_setup.py",
     "tests/test_harness_watch.py",
@@ -121,6 +124,8 @@ CONTROLLER_RELEASE_CHECK_PYTEST_PATHS = (
     "tests/test_harness_runtime_setup.py",
     "tests/test_harness_task_cli.py",
     "tests/test_harness_task_intake.py",
+    "tests/test_harness_target_archive.py",
+    "tests/test_harness_target_remove.py",
     "tests/test_harness_telegram_bridge.py",
     "tests/test_harness_telegram_setup.py",
     "tests/test_harness_watch.py",
@@ -3118,6 +3123,63 @@ def command_target_archive(args: argparse.Namespace) -> int:
         return 2
 
 
+def _render_target_remove_text(payload: Mapping[str, object]) -> None:
+    target_id = str(payload.get("target_id") or "")
+    blockers = [str(item) for item in payload.get("blockers") or []]
+    status = str(payload.get("status") or "")
+    force_suffix = " --force" if payload.get("forced") else ""
+    next_remove_command = f"./harness target remove {target_id}{force_suffix}"
+    if blockers:
+        print("external target remove 중단")
+    elif payload.get("dry_run"):
+        print("external target remove dry-run")
+    else:
+        print("external target remove 완료")
+    print(f"- 대상: `{target_id}`")
+    print(f"- 상태: `{status}`")
+    print(f"- product repo 변경: {'no' if payload.get('product_repo_untouched') else 'unknown'}")
+    print("- product repo: redacted (untouched)")
+    print(f"- sidecar archive: `{payload.get('archive_path')}`")
+    if payload.get("default_cleared"):
+        print("- default selector: cleared")
+    if blockers:
+        print(f"- 제거 차단: {', '.join(blockers)}")
+        if not payload.get("forced"):
+            print("- active goal/queued backlog/operator-wait만 남았다면 정말 폐기할 때 `--force`를 붙이세요.")
+        print(f"다음 명령: blocker를 정리한 뒤 `{next_remove_command}`")
+        print("- target archive와 차이: archive는 sidecar 정리, remove는 target 등록 해제/archive")
+        return
+    if payload.get("dry_run"):
+        print("- dry-run: 파일을 이동하지 않았습니다.")
+        print(f"다음 명령: `{next_remove_command}`")
+        print("- target archive와 차이: archive는 sidecar 정리, remove는 target 등록 해제/archive")
+        return
+    print(f"- receipt: `{payload.get('receipt_path')}`")
+    print("- 복구: archived directory를 다시 `targets/<target-id>`로 옮기면 됩니다.")
+    print("- target archive와 차이: archive는 sidecar 정리, remove는 target 등록 해제/archive")
+
+
+def command_target_remove(args: argparse.Namespace) -> int:
+    try:
+        payload = harness_controller.remove_target(
+            repo_root(),
+            args.target,
+            dry_run=args.dry_run,
+            force=args.force,
+        )
+        safe_payload = _json_safe(payload)
+        if not isinstance(safe_payload, Mapping):
+            safe_payload = {"schema_version": 1, "operation": "target-remove", "result": safe_payload}
+        if args.json:
+            print(json.dumps(safe_payload, ensure_ascii=False, indent=2, sort_keys=True))
+        else:
+            _render_target_remove_text(safe_payload)
+        return 0 if safe_payload.get("ok") else 2
+    except harness_controller.ControllerError as exc:
+        print(f"error: {exc}")
+        return 2
+
+
 def command_target_add(args: argparse.Namespace) -> int:
     try:
         record = harness_controller.add_target(
@@ -4427,6 +4489,20 @@ def build_parser() -> argparse.ArgumentParser:
     target_list = target_subparsers.add_parser("list", help="List registered external targets.")
     target_list.add_argument("--json", action="store_true")
     target_list.set_defaults(func=command_target_list)
+    target_remove = target_subparsers.add_parser(
+        "remove",
+        help="Unregister a target by archiving its controller sidecar; product repo files are never touched.",
+        description=(
+            "Unregister a target by moving targets/<target-id> under targets/_archived/. "
+            "This is different from target archive, which only cleans old artifacts inside an active target sidecar. "
+            "Product repo files are never touched."
+        ),
+    )
+    target_remove.add_argument("target", help=target_selector_help)
+    target_remove.add_argument("--dry-run", action="store_true", help="Report the archive action without moving files.")
+    target_remove.add_argument("--force", action="store_true", help="Bypass active goal/backlog/wait blockers; run locks still block.")
+    target_remove.add_argument("--json", action="store_true")
+    target_remove.set_defaults(func=command_target_remove)
     target_verify = target_subparsers.add_parser("verify", help="Verify an external target without mutating product files.")
     target_verify.add_argument("target", help=target_selector_help)
     target_verify.add_argument("--json", action="store_true")

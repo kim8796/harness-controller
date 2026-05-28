@@ -1,3 +1,90 @@
+# Harness Growth Control + Sidecar Compactness Execution Plan
+
+## Objective
+
+Keep harness feature work moving while preventing uncontrolled controller growth and sidecar bloat. Do not treat "large file exists" as a failure; fail only on unjustified growth. Preserve product repo safety and keep beginner UX unchanged.
+
+Diet-Exception: target remove module split plus guard and sidecar archive tests temporarily increase harness code while preventing future unbounded growth.
+
+## Implementation Plan
+
+1. Guard growth control:
+   - Add true blockers for oversized-file growth, newly oversized Python files, and unexcused positive harness budget deltas.
+   - Keep necessary feature work possible through concrete `Diet-Exception:` evidence.
+   - Keep warnings distinct from blockers and wire only blockers into `should_fail()`.
+
+2. AI-oriented structure policy:
+   - Document that one file is acceptable when it owns one mental model/state machine.
+   - Prevent fake diet: do not count wrapper-only file scattering as success.
+   - Refactor the current target remove workflow out of `harness_controller.py` into a cohesive target-remove module with a small public surface while retaining compatibility wrappers.
+
+3. Active goal pointer consistency:
+   - Completed/archived/cancelled goals must not remain active pointers.
+   - `load_active_goal()`, `list_goals()`, `queue-report`, and watch status must agree on "no active goal".
+
+4. Sidecar compactness:
+   - Expand target archive classification for goals, operator outbox, doctor/incidents, OS junk, archive plans, and run/report evidence.
+   - Preserve source-of-truth receipts and active state; compact duplicate reports/logs/drafts/outbox.
+
+5. Agent/review protocol:
+   - Use focused agents with disjoint read/write scopes.
+   - Close only agents spawned by this session.
+   - If reviewers find blockers, write a correction note, patch, test, and review again.
+
+## Validation Commands
+
+- `python3 -m pytest tests/test_harness_guard.py tests/test_harness_controller.py tests/test_harness_cli.py tests/test_harness_goal.py tests/test_harness_export.py`
+- `python3 -m pytest tests/test_harness_watch.py tests/test_harness_task_intake.py`
+- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+- `./harness target archive audit racegame --json`
+- `./harness target remove racegame --dry-run`
+
+# Target Remove Command Implementation Plan
+
+## Objective
+
+Add `./harness target remove <target>` so an operator can unregister an external target from the harness controller without touching the product repository. The command archives the controller sidecar by default, clears default-target state when relevant, and refuses to run while a target appears active.
+
+## Implementation Plan
+
+1. Add controller-side removal support:
+   - Resolve the existing target selector to a canonical target record.
+   - Validate that `targets/<target-id>` and archive destinations stay under controller-owned sidecar paths and are not symlinks.
+   - Block removal when run locks are present, and block active goals, queued backlog, or active operator waits unless `--force` is provided.
+   - Move `targets/<target-id>` to `targets/_archived/<target-id>-YYYYMMDD-HHMMSS` for apply mode; `--dry-run` reports the same action without moving files.
+   - Write secret-free receipts inside the archived target and under `targets/_archive-receipts`.
+
+2. Add the CLI surface:
+   - Add `./harness target remove <target> [--dry-run] [--force] [--json]`.
+   - Render concise human output showing target id, archive path, product repo untouched, default cleared, and blockers.
+   - Keep `target archive` as sidecar cleanup and document that `target remove` unregisters/archives the target.
+
+3. Update docs and export coverage:
+   - Document target removal in beginner/operator portability docs.
+   - Keep product repo removal/deletion explicitly out of scope.
+   - Update export/help tests only if new files or public help surfaces require it.
+
+## Validation Commands
+
+- `python3 -m pytest tests/test_harness_controller.py tests/test_harness_cli.py tests/test_harness_export.py -q`
+- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+
+## Correction 1
+
+Block a pre-existing `target-remove-receipt.json` symlink/file before moving the target sidecar, so remove cannot archive the sidecar and then fail while writing its receipt.
+
+## Correction 2
+
+Reviewer found that `target remove --dry-run --force` still printed a next command without `--force`, which would block again for active goal/backlog/operator-wait cases. Keep the purpose unchanged and make the human next command preserve `--force` when the reviewed payload was forced.
+
+## Correction 3
+
+Security reviewer found that absolute controller/product paths can contain secret-like segments and leak through target remove stdout, JSON, and receipts. Keep internal `Path` fields for execution/tests, but make serialized output and receipts use controller-relative sidecar paths and redact the product repo path.
+
+## Correction 4
+
+`target remove` must not block on a stale `goals/active-goal.json` pointer when the referenced `goal.json` is already completed/archived/cancelled. Treat that as removable target state, matching `./harness goal` status output.
+
 # Watch Auto-Merge + Superpowers Policy Absorption Plan
 
 ## Objective
