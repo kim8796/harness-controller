@@ -3,7 +3,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import mimetypes
+import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -17,6 +20,112 @@ import harness_task_intake
 GOAL_SCHEMA_VERSION = 1
 GOALS_DIR = Path("goals")
 ACTIVE_GOAL_FILE = GOALS_DIR / "active-goal.json"
+GOAL_DRAFTS_DIR = GOALS_DIR / "drafts"
+MAX_GOAL_SPEC_BYTES = 512_000
+MAX_GOAL_ATTACHMENT_BYTES = 10_000_000
+MAX_GOAL_ATTACHMENTS = 50
+MAX_GOAL_CAPTION_CHARS = 500
+SECRET_TEXT_PATTERNS = (
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{20,}"),
+    re.compile(
+        r"(?i)(?:\b|['\"])[A-Za-z0-9_.-]*"
+        r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|signing[_-]?key|"
+        r"token|secret|password)"
+        r"['\"]?\s*[:=]\s*['\"]?[A-Za-z0-9._~+/=-]{12,}"
+    ),
+)
+SECRET_PATH_HINTS = (
+    ".env",
+    "secret",
+    "token",
+    "password",
+    "credential",
+    "apikey",
+    "api-key",
+    "signing-key",
+    "signing_key",
+    "private-key",
+    "private_key",
+)
+GOAL_SPEC_TEMPLATES = {
+    "ko": """# {title}
+
+## 제품 목표
+
+- 제품이 달성해야 하는 최종 목표를 적습니다.
+
+## 배경
+
+- 왜 이 목표가 필요한지, 현재 문제와 맥락을 적습니다.
+
+## 사용자
+
+- 누가 이 결과를 사용할지 적습니다.
+
+## 요구사항
+
+- 구현해야 할 핵심 요구사항을 항목별로 적습니다.
+
+## 완료 조건
+
+- 완료로 인정할 수 있는 관찰 가능한 조건을 적습니다.
+
+## 하지 않을 일
+
+- 이번 목표에서 제외할 일을 적습니다.
+
+## 시각 자료
+
+- 이미지는 `./harness goal from <spec.md> <image-or-directory> --caption "설명"`으로 첨부합니다.
+
+## 제약사항
+
+- 건드리면 안 되는 영역, 외부 서비스, 성능/호환성 제약을 적습니다.
+
+## 검증
+
+- 기대하는 검증 명령이나 수동 확인 항목을 적습니다.
+""",
+    "en": """# {title}
+
+## Product Goal
+
+- Describe the final product outcome this goal should achieve.
+
+## Background
+
+- Explain why this goal matters, the current problem, and relevant context.
+
+## Target Users
+
+- Describe who will use the result.
+
+## Requirements
+
+- List the core requirements that should be implemented.
+
+## Acceptance Criteria
+
+- List observable conditions that prove the goal is complete.
+
+## Non-Goals
+
+- List work that is explicitly out of scope for this goal.
+
+## Visual References
+
+- Attach images with `./harness goal from <spec.md> <image-or-directory> --caption "description"`.
+
+## Constraints
+
+- Note areas that must not be touched, external services, compatibility, or performance constraints.
+
+## Validation
+
+- List expected validation commands or manual checks.
+""",
+}
 
 
 class GoalError(RuntimeError):
@@ -101,6 +210,239 @@ def _write_text(path: Path, text: str) -> None:
         raise GoalError(f"refusing symlink goal artifact: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _write_bytes(path: Path, content: bytes) -> None:
+    if path.exists() and path.is_symlink():
+        raise GoalError(f"refusing symlink goal artifact: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+
+
+def _sidecar_relative(state_root: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(state_root.resolve()).as_posix()
+    except ValueError as exc:
+        raise GoalError(f"goal artifact escaped target sidecar: {path}") from exc
+
+
+def _reject_secretish_path(path: Path) -> None:
+    name = path.name.casefold()
+    suffix = path.suffix.casefold()
+    if suffix in {".key", ".pem", ".p12", ".pfx", ".kdbx"}:
+        raise GoalError(f"goal input looks like a secret file: {path.name}")
+    if any(hint in name for hint in SECRET_PATH_HINTS):
+        raise GoalError(f"goal input looks like a secret file: {path.name}")
+
+
+def _reject_secretish_text(text: str) -> None:
+    for pattern in SECRET_TEXT_PATTERNS:
+        if pattern.search(text):
+            raise GoalError("goal spec appears to contain a secret; remove it before importing")
+
+
+def _validate_input_file(path: Path, *, max_bytes: int) -> Path:
+    expanded = path.expanduser()
+    if expanded.is_symlink():
+        raise GoalError(f"goal input must not be a symlink: {path.as_posix()}")
+    resolved = expanded.resolve()
+    if not resolved.exists() or not resolved.is_file():
+        raise GoalError(f"goal input file not found: {path.as_posix()}")
+    _reject_secretish_path(resolved)
+    if resolved.stat().st_size > max_bytes:
+        raise GoalError(f"goal input file is too large: {path.name}")
+    return resolved
+
+
+def _validate_caption(caption: str) -> str:
+    text = re.sub(r"\s+", " ", str(caption or "").strip())
+    if len(text) > MAX_GOAL_CAPTION_CHARS:
+        raise GoalError("goal image caption is too long")
+    _reject_secretish_text(text)
+    return text
+
+
+def _goal_template_language() -> str:
+    explicit = str(os.environ.get("HARNESS_LANGUAGE") or "").casefold()
+    if explicit.startswith("ko"):
+        return "ko"
+    if explicit.startswith("en"):
+        return "en"
+    for key in ("LC_MESSAGES", "LC_ALL", "LANG"):
+        value = str(os.environ.get(key) or "").casefold()
+        if value.startswith("ko"):
+            return "ko"
+        if value.startswith("en"):
+            return "en"
+    return "ko"
+
+
+def _normalize_captions(images: Sequence[Path], captions: Sequence[str]) -> tuple[str, ...]:
+    if not captions:
+        return tuple()
+    if not images:
+        raise GoalError("goal image caption requires at least one image")
+    normalized = tuple(_validate_caption(caption) for caption in captions)
+    if len(normalized) == 1:
+        return tuple(normalized[0] for _ in images)
+    if len(normalized) != len(images):
+        raise GoalError("goal image caption count must match image count")
+    return normalized
+
+
+def _image_media_type(path: Path) -> str:
+    return mimetypes.guess_type(path.name)[0] or ""
+
+
+def _validate_input_directory(path: Path) -> Path:
+    expanded = path.expanduser()
+    if expanded.is_symlink():
+        raise GoalError(f"goal input must not be a symlink: {path.as_posix()}")
+    resolved = expanded.resolve()
+    if not resolved.exists() or not resolved.is_dir():
+        raise GoalError(f"goal input directory not found: {path.as_posix()}")
+    _reject_secretish_path(resolved)
+    return resolved
+
+
+def _expand_goal_image_inputs(images: Sequence[Path]) -> tuple[Path, ...]:
+    expanded: list[Path] = []
+    for image in images:
+        raw = Path(image).expanduser()
+        if raw.is_symlink():
+            raise GoalError(f"goal input must not be a symlink: {Path(image).as_posix()}")
+        if raw.exists() and raw.is_dir():
+            directory = _validate_input_directory(Path(image))
+            directory_images: list[Path] = []
+            for child in sorted(directory.iterdir(), key=lambda path: path.name.casefold()):
+                if child.is_symlink():
+                    raise GoalError(f"goal input must not be a symlink: {child.as_posix()}")
+                if child.is_file() and _image_media_type(child).startswith("image/"):
+                    directory_images.append(_validate_input_file(child, max_bytes=MAX_GOAL_ATTACHMENT_BYTES))
+            if not directory_images:
+                raise GoalError(f"goal attachment directory has no images: {Path(image).as_posix()}")
+            expanded.extend(directory_images)
+        else:
+            expanded.append(_validate_input_file(Path(image), max_bytes=MAX_GOAL_ATTACHMENT_BYTES))
+        if len(expanded) > MAX_GOAL_ATTACHMENTS:
+            raise GoalError(f"too many goal attachments; maximum is {MAX_GOAL_ATTACHMENTS}")
+    return tuple(expanded)
+
+
+def _safe_copy_name(path: Path, *, index: int) -> str:
+    stem = re.sub(r"[^0-9A-Za-z가-힣_.-]+", "-", path.stem).strip(".-") or "attachment"
+    suffix = re.sub(r"[^0-9A-Za-z.]+", "", path.suffix)[:16] or ".bin"
+    return f"image-{index:02d}-{stem[:48]}{suffix}"
+
+
+def _copy_goal_attachments(
+    *,
+    state_root: Path,
+    images: Sequence[Path],
+    captions: Sequence[str],
+    attachments_dir: Path,
+) -> list[dict[str, object]]:
+    expanded_images = _expand_goal_image_inputs(images)
+    normalized_captions = _normalize_captions(expanded_images, captions)
+    attachment_meta: list[dict[str, object]] = []
+    for index, image_file in enumerate(expanded_images, start=1):
+        media_type = _image_media_type(image_file)
+        if not media_type.startswith("image/"):
+            raise GoalError(f"goal attachment is not an image: {image_file.as_posix()}")
+        content = image_file.read_bytes()
+        target = attachments_dir / _safe_copy_name(image_file, index=index)
+        _write_bytes(target, content)
+        meta: dict[str, object] = {
+            "path": _sidecar_relative(state_root, target),
+            "media_type": media_type,
+            "size": len(content),
+            "sha256_prefix": hashlib.sha256(content).hexdigest()[:16],
+        }
+        if normalized_captions:
+            meta["caption"] = normalized_captions[index - 1]
+        attachment_meta.append(meta)
+    return attachment_meta
+
+
+def _markdown_title(text: str, *, fallback: str) -> str:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            title = stripped.lstrip("#").strip()
+            if title:
+                return re.sub(r"\s+", " ", title)[:120]
+    for line in text.splitlines():
+        stripped = line.strip("- ").strip()
+        if stripped:
+            return re.sub(r"\s+", " ", stripped)[:120]
+    return fallback
+
+
+def _section_lines(text: str, headings: Sequence[str]) -> list[str]:
+    wanted = {heading.casefold() for heading in headings}
+    current = ""
+    lines: list[str] = []
+    for line in text.splitlines():
+        match = re.match(r"^\s{0,3}#{1,3}\s+(?P<title>.+?)\s*$", line)
+        if match:
+            current = match.group("title").strip().casefold()
+            continue
+        if current in wanted:
+            stripped = line.strip()
+            if stripped:
+                lines.append(stripped)
+    return lines
+
+
+def _clean_bullet(line: str) -> str:
+    return re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", line).strip()
+
+
+def _success_criteria_from_spec(text: str, *, fallback_title: str) -> list[str]:
+    lines = [_clean_bullet(line) for line in _section_lines(text, ("Acceptance Criteria", "Acceptance", "완료 조건", "수용 기준"))]
+    criteria = [line for line in lines if line and line not in {"-", "없음", "none", "n/a"}]
+    return criteria[:12] or _default_success_criteria(fallback_title)
+
+
+def _context_summary_from_spec(text: str) -> str:
+    lines = [_clean_bullet(line) for line in _section_lines(text, ("Background", "Summary", "Context", "Requirements", "배경", "요약", "요구사항"))]
+    summary = " ".join(line for line in lines if line)
+    if not summary:
+        summary = " ".join(_clean_bullet(line) for line in text.splitlines() if _clean_bullet(line) and not line.lstrip().startswith("#"))
+    return re.sub(r"\s+", " ", summary).strip()[:800]
+
+
+def create_goal_spec_draft(
+    *,
+    state_root: Path,
+    target_id: str,
+    title: str | None = None,
+    now: str | None = None,
+) -> Path:
+    language = _goal_template_language()
+    default_title = "Detailed product goal" if language == "en" else "제품 목표 상세 명세"
+    draft_title = re.sub(r"\s+", " ", str(title or default_title).strip())
+    if not draft_title:
+        raise GoalError("goal draft title is required")
+    timestamp = now or datetime.now().strftime("%Y%m%d-%H%M%S")
+    draft_id = f"goal-draft-{timestamp}-{_slug(draft_title, max_length=32)}"
+    draft_dir = _goals_root(state_root) / "drafts" / draft_id
+    if draft_dir.exists() or draft_dir.is_symlink():
+        raise GoalError(f"goal draft already exists: {draft_id}")
+    path = draft_dir / "goal-spec.md"
+    template = GOAL_SPEC_TEMPLATES[language]
+    _write_text(path, template.format(title=draft_title))
+    _write_json(
+        draft_dir / "draft.json",
+        {
+            "schema_version": GOAL_SCHEMA_VERSION,
+            "target_id": target_id,
+            "draft_id": draft_id,
+            "created_at": utc_timestamp(),
+            "spec_path": path.relative_to(draft_dir).as_posix(),
+        },
+    )
+    return path
 
 
 def _record_from_payload(state_root: Path, payload: Mapping[str, object]) -> GoalRecord:
@@ -227,6 +569,108 @@ def create_goal(
     return record
 
 
+def create_goal_from_spec(
+    *,
+    state_root: Path,
+    target_id: str,
+    source: Path,
+    images: Sequence[Path] = (),
+    image_captions: Sequence[str] = (),
+    title: str | None = None,
+    target_repo: Path | None = None,
+    replace: bool = False,
+    now: str | None = None,
+) -> GoalRecord:
+    source_file = _validate_input_file(source, max_bytes=MAX_GOAL_SPEC_BYTES)
+    try:
+        spec_text = source_file.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise GoalError("goal spec must be UTF-8 markdown/text") from exc
+    _reject_secretish_text(spec_text)
+    resolved_title = re.sub(r"\s+", " ", str(title or "").strip()) or _markdown_title(spec_text, fallback=source_file.stem)
+    active = load_active_goal(state_root)
+    if active is not None and active.status == "active" and not replace:
+        raise GoalError(f"active goal already exists: {active.goal_id}; pass --replace to archive it")
+    timestamp = now or utc_timestamp()
+    goal_id = _safe_goal_id(resolved_title)
+    goal_dir = _goals_root(state_root) / goal_id
+    if goal_dir.exists():
+        raise GoalError(f"goal already exists: {goal_id}")
+    goal_dir.mkdir(parents=True)
+    try:
+        inputs_dir = goal_dir / "inputs"
+        spec_target = inputs_dir / "goal-spec.md"
+        _write_text(spec_target, spec_text)
+        attachments = _copy_goal_attachments(
+            state_root=state_root,
+            images=images,
+            captions=image_captions,
+            attachments_dir=goal_dir / "attachments",
+        )
+        source_meta = {
+            "path": _sidecar_relative(state_root, spec_target),
+            "size": len(spec_text.encode("utf-8")),
+            "sha256_prefix": hashlib.sha256(spec_text.encode("utf-8")).hexdigest()[:16],
+        }
+        context_summary = _context_summary_from_spec(spec_text)
+        payload = {
+            "schema_version": GOAL_SCHEMA_VERSION,
+            "goal_id": goal_id,
+            "target_id": target_id,
+            "title": resolved_title,
+            "status": "active",
+            "created_at": timestamp,
+            "updated_at": timestamp,
+            "success_criteria": _success_criteria_from_spec(spec_text, fallback_title=resolved_title),
+            "active_plan_id": "",
+            "linked_backlog_ids": [],
+            "publication": {},
+            "source": "spec",
+            "spec_path": source_meta["path"],
+            "source_file": source_meta,
+            "attachments": attachments,
+            "context_summary": context_summary,
+        }
+        _write_json(goal_dir / "goal.json", payload)
+        _write_json(
+            goal_dir / "progress.json",
+            {
+                "schema_version": GOAL_SCHEMA_VERSION,
+                "goal_id": goal_id,
+                "target_id": target_id,
+                "created_at": timestamp,
+                "updated_at": timestamp,
+                "tasks": [],
+                "events": [{"event": "goal-created-from-spec", "created_at": timestamp}],
+            },
+        )
+        _write_json(
+            goal_dir / "roadmap.json",
+            build_roadmap_model(
+                target_id=target_id,
+                goal_id=goal_id,
+                title=resolved_title,
+                profile=_empty_product_profile(),
+                plan_id="plan-initial",
+                created_at=timestamp,
+                goal_payload=payload,
+            ),
+        )
+        _write_goal_markdown(goal_dir / "goal.md", payload, queued=0, completed=0)
+        if active is not None and replace:
+            archive_goal(state_root=state_root, goal_id=active.goal_id, status="archived", reason="replaced by new goal")
+        _write_json(_active_path(state_root), {"schema_version": GOAL_SCHEMA_VERSION, "goal_id": goal_id, "target_id": target_id})
+        record = _record_from_payload(state_root, payload)
+        if target_repo is not None:
+            build_roadmap(state_root=state_root, target_id=target_id, target_repo=target_repo, goal=record)
+            write_queue_report(state_root=state_root, target_id=target_id)
+        return record
+    except Exception:
+        if _active_pointer_goal_id(state_root) != goal_id:
+            shutil.rmtree(goal_dir, ignore_errors=True)
+        raise
+
+
 def replace_active_goal(
     *,
     state_root: Path,
@@ -295,6 +739,7 @@ def _write_goal_markdown(path: Path, payload: Mapping[str, object], *, queued: i
         f"- Goal ID: `{payload.get('goal_id')}`",
         f"- Target: `{payload.get('target_id')}`",
         f"- Status: `{payload.get('status')}`",
+        f"- Source: `{payload.get('source') or 'inline'}`",
         f"- Queued linked tasks: {queued}",
         f"- Completed linked tasks: {completed}",
         "",
@@ -303,6 +748,17 @@ def _write_goal_markdown(path: Path, payload: Mapping[str, object], *, queued: i
     ]
     for item in payload.get("success_criteria") or []:
         lines.append(f"- {item}")
+    if payload.get("spec_path"):
+        lines.extend(["", "## Goal Spec", "", f"- `{payload.get('spec_path')}`"])
+    attachments = payload.get("attachments")
+    if isinstance(attachments, list) and attachments:
+        lines.extend(["", "## Attachments", ""])
+        for attachment in attachments:
+            if not isinstance(attachment, Mapping):
+                continue
+            caption = str(attachment.get("caption") or "").strip()
+            suffix = f" - {caption}" if caption else ""
+            lines.append(f"- `{attachment.get('path')}` ({attachment.get('media_type')}, {attachment.get('size')} bytes){suffix}")
     lines.append("")
     _write_text(path, "\n".join(lines))
 
@@ -459,6 +915,7 @@ def build_roadmap(
 ) -> dict[str, object]:
     profile = collect_product_profile(target_repo)
     plan_id = f"plan-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    goal_payload = _read_json(goal.goal_json)
     roadmap = build_roadmap_model(
         target_id=target_id,
         goal_id=goal.goal_id,
@@ -466,9 +923,9 @@ def build_roadmap(
         profile=profile,
         plan_id=plan_id,
         created_at=utc_timestamp(),
+        goal_payload=goal_payload,
     )
     _write_json(goal.roadmap_json, roadmap)
-    goal_payload = _read_json(goal.goal_json)
     goal_payload["active_plan_id"] = plan_id
     goal_payload["updated_at"] = utc_timestamp()
     _write_json(goal.goal_json, goal_payload)
@@ -483,15 +940,24 @@ def build_roadmap_model(
     profile: Mapping[str, object],
     plan_id: str,
     created_at: str,
+    goal_payload: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
+    goal_payload = goal_payload or {}
+    context_summary = str(goal_payload.get("context_summary") or "").strip()
+    spec_path = str(goal_payload.get("spec_path") or "").strip()
+    attachments = goal_payload.get("attachments")
+    attachment_count = len(attachments) if isinstance(attachments, list) else 0
+    spec_context = f" 상세 명세: {context_summary}" if context_summary else ""
     tasks: list[dict[str, object]] = []
     specs = [
-        ("core", "핵심 동작 구현", f"제품의 핵심 동작이 목표를 만족하도록 구현한다: {title}"),
-        ("ui", "사용자 경험 반영", f"사용자 화면과 조작 흐름에서 목표가 자연스럽게 동작하도록 반영한다: {title}"),
-        ("test", "검증과 회귀 방지", f"목표와 관련된 자동 검증과 회귀 방지 테스트를 추가한다: {title}"),
+        ("core", "핵심 동작 구현", f"제품의 핵심 동작이 목표를 만족하도록 구현한다: {title}.{spec_context}"),
+        ("ui", "사용자 경험 반영", f"사용자 화면과 조작 흐름에서 목표가 자연스럽게 동작하도록 반영한다: {title}.{spec_context}"),
+        ("test", "검증과 회귀 방지", f"목표와 관련된 자동 검증과 회귀 방지 테스트를 추가한다: {title}.{spec_context}"),
     ]
     if not profile.get("has_client") and not profile.get("has_server"):
-        specs = [("docs", "목표 문서화", f"README에 목표와 사용 흐름을 명확히 반영한다: {title}")]
+        specs = [("docs", "목표 문서화", f"README에 목표와 사용 흐름을 명확히 반영한다: {title}.{spec_context}")]
+    success_criteria = [str(item) for item in goal_payload.get("success_criteria") or () if str(item)]
+    task_acceptance = success_criteria[:8]
     for index, (kind, task_title, summary) in enumerate(specs, start=1):
         scope = _scope_for_profile(profile, kind)
         tasks.append(
@@ -499,19 +965,22 @@ def build_roadmap_model(
                 "task_key": f"task-{index:02d}-{kind}",
                 "title": task_title,
                 "summary": summary,
-                "acceptance": [
+                "acceptance": task_acceptance
+                or [
                     f"{title} 목표를 만족하는 변경이 {', '.join(scope)} 안에 반영된다.",
                     "기존 주요 흐름이 깨지지 않는다.",
                 ],
                 "file_scope": scope,
                 "forbidden_scope": [],
                 "validation": _validation_for_profile(profile, scope),
-                "manual_checks": [],
+                "manual_checks": [f"Goal spec `{spec_path}` 참고"] if spec_path else [],
                 "priority": "P1" if index == 1 else "P2",
                 "labels": ["product", "goal-driven", kind],
                 "goal_id": goal_id,
                 "milestone_id": f"m{index}",
                 "depends_on": [],
+                "goal_spec_path": spec_path,
+                "attachment_count": attachment_count,
             }
         )
     return {
@@ -591,6 +1060,26 @@ def _task_request_text(goal: GoalRecord, task: Mapping[str, object]) -> str:
     return re.sub(r"\s+", " ", str(task.get("summary") or task.get("title") or goal.title)).strip()
 
 
+def _goal_task_notes(goal: GoalRecord, plan_id: str, task: Mapping[str, object]) -> tuple[str, ...]:
+    notes = [f"Product-Goal: {goal.title}", f"Planner-Plan: {plan_id}", f"Task-Key: {task.get('task_key')}"]
+    try:
+        goal_payload = _read_json(goal.goal_json)
+    except GoalError:
+        return tuple(notes)
+    spec_path = str(goal_payload.get("spec_path") or "").strip()
+    if spec_path:
+        notes.append(f"Goal-Spec: {spec_path}")
+    attachments = goal_payload.get("attachments")
+    if isinstance(attachments, list):
+        for attachment in attachments[:8]:
+            if not isinstance(attachment, Mapping):
+                continue
+            caption = str(attachment.get("caption") or "").strip()
+            caption_suffix = f" - {caption}" if caption else ""
+            notes.append(f"Goal-Attachment: {attachment.get('path')} ({attachment.get('media_type')}){caption_suffix}")
+    return tuple(notes)
+
+
 def _queue_task(
     *,
     state_root: Path,
@@ -610,7 +1099,7 @@ def _queue_task(
         file_scope=tuple(str(item) for item in task.get("file_scope") or ()),
         forbidden_scope=tuple(str(item) for item in task.get("forbidden_scope") or ()),
         validation=tuple(str(item) for item in task.get("validation") or ()),
-        notes=(f"Product-Goal: {goal.title}", f"Planner-Plan: {plan_id}", f"Task-Key: {task.get('task_key')}"),
+        notes=_goal_task_notes(goal, plan_id, task),
         packet_id=f"task-{harness_task_intake.packet_timestamp()}-{_slug(str(task.get('task_key') or 'goal-task'), max_length=28)}",
     )
     packet_id = request_path.parent.name

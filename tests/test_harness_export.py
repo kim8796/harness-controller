@@ -125,6 +125,9 @@ def test_export_bundle_copies_sources_and_writes_readme(tmp_path: Path) -> None:
         "scripts/harness_cleanup.py\n"
     )
     assert (bundle_dir / "scripts" / "harness_cli.py").read_text(encoding="utf-8") == "scripts/harness_cli.py\n"
+    assert (bundle_dir / "scripts" / "harness_fleet.py").read_text(encoding="utf-8") == (
+        "scripts/harness_fleet.py\n"
+    )
     assert (bundle_dir / "scripts" / "harness_task_cli.py").read_text(encoding="utf-8") == (
         "scripts/harness_task_cli.py\n"
     )
@@ -443,11 +446,13 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "reports" / "harness-autonomy" / "README.md").exists()
     assert (bundle / "scripts" / "harness_task_intake.py").exists()
     assert (bundle / "scripts" / "harness_goal.py").exists()
+    assert (bundle / "scripts" / "harness_fleet.py").exists()
     assert (bundle / "scripts" / "harness_publication.py").exists()
     assert (bundle / "scripts" / "harness_target_remove.py").exists()
     assert (bundle / "scripts" / "harness_incident.py").exists()
     assert (bundle / "tests" / "test_harness_task_intake.py").exists()
     assert (bundle / "tests" / "test_harness_goal.py").exists()
+    assert (bundle / "tests" / "test_harness_fleet.py").exists()
     assert (bundle / "tests" / "test_harness_publication.py").exists()
     assert (bundle / "tests" / "test_harness_target_archive.py").exists()
     assert (bundle / "tests" / "test_harness_target_remove.py").exists()
