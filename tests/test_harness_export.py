@@ -128,6 +128,40 @@ def test_export_bundle_copies_sources_and_writes_readme(tmp_path: Path) -> None:
     assert (bundle_dir / "scripts" / "harness_fleet.py").read_text(encoding="utf-8") == (
         "scripts/harness_fleet.py\n"
     )
+    assert (bundle_dir / "scripts" / "harness_goal_contract.py").read_text(encoding="utf-8") == (
+        "scripts/harness_goal_contract.py\n"
+    )
+    assert (bundle_dir / "scripts" / "harness_goal_gates.py").read_text(encoding="utf-8") == (
+        "scripts/harness_goal_gates.py\n"
+    )
+    assert (bundle_dir / "scripts" / "harness_product_audit.py").read_text(encoding="utf-8") == (
+        "scripts/harness_product_audit.py\n"
+    )
+    assert (bundle_dir / "scripts" / "harness_product_audit_support.py").read_text(encoding="utf-8") == (
+        "scripts/harness_product_audit_support.py\n"
+    )
+    assert (bundle_dir / "scripts" / "harness_release.py").read_text(encoding="utf-8") == (
+        "scripts/harness_release.py\n"
+    )
+    assert (bundle_dir / "docs" / "harness" / "MODULE_MAP.md").read_text(encoding="utf-8") == (
+        "docs/harness/MODULE_MAP.md\n"
+    )
+    assert Path("docs/harness/MODULE_MAP.md") in module.STARTER_SURFACE_SANITIZED_FILES
+    assert (bundle_dir / "tests" / "test_harness_goal_contract.py").read_text(encoding="utf-8") == (
+        "tests/test_harness_goal_contract.py\n"
+    )
+    assert (bundle_dir / "tests" / "test_harness_goal_gates.py").read_text(encoding="utf-8") == (
+        "tests/test_harness_goal_gates.py\n"
+    )
+    assert (bundle_dir / "tests" / "test_harness_product_audit.py").read_text(encoding="utf-8") == (
+        "tests/test_harness_product_audit.py\n"
+    )
+    assert (bundle_dir / "tests" / "test_harness_product_maintainability.py").read_text(encoding="utf-8") == (
+        "tests/test_harness_product_maintainability.py\n"
+    )
+    assert (bundle_dir / "tests" / "test_harness_release.py").read_text(encoding="utf-8") == (
+        "tests/test_harness_release.py\n"
+    )
     assert (bundle_dir / "scripts" / "harness_task_cli.py").read_text(encoding="utf-8") == (
         "scripts/harness_task_cli.py\n"
     )
@@ -286,7 +320,12 @@ def test_starter_bundle_excludes_live_state_and_can_create_project(tmp_path: Pat
     assert "task queue --auto`와 `./harness run`은 자연어를 다시 파싱하지 않고" in task_intake_doc
     assert "--ai-response <json>" in task_intake_doc
     assert "./harness watch" in start_here_doc
+    assert "가짜 성공" in start_here_doc
+    assert "localStorage" in start_here_doc
+    assert "README-only" in start_here_doc
     assert "./harness target archive plan my-app" in operator_doc
+    assert "가짜 성공" in operator_doc
+    assert "production gate evidence" in operator_doc
     assert "product repo 파일은 archive 대상이 아니다" in start_here_doc
     assert "SUMMARY_TARGET_CHARS" in (bundle / "scripts" / "harness_telegram_bridge.py").read_text(encoding="utf-8")
     assert "Starter Goal" in (bundle / "docs" / "harness" / "GOALS.md").read_text(encoding="utf-8")
@@ -446,14 +485,24 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "reports" / "harness-autonomy" / "README.md").exists()
     assert (bundle / "scripts" / "harness_task_intake.py").exists()
     assert (bundle / "scripts" / "harness_goal.py").exists()
+    assert (bundle / "scripts" / "harness_goal_contract.py").exists()
+    assert (bundle / "scripts" / "harness_goal_gates.py").exists()
     assert (bundle / "scripts" / "harness_fleet.py").exists()
+    assert (bundle / "scripts" / "harness_product_audit.py").exists()
+    assert (bundle / "scripts" / "harness_product_audit_support.py").exists()
     assert (bundle / "scripts" / "harness_publication.py").exists()
+    assert (bundle / "scripts" / "harness_release.py").exists()
     assert (bundle / "scripts" / "harness_target_remove.py").exists()
     assert (bundle / "scripts" / "harness_incident.py").exists()
     assert (bundle / "tests" / "test_harness_task_intake.py").exists()
     assert (bundle / "tests" / "test_harness_goal.py").exists()
+    assert (bundle / "tests" / "test_harness_goal_contract.py").exists()
+    assert (bundle / "tests" / "test_harness_goal_gates.py").exists()
     assert (bundle / "tests" / "test_harness_fleet.py").exists()
+    assert (bundle / "tests" / "test_harness_product_audit.py").exists()
+    assert (bundle / "tests" / "test_harness_product_maintainability.py").exists()
     assert (bundle / "tests" / "test_harness_publication.py").exists()
+    assert (bundle / "tests" / "test_harness_release.py").exists()
     assert (bundle / "tests" / "test_harness_target_archive.py").exists()
     assert (bundle / "tests" / "test_harness_target_remove.py").exists()
     assert (bundle / "tests" / "test_harness_incident.py").exists()
@@ -503,6 +552,9 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "queued auto 요청을 반복 처리" not in readme
     assert "기본 autopilot 루프" not in readme
     assert "완료 처리, product local commit, task branch push, PR publication receipt" in readme
+    assert "localStorage" in readme
+    assert "README-only" in readme
+    assert "가짜 성공" in readme
     assert "`./harness task`, `./harness task review`" in readme
     assert "자동 원격 롤백은 없다" in readme
     assert "`./harness task` 는 요구사항 초안을 만든다" not in readme

@@ -80,7 +80,12 @@
 - `scripts/harness_controller.py`
 - `scripts/harness_controller_sanitization.py`
 - `scripts/harness_goal.py`
+- `scripts/harness_goal_contract.py`
+- `scripts/harness_goal_gates.py`
+- `scripts/harness_product_audit.py`
+- `scripts/harness_product_audit_support.py`
 - `scripts/harness_publication.py`
+- `scripts/harness_release.py`
 - `scripts/harness_target_remove.py`
 - `scripts/harness_incident.py`
 - `scripts/harness_operator_wait.py`
@@ -157,6 +162,7 @@
 - `public-contract` 는 version/changelog/release note 까지만 요구한다.
 - `starter-export` 만 `docs/harness/START_HERE.md`, `docs/harness/FRAMEWORK_EXPORT.md`, export source dry-check 를 요구한다.
 - `kernel-internal`, `public-contract`, `policy` 변경은 하네스 runtime, harness-focused tests, docs/adapters 의 net LOC 예산을 보고한다. 기본값은 `net LOC <= 0` 이지만 순증은 warning-only 이며, selected run evidence 에 P0/P1 근거가 있는 `Diet-Exception:` 또는 후속 diet backlog 근거를 남긴다.
+- `docs/harness/MODULE_MAP.md` 는 code diet 판단의 책임 경계 문서다. 새 owner module 을 추가하거나 큰 파일에서 책임을 빼면 export/release/guard related-test mapping 과 함께 갱신한다.
 - product-only 변경과 `runs/harness/**` run evidence 는 하네스 LOC 예산 대상이 아니다.
 - 새 parser/writer/ledger/scheduler/prompt surface 는 기본적으로 추가하지 않는다. 새 canonical path 가 필요하면 같은 semantic legacy path 를 같은 변경에서 retire 해야 한다.
 - `POLICY.md` 는 current repo 에서는 canonical 이지만, `START_HERE.md` 에서는 optional extension 으로만 반영한다.

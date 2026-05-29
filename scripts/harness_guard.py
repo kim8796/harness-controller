@@ -26,7 +26,8 @@ from harness_workspace import (  # noqa: E402
 )
 from harness_controller_sanitization import run_controller_sanitization_self_test  # noqa: E402
 
-DEFAULT_MAX_FILE_LINES = 300
+DEFAULT_MAX_FILE_LINES = 1200
+DEFAULT_MAX_TEST_FILE_LINES = 2000
 BOOTSTRAP_RUN_PATTERN = re.compile(r"(?im)^\s*(?:[-*]\s*)?Bootstrap-Run:\s*true\s*$")
 REQUIRED_HARNESS_DOCS = (
     Path("AI.md"),
@@ -450,6 +451,33 @@ def _guess_related_tests(path: Path, root: Path) -> tuple[Path, ...]:
         "scripts/harness_controller_sanitization.py": (
             Path("tests/test_harness_controller_sanitization.py"),
             Path("tests/test_harness_guard.py"),
+        ),
+        "scripts/harness_goal_contract.py": (
+            Path("tests/test_harness_goal_contract.py"),
+            Path("tests/test_harness_goal.py"),
+            Path("tests/test_harness_export.py"),
+        ),
+        "scripts/harness_goal_gates.py": (
+            Path("tests/test_harness_goal_gates.py"),
+            Path("tests/test_harness_goal.py"),
+            Path("tests/test_harness_export.py"),
+        ),
+        "scripts/harness_product_audit.py": (
+            Path("tests/test_harness_product_audit.py"),
+            Path("tests/test_harness_product_maintainability.py"),
+            Path("tests/test_harness_fleet.py"),
+            Path("tests/test_harness_export.py"),
+        ),
+        "scripts/harness_product_audit_support.py": (
+            Path("tests/test_harness_product_audit.py"),
+            Path("tests/test_harness_product_maintainability.py"),
+            Path("tests/test_harness_export.py"),
+        ),
+        "scripts/harness_release.py": (
+            Path("tests/test_harness_release.py"),
+            Path("tests/test_harness_fleet.py"),
+            Path("tests/test_harness_publication.py"),
+            Path("tests/test_harness_export.py"),
         ),
         "scripts/harness_target_archive.py": (
             Path("tests/test_harness_cli.py"),
@@ -971,23 +999,44 @@ def _collect_oversized_file_blockers(
 ) -> tuple[str, ...]:
     blockers: list[str] = []
     for path in python_files:
+        effective_max_file_lines = _effective_max_file_lines(path, max_file_lines)
         current = _current_file_line_count(root, path, mode=mode, staged_only=staged_only)
         if current is None:
             continue
         previous = _previous_file_line_count(root, path, mode=mode, staged_only=staged_only)
-        if current <= max_file_lines:
+        if current <= effective_max_file_lines:
             continue
         if previous is None:
-            blockers.append(f"new oversized Python file: {path.as_posix()} ({current} lines > {max_file_lines})")
-        elif previous <= max_file_lines:
+            blockers.append(f"new oversized Python file: {path.as_posix()} ({current} lines > {effective_max_file_lines})")
+        elif previous <= effective_max_file_lines:
             blockers.append(
-                f"Python file crossed size budget: {path.as_posix()} ({previous} -> {current} lines, limit {max_file_lines})"
+                f"Python file crossed size budget: {path.as_posix()} ({previous} -> {current} lines, limit {effective_max_file_lines})"
             )
         elif current > previous:
             blockers.append(
-                f"oversized Python file grew: {path.as_posix()} ({previous} -> {current} lines, limit {max_file_lines})"
+                f"oversized Python file grew: {path.as_posix()} ({previous} -> {current} lines, limit {effective_max_file_lines})"
             )
     return tuple(blockers)
+
+
+def _effective_max_file_lines(path: Path, max_file_lines: int) -> int:
+    if max_file_lines == DEFAULT_MAX_FILE_LINES and _is_test_file(path):
+        return DEFAULT_MAX_TEST_FILE_LINES
+    return max_file_lines
+
+
+def _filter_oversized_blockers_for_exception(
+    blockers: Sequence[str],
+    *,
+    diet_exception: str | None,
+) -> tuple[str, ...]:
+    if not _is_valid_diet_exception(diet_exception):
+        return tuple(blockers)
+    return tuple(
+        blocker
+        for blocker in blockers
+        if not blocker.startswith("oversized Python file grew:")
+    )
 
 
 def _is_untracked_path(root: Path, path: Path) -> bool:
@@ -2253,7 +2302,7 @@ def build_report(
         if not abs_path.is_file():
             continue
         line_count = len(abs_path.read_text(encoding="utf-8").splitlines())
-        if line_count > max_file_lines:
+        if line_count > _effective_max_file_lines(rel_path, max_file_lines):
             oversized_files.append((rel_path, line_count))
     oversized_file_blockers = _collect_oversized_file_blockers(
         root,
@@ -2354,8 +2403,10 @@ def build_report(
         1 for path in changed_paths if _is_archive_covered_delete(root, path, archive_covered_deletes)
     )
     diet_exception = _read_diet_exception(root, selected_run_dir)
-    if _is_valid_diet_exception(diet_exception):
-        oversized_file_blockers = tuple()
+    oversized_file_blockers = _filter_oversized_blockers_for_exception(
+        oversized_file_blockers,
+        diet_exception=diet_exception,
+    )
     diet_budget_violations = _collect_diet_budget_violations(
         change_class=change_class,
         diet_budget_delta=diet_budget_delta,

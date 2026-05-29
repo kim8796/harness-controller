@@ -48,6 +48,22 @@ def test_controller_sanitization_report_allows_only_legacy_historical_path() -> 
     assert any("truncated" in failure for failure in failures)
 
 
+def test_controller_sanitization_self_test_covers_goal_gate_product_audit_tests() -> None:
+    module = _load_module()
+
+    assert {
+        "tests/test_harness_fleet.py",
+        "tests/test_harness_goal.py",
+        "tests/test_harness_goal_contract.py",
+        "tests/test_harness_goal_gates.py",
+        "tests/test_harness_guard.py",
+        "tests/test_harness_product_audit.py",
+        "tests/test_harness_product_maintainability.py",
+        "tests/test_harness_release.py",
+        "tests/test_harness_watch.py",
+    }.issubset(set(module.CONTROLLER_SANITIZATION_SELF_TEST_TARGETS))
+
+
 def test_controller_sanitization_self_test_exports_and_tests_bundle(
     tmp_path: Path,
     monkeypatch,

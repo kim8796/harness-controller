@@ -13,50 +13,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping, Sequence
 
+import harness_goal_contract
+import harness_goal_gates
 import harness_loop
+import harness_product_audit
 import harness_task_intake
 
 
-GOAL_SCHEMA_VERSION = 1
+GOAL_SCHEMA_VERSION = 2
 GOALS_DIR = Path("goals")
 ACTIVE_GOAL_FILE = GOALS_DIR / "active-goal.json"
 GOAL_DRAFTS_DIR = GOALS_DIR / "drafts"
-PRODUCTION_COMPLETION_GATES: tuple[dict[str, str], ...] = (
-    {"id": "deployed_url", "label": "Vercel production URL"},
-    {"id": "database_persistence", "label": "Supabase DB persistence"},
-    {"id": "auth_flow", "label": "Production auth flow"},
-    {"id": "realtime_two_user_chat", "label": "Realtime two-user chat"},
-    {"id": "ai_reply", "label": "AI reply for AI-only users"},
-    {"id": "image_upload", "label": "Image upload and original view"},
-    {"id": "report_block", "label": "Report and block persistence"},
-    {"id": "production_e2e_smoke", "label": "Production E2E smoke"},
-)
-PRODUCTION_GOAL_KEYWORDS = (
-    "배포",
-    "상용",
-    "서비스",
-    "실사용자",
-    "실제 서비스",
-    "production",
-    "prod",
-    "vercel",
-    "supabase",
-    "db",
-    "database",
-    "인증",
-    "auth",
-    "openai",
-    "ai",
-)
-PROTOTYPE_GOAL_KEYWORDS = (
-    "mvp",
-    "목업",
-    "프로토타입",
-    "로컬만",
-    "local-only",
-    "prototype",
-    "mock",
-)
 MAX_GOAL_SPEC_BYTES = 512_000
 MAX_GOAL_ATTACHMENT_BYTES = 10_000_000
 MAX_GOAL_ATTACHMENTS = 50
@@ -439,24 +406,75 @@ def _clean_bullet(line: str) -> str:
 
 
 def _success_criteria_from_spec(text: str, *, fallback_title: str) -> list[str]:
-    lines = [_clean_bullet(line) for line in _section_lines(text, ("Acceptance Criteria", "Acceptance", "완료 조건", "수용 기준"))]
-    criteria = [line for line in lines if line and line not in {"-", "없음", "none", "n/a"}]
+    criteria = harness_goal_contract.success_criteria_from_spec(text)
     return criteria[:12] or _default_success_criteria(fallback_title)
 
 
 def _classify_service_level(*texts: str) -> str:
-    haystack = " ".join(text for text in texts if text).casefold()
-    if any(keyword.casefold() in haystack for keyword in PROTOTYPE_GOAL_KEYWORDS):
-        return "prototype"
-    if any(keyword.casefold() in haystack for keyword in PRODUCTION_GOAL_KEYWORDS):
-        return "production"
-    return "production"
+    return harness_goal_contract.service_level_for_standard(harness_goal_contract.classify_product_standard(*texts))
 
 
 def _completion_gates_for_service_level(service_level: str) -> list[dict[str, str]]:
     if service_level == "production":
-        return [dict(gate) for gate in PRODUCTION_COMPLETION_GATES]
+        return harness_goal_gates.gates_for_standard("production_web")
     return []
+
+
+def _completion_gates_for_goal_contract(contract: Mapping[str, object]) -> list[dict[str, str]]:
+    return harness_goal_gates.gates_for_standard(str(contract.get("product_standard") or "production_web"))
+
+
+def _build_goal_contract(
+    *,
+    title: str,
+    spec_text: str = "",
+    success_criteria: Sequence[str] = (),
+    spec_path: str = "",
+    attachment_manifest_path: str = "",
+    attachments: Sequence[Mapping[str, object]] = (),
+) -> dict[str, object]:
+    return harness_goal_contract.build_goal_contract(
+        title=title,
+        spec_text=spec_text,
+        success_criteria=success_criteria,
+        source_spec_path=spec_path,
+        attachment_manifest_path=attachment_manifest_path,
+        attachments=attachments,
+    )
+
+
+def _goal_traceability_payload(
+    *,
+    goal_id: str,
+    target_id: str,
+    spec_path: str = "",
+    attachment_manifest_path: str = "",
+    attachments: Sequence[Mapping[str, object]] = (),
+    success_criteria: Sequence[str] = (),
+) -> dict[str, object]:
+    return {
+        "schema_version": GOAL_SCHEMA_VERSION,
+        "goal_id": goal_id,
+        "target_id": target_id,
+        "source_spec_path": spec_path,
+        "attachment_manifest_path": attachment_manifest_path,
+        "attachment_refs": [
+            {
+                "path": str(item.get("path") or ""),
+                "caption": str(item.get("caption") or ""),
+                "media_type": str(item.get("media_type") or ""),
+            }
+            for item in attachments
+            if isinstance(item, Mapping) and str(item.get("path") or "")
+        ],
+        "criteria_refs": [
+            {"id": f"criterion-{index:02d}", "text": str(item)}
+            for index, item in enumerate(success_criteria, start=1)
+            if str(item)
+        ],
+        "task_links": [],
+        "evidence_links": [],
+    }
 
 
 def _completion_gate_status(payload: Mapping[str, object]) -> dict[str, object]:
@@ -490,24 +508,157 @@ def _completion_gate_status(payload: Mapping[str, object]) -> dict[str, object]:
     }
 
 
+def _target_repo_from_state_root(state_root: Path) -> Path | None:
+    target_config = state_root / "target.json"
+    if not target_config.exists() or target_config.is_symlink():
+        return None
+    try:
+        payload = _read_json(target_config)
+    except (OSError, GoalError, json.JSONDecodeError):
+        return None
+    repo_value = str(payload.get("repo") or "").strip()
+    if not repo_value:
+        return None
+    repo = Path(repo_value).expanduser().resolve()
+    if not repo.exists() or not repo.is_dir() or repo.is_symlink():
+        return None
+    return repo
+
+
+def _product_head_sha(repo: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    sha = result.stdout.strip()
+    return sha if re.fullmatch(r"(?i)[0-9a-f]{7,40}", sha) else None
+
+
+def _completion_gates_with_required_contract_gates(
+    current_gates: object,
+    goal_contract: Mapping[str, object],
+) -> list[dict[str, object]]:
+    required_gates = _completion_gates_for_goal_contract(goal_contract)
+    required_ids = harness_goal_gates.gate_ids(required_gates)
+    if not isinstance(current_gates, list):
+        return required_gates
+    existing: list[dict[str, object]] = [
+        dict(gate)
+        for gate in current_gates
+        if isinstance(gate, Mapping) and str(gate.get("id") or "").strip()
+    ]
+    existing_ids = harness_goal_gates.gate_ids(existing)
+    if required_ids and not required_ids.issubset(existing_ids):
+        by_id = {str(gate.get("id") or "").strip(): dict(gate) for gate in existing}
+        merged = [dict(gate) for gate in required_gates]
+        for gate_id, gate in sorted(by_id.items()):
+            if gate_id not in required_ids:
+                merged.append(gate)
+        return merged
+    return existing
+
+
+def _apply_product_audit_to_gate_evidence(
+    *,
+    state_root: Path,
+    goal_payload: Mapping[str, object],
+    allowed_gate_ids: set[str],
+    gate_evidence: Mapping[str, object],
+) -> tuple[dict[str, object], dict[str, object] | None]:
+    if not allowed_gate_ids:
+        return dict(gate_evidence), None
+    repo = _target_repo_from_state_root(state_root)
+    if repo is None:
+        audit = {
+            "status": "failed",
+            "failed_gate_ids": sorted(allowed_gate_ids),
+            "enforced_gate_ids": sorted(allowed_gate_ids),
+            "findings": [
+                {
+                    "id": "missing_target_repo_for_gate_audit",
+                    "kind": "missing_target_repo_for_gate_audit",
+                    "severity": "blocker",
+                    "impacted_gates": sorted(allowed_gate_ids),
+                    "summary": "Production goal gates require a registered product repo for product audit and current commit binding.",
+                    "evidence": [],
+                }
+            ],
+        }
+        return {}, audit
+    current_head = _product_head_sha(repo)
+    if current_head is None:
+        audit = {
+            "status": "failed",
+            "failed_gate_ids": sorted(allowed_gate_ids),
+            "enforced_gate_ids": sorted(allowed_gate_ids),
+            "findings": [
+                {
+                    "id": "missing_product_head_for_gate_audit",
+                    "kind": "missing_product_head_for_gate_audit",
+                    "severity": "blocker",
+                    "impacted_gates": sorted(allowed_gate_ids),
+                    "summary": "Production goal gates require the current product git commit.",
+                    "evidence": [],
+                }
+            ],
+        }
+        return {}, audit
+    current_bound_evidence = {
+        str(gate_id): entry
+        for gate_id, entry in gate_evidence.items()
+        if isinstance(entry, Mapping) and str(entry.get("product_commit_sha") or "") == current_head
+    }
+    audit = harness_product_audit.audit_product_for_goal(target_repo=repo, goal_payload=goal_payload)
+    if audit.get("status") != "failed":
+        return current_bound_evidence, audit if audit.get("status") else None
+    failed_gate_ids = {str(item) for item in audit.get("failed_gate_ids", []) if str(item)}
+    if not failed_gate_ids:
+        failed_gate_ids = set(allowed_gate_ids)
+    blocked = failed_gate_ids & allowed_gate_ids
+    if not blocked:
+        blocked = set(allowed_gate_ids)
+    filtered = {
+        str(gate_id): entry
+        for gate_id, entry in current_bound_evidence.items()
+        if str(gate_id) not in blocked
+    }
+    audit = dict(audit)
+    audit["enforced_gate_ids"] = sorted(blocked)
+    return filtered, audit
+
+
 def _normalize_gate_evidence_entry(
     *,
     gate_id: str,
     status: object,
     source_path: str,
     evidence: object = "",
+    product_commit_sha: object = "",
+    environment: object = "",
+    validator: object = "",
+    observed_result: object = "",
+    checked_at: object = "",
 ) -> dict[str, object] | None:
-    normalized_status = str(status or "").strip().lower()
-    if normalized_status not in {"passed", "done", "ok"}:
+    joined = "\n".join(str(value or "") for value in (evidence, product_commit_sha, environment, validator, observed_result, checked_at))
+    if _is_secretish_text(joined):
         return None
-    if not gate_id.strip():
-        return None
-    entry: dict[str, object] = {"status": normalized_status, "source": source_path}
-    evidence_text = str(evidence or "").strip()
-    if not evidence_text or _is_secretish_text(evidence_text):
-        return None
-    entry["evidence"] = evidence_text[:300]
-    return entry
+    return harness_goal_gates.normalize_gate_evidence_entry(
+        gate_id=gate_id,
+        status=status,
+        source_path=source_path,
+        evidence=evidence,
+        product_commit_sha=product_commit_sha,
+        environment=environment,
+        validator=validator,
+        observed_result=observed_result,
+        checked_at=checked_at,
+    )
 
 
 def _sanitize_completion_gate_evidence(
@@ -515,24 +666,7 @@ def _sanitize_completion_gate_evidence(
     *,
     allowed_gate_ids: set[str],
 ) -> dict[str, object]:
-    if not isinstance(raw_evidence, Mapping):
-        return {}
-    sanitized: dict[str, object] = {}
-    for gate_id, raw_entry in raw_evidence.items():
-        normalized_gate_id = str(gate_id or "").strip()
-        if normalized_gate_id not in allowed_gate_ids or not isinstance(raw_entry, Mapping):
-            continue
-        source = str(raw_entry.get("source") or "goal.json").strip()
-        evidence = raw_entry.get("evidence") or raw_entry.get("url") or raw_entry.get("receipt")
-        normalized = _normalize_gate_evidence_entry(
-            gate_id=normalized_gate_id,
-            status=raw_entry.get("status"),
-            source_path=source,
-            evidence=evidence,
-        )
-        if normalized is not None:
-            sanitized[normalized_gate_id] = normalized
-    return sanitized
+    return {}
 
 
 def _collect_completion_gate_evidence(
@@ -553,7 +687,9 @@ def _collect_completion_gate_evidence(
             payload = _read_json(evidence_path)
         except (OSError, GoalError, json.JSONDecodeError):
             continue
-        if str(payload.get("target_id") or "") not in {"", target_id}:
+        if str(payload.get("operation") or "") != harness_goal_gates.REQUIRED_GATE_OPERATION:
+            continue
+        if str(payload.get("target_id") or "") != target_id:
             continue
         if str(payload.get("goal_id") or "") != goal_id:
             continue
@@ -561,7 +697,7 @@ def _collect_completion_gate_evidence(
             continue
         source_path = _sidecar_relative(state_root, evidence_path)
         raw_gates = payload.get("completion_gates") or payload.get("completion_gate_evidence")
-        entries: list[tuple[str, object, object]] = []
+        entries: list[tuple[str, object, object, object, object, object, object, object]] = []
         if isinstance(raw_gates, Mapping):
             for gate_id, raw_entry in raw_gates.items():
                 if isinstance(raw_entry, Mapping):
@@ -570,10 +706,26 @@ def _collect_completion_gate_evidence(
                             str(gate_id),
                             raw_entry.get("status"),
                             raw_entry.get("evidence") or raw_entry.get("url") or raw_entry.get("receipt"),
+                            raw_entry.get("product_commit_sha") or payload.get("product_commit_sha"),
+                            raw_entry.get("environment") or payload.get("environment"),
+                            raw_entry.get("validator") or payload.get("validator"),
+                            raw_entry.get("observed_result") or payload.get("observed_result"),
+                            raw_entry.get("checked_at") or payload.get("checked_at"),
                         )
                     )
                 else:
-                    entries.append((str(gate_id), raw_entry, ""))
+                    entries.append(
+                        (
+                            str(gate_id),
+                            raw_entry,
+                            "",
+                            payload.get("product_commit_sha"),
+                            payload.get("environment"),
+                            payload.get("validator"),
+                            payload.get("observed_result"),
+                            payload.get("checked_at"),
+                        )
+                    )
         elif isinstance(raw_gates, list):
             for raw_entry in raw_gates:
                 if not isinstance(raw_entry, Mapping):
@@ -583,9 +735,14 @@ def _collect_completion_gate_evidence(
                         str(raw_entry.get("id") or raw_entry.get("gate_id") or ""),
                         raw_entry.get("status"),
                         raw_entry.get("evidence") or raw_entry.get("url") or raw_entry.get("receipt"),
+                        raw_entry.get("product_commit_sha") or payload.get("product_commit_sha"),
+                        raw_entry.get("environment") or payload.get("environment"),
+                        raw_entry.get("validator") or payload.get("validator"),
+                        raw_entry.get("observed_result") or payload.get("observed_result"),
+                        raw_entry.get("checked_at") or payload.get("checked_at"),
                     )
                 )
-        for gate_id, status, evidence in entries:
+        for gate_id, status, evidence, product_commit_sha, environment, validator, observed_result, checked_at in entries:
             normalized_gate_id = gate_id.strip()
             if normalized_gate_id not in allowed_gate_ids:
                 continue
@@ -594,6 +751,11 @@ def _collect_completion_gate_evidence(
                 status=status,
                 source_path=source_path,
                 evidence=evidence,
+                product_commit_sha=product_commit_sha,
+                environment=environment,
+                validator=validator,
+                observed_result=observed_result,
+                checked_at=checked_at,
             )
             if normalized_entry is not None:
                 collected[normalized_gate_id] = normalized_entry
@@ -714,12 +876,17 @@ def create_goal(
     timestamp = now or utc_timestamp()
     if active is not None and replace:
         archive_goal(state_root=state_root, goal_id=active.goal_id, status="archived", reason="replaced by new goal")
-    service_level = _classify_service_level(title)
+    success_criteria = _default_success_criteria(title)
+    goal_contract = _build_goal_contract(title=title, success_criteria=success_criteria)
+    service_level = str(goal_contract["service_level"])
     goal_id = _safe_goal_id(title)
     goal_dir = _goals_root(state_root) / goal_id
     if goal_dir.exists():
         raise GoalError(f"goal already exists: {goal_id}")
     goal_dir.mkdir(parents=True)
+    traceability_path = goal_dir / "traceability.json"
+    traceability_relpath = _sidecar_relative(state_root, traceability_path)
+    goal_contract.setdefault("traceability_path", traceability_relpath)
     payload = {
         "schema_version": GOAL_SCHEMA_VERSION,
         "goal_id": goal_id,
@@ -728,14 +895,24 @@ def create_goal(
         "status": "active",
         "created_at": timestamp,
         "updated_at": timestamp,
-        "success_criteria": _default_success_criteria(title),
+        "success_criteria": success_criteria,
         "service_level": service_level,
-        "completion_gates": _completion_gates_for_service_level(service_level),
+        "goal_contract": goal_contract,
+        "completion_gates": _completion_gates_for_goal_contract(goal_contract),
         "completion_gate_evidence": {},
         "active_plan_id": "",
         "linked_backlog_ids": [],
+        "traceability_path": traceability_relpath,
         "publication": {},
     }
+    _write_json(
+        traceability_path,
+        _goal_traceability_payload(
+            goal_id=goal_id,
+            target_id=target_id,
+            success_criteria=success_criteria,
+        ),
+    )
     _write_json(goal_dir / "goal.json", payload)
     _write_json(
         goal_dir / "progress.json",
@@ -808,13 +985,36 @@ def create_goal_from_spec(
             captions=image_captions,
             attachments_dir=goal_dir / "attachments",
         )
+        attachment_manifest_path = goal_dir / "attachments" / "attachment-manifest.json"
+        _write_json(
+            attachment_manifest_path,
+            {
+                "schema_version": GOAL_SCHEMA_VERSION,
+                "goal_id": goal_id,
+                "target_id": target_id,
+                "attachments": attachments,
+            },
+        )
         source_meta = {
             "path": _sidecar_relative(state_root, spec_target),
             "size": len(spec_text.encode("utf-8")),
             "sha256_prefix": hashlib.sha256(spec_text.encode("utf-8")).hexdigest()[:16],
         }
         context_summary = _context_summary_from_spec(spec_text)
-        service_level = _classify_service_level(resolved_title, spec_text)
+        success_criteria = _success_criteria_from_spec(spec_text, fallback_title=resolved_title)
+        manifest_relpath = _sidecar_relative(state_root, attachment_manifest_path)
+        traceability_path = goal_dir / "traceability.json"
+        traceability_relpath = _sidecar_relative(state_root, traceability_path)
+        goal_contract = _build_goal_contract(
+            title=resolved_title,
+            spec_text=spec_text,
+            success_criteria=success_criteria,
+            spec_path=str(source_meta["path"]),
+            attachment_manifest_path=manifest_relpath,
+            attachments=attachments,
+        )
+        goal_contract.setdefault("traceability_path", traceability_relpath)
+        service_level = str(goal_contract["service_level"])
         payload = {
             "schema_version": GOAL_SCHEMA_VERSION,
             "goal_id": goal_id,
@@ -823,19 +1023,33 @@ def create_goal_from_spec(
             "status": "active",
             "created_at": timestamp,
             "updated_at": timestamp,
-            "success_criteria": _success_criteria_from_spec(spec_text, fallback_title=resolved_title),
+            "success_criteria": success_criteria,
             "service_level": service_level,
-            "completion_gates": _completion_gates_for_service_level(service_level),
+            "goal_contract": goal_contract,
+            "completion_gates": _completion_gates_for_goal_contract(goal_contract),
             "completion_gate_evidence": {},
             "active_plan_id": "",
             "linked_backlog_ids": [],
+            "traceability_path": traceability_relpath,
             "publication": {},
             "source": "spec",
             "spec_path": source_meta["path"],
             "source_file": source_meta,
             "attachments": attachments,
+            "attachment_manifest_path": manifest_relpath,
             "context_summary": context_summary,
         }
+        _write_json(
+            traceability_path,
+            _goal_traceability_payload(
+                goal_id=goal_id,
+                target_id=target_id,
+                spec_path=str(source_meta["path"]),
+                attachment_manifest_path=manifest_relpath,
+                attachments=attachments,
+                success_criteria=success_criteria,
+            ),
+        )
         _write_json(goal_dir / "goal.json", payload)
         _write_json(
             goal_dir / "progress.json",
@@ -1182,69 +1396,155 @@ def _empty_repo_task_validation(kind: str) -> list[str]:
     return ["`git diff -- README.md package.json src/** public/**`"]
 
 
-def _production_goal_specs(title: str, spec_context: str) -> list[tuple[str, str, str, list[str]]]:
-    return [
+def _production_goal_specs(
+    title: str,
+    spec_context: str,
+    *,
+    gate_ids: Sequence[str],
+) -> list[tuple[str, str, str, list[str]]]:
+    required_gates = {str(gate_id).strip() for gate_id in gate_ids if str(gate_id).strip()}
+    specs: list[tuple[str, str, str, list[str]]] = [
         (
             "architecture",
             "Production architecture baseline",
             f"Next.js/Vercel, Supabase, OpenAI 기반 production 서비스 구조를 고정한다: {title}.{spec_context}",
             ["README.md", "package.json", "src/**", "supabase/**", "docs/**"],
+        )
+    ]
+    gate_driven_specs: tuple[tuple[set[str], tuple[str, str, str, list[str]]], ...] = (
+        (
+            {"auth_flow"},
+            (
+                "auth",
+                "Production auth and profile",
+                f"Supabase Auth 기반 가입/로그인/프로필 흐름을 구현한다: {title}.{spec_context}",
+                ["src/**", "supabase/**", "package.json"],
+            ),
         ),
         (
-            "auth",
-            "Production auth and profile",
-            f"Supabase Auth 기반 가입/로그인/프로필 흐름을 구현한다: {title}.{spec_context}",
-            ["src/**", "supabase/**", "package.json"],
+            {"database_persistence"},
+            (
+                "database",
+                "Supabase database schema",
+                f"프로필, 대화, 메시지, 신고, 차단, 미디어, AI 사용량 schema를 만든다: {title}.{spec_context}",
+                ["supabase/**", "tests/**", "package.json"],
+            ),
         ),
         (
-            "database",
-            "Supabase database schema",
-            f"프로필, 대화, 메시지, 신고, 차단, 미디어, AI 사용량 schema를 만든다: {title}.{spec_context}",
-            ["supabase/**", "tests/**", "package.json"],
+            {"auth_flow", "database_persistence", "realtime_two_user_chat", "ai_reply", "image_upload", "report_block"},
+            (
+                "ui-backend",
+                "UI-backend integration",
+                f"화면 흐름이 Supabase/Auth/API boundary를 통해 실제 backend state와 연결되게 한다: {title}.{spec_context}",
+                ["src/**", "supabase/**", "tests/**", "package.json"],
+            ),
         ),
         (
-            "realtime",
-            "Realtime chat persistence",
-            f"두 사용자 간 메시지가 DB에 저장되고 realtime으로 반영되게 한다: {title}.{spec_context}",
-            ["src/**", "supabase/**", "tests/**", "package.json"],
+            {"realtime_two_user_chat"},
+            (
+                "realtime",
+                "Realtime chat persistence",
+                f"두 사용자 간 메시지가 DB에 저장되고 realtime으로 반영되게 한다: {title}.{spec_context}",
+                ["src/**", "supabase/**", "tests/**", "package.json"],
+            ),
         ),
         (
-            "ai",
-            "AI-only user replies",
-            f"AI 사용자에게만 OpenAI 응답을 생성하고 실제 사용자 간 채팅은 LLM을 거치지 않게 한다: {title}.{spec_context}",
-            ["src/**", "tests/**", "package.json"],
+            {"ai_reply"},
+            (
+                "ai",
+                "AI-only user replies",
+                f"AI 사용자에게만 OpenAI 응답을 생성하고 실제 사용자 간 채팅은 LLM을 거치지 않게 한다: {title}.{spec_context}",
+                ["src/**", "tests/**", "package.json"],
+            ),
         ),
         (
-            "media",
-            "Production media storage",
-            f"이미지 원본/썸네일을 Supabase Storage에 저장하고 UI에서 확인하게 한다: {title}.{spec_context}",
-            ["src/**", "supabase/**", "tests/**", "package.json"],
+            {"image_upload"},
+            (
+                "media",
+                "Production media storage",
+                f"이미지 원본/썸네일을 Supabase Storage에 저장하고 UI에서 확인하게 한다: {title}.{spec_context}",
+                ["src/**", "supabase/**", "tests/**", "package.json"],
+            ),
         ),
         (
-            "moderation",
-            "Reporting and blocking",
-            f"신고, 차단, 금칙어 필터와 관리자 검토 표면을 구현한다: {title}.{spec_context}",
-            ["src/**", "supabase/**", "tests/**", "package.json"],
+            {"report_block"},
+            (
+                "moderation",
+                "Reporting and blocking",
+                f"신고, 차단, 금칙어 필터와 관리자 검토 표면을 구현한다: {title}.{spec_context}",
+                ["src/**", "supabase/**", "tests/**", "package.json"],
+            ),
         ),
         (
-            "deploy",
-            "Production deploy readiness",
-            f"Vercel/Supabase/OpenAI env readiness와 배포 smoke를 연결한다: {title}.{spec_context}",
-            ["README.md", "package.json", "src/**", "docs/**", "tests/**"],
+            {"deployed_url"},
+            (
+                "deploy",
+                "Production deploy readiness",
+                f"Vercel/Supabase/OpenAI env readiness와 배포 smoke를 연결한다: {title}.{spec_context}",
+                ["README.md", "package.json", "src/**", "docs/**", "tests/**"],
+            ),
         ),
         (
-            "e2e",
-            "Production E2E smoke",
-            f"production URL에서 가입, 프로필, 채팅, AI 응답, 이미지, 신고/차단 smoke를 검증한다: {title}.{spec_context}",
-            ["tests/**", "package.json", "README.md"],
+            {"production_e2e_smoke"},
+            (
+                "e2e",
+                "Production E2E smoke",
+                f"production URL에서 가입, 프로필, 채팅, AI 응답, 이미지, 신고/차단 smoke를 검증한다: {title}.{spec_context}",
+                ["tests/**", "package.json", "README.md"],
+            ),
         ),
+    )
+    for matching_gates, spec in gate_driven_specs:
+        if not required_gates or required_gates.intersection(matching_gates):
+            specs.append(spec)
+    specs.append(
         (
             "docs",
-            "Policy and operator docs",
-            f"개인정보, 약관, 커뮤니티 가이드, 비랜덤채팅 포지셔닝 문서를 정리한다: {title}.{spec_context}",
-            ["README.md", "docs/**", "src/**"],
+            "Maintainability and operator handoff",
+            f"사람/AI가 이어받을 수 있는 architecture, codemap, operations, testing, env, decision 기록을 정리한다: {title}.{spec_context}",
+            ["README.md", "docs/**", ".env.example", "package.json", "src/**", "tests/**"],
+        )
+    )
+    return specs
+
+
+def _native_goal_specs(title: str, spec_context: str) -> list[tuple[str, str, str, list[str]]]:
+    return [
+        (
+            "native",
+            "Native app packaging",
+            f"웹 production 앱을 기준으로 iOS/Android 네이티브 포팅 전략과 build path를 만든다: {title}.{spec_context}",
+            ["README.md", "package.json", "src/**", "ios/**", "android/**", "capacitor.config.*", "app.json", "eas.json", "docs/**"],
+        ),
+        (
+            "store",
+            "App Store and Play Store readiness",
+            f"앱스토어/플레이스토어 출시 준비 문서와 signing/env/checklist를 정리한다: {title}.{spec_context}",
+            ["README.md", "docs/**", "ios/**", "android/**"],
         ),
     ]
+
+
+def _gate_ids_for_task_kind(kind: str, *, product_standard: str) -> list[str]:
+    mapping = {
+        "architecture": ["deployed_url"],
+        "auth": ["auth_flow"],
+        "database": ["database_persistence"],
+        "ui-backend": ["auth_flow", "database_persistence", "realtime_two_user_chat"],
+        "realtime": ["database_persistence", "realtime_two_user_chat"],
+        "ai": ["ai_reply"],
+        "media": ["image_upload"],
+        "moderation": ["report_block"],
+        "deploy": ["deployed_url"],
+        "e2e": ["production_e2e_smoke"],
+        "docs": ["maintainability_handoff"],
+        "native": ["native_strategy", "ios_native_build", "android_native_build"],
+        "store": ["store_release_readiness"],
+    }
+    gate_ids = list(mapping.get(kind, []))
+    if product_standard != "production_native":
+        gate_ids = [gate_id for gate_id in gate_ids if gate_id not in {"native_strategy", "ios_native_build", "android_native_build", "store_release_readiness"}]
+    return gate_ids
 
 
 def _production_task_acceptance(kind: str) -> list[str]:
@@ -1263,6 +1563,11 @@ def _production_task_acceptance(kind: str) -> list[str]:
             "profiles, conversations, participants, messages, reports, blocks, media_assets, ai_usage_limits schema가 있다.",
             "대표 관계와 RLS/policy 의도가 migration 또는 schema docs에 반영된다.",
             "schema 검증 테스트가 DB 핵심 테이블을 확인한다.",
+        ],
+        "ui-backend": [
+            "주요 화면은 mock/localStorage 대신 Supabase client 또는 server route를 통해 데이터를 읽고 쓴다.",
+            "auth session, profile, conversation, message, media, report/block state가 UI와 backend 사이에서 같은 식별자를 공유한다.",
+            "backend env 누락은 조용한 mock fallback이 아니라 setup-wait/readiness 상태로 노출된다.",
         ],
         "realtime": [
             "두 계정의 메시지가 DB에 저장된다.",
@@ -1294,9 +1599,20 @@ def _production_task_acceptance(kind: str) -> list[str]:
             "E2E 실패는 goal을 active로 유지하고 correction task 입력이 된다.",
         ],
         "docs": [
-            "개인정보 처리방침, 이용약관, 커뮤니티 가이드 초안이 있다.",
-            "GPS/랜덤매칭/성인전용/실제결제 제외 범위가 명시된다.",
-            "운영자가 env와 deploy 상태를 점검하는 방법이 문서화된다.",
+            "`README.md`, `docs/ARCHITECTURE.md`, `docs/CODEMAP.md`, `docs/OPERATIONS.md`, `docs/TESTING.md`, `.env.example`, `docs/DECISIONS.md` 또는 `docs/ADR.md`가 있다.",
+            "CODEMAP은 실제 존재하는 source/test/ops path를 owner 단위로 설명한다.",
+            ".env.example은 key 이름과 placeholder만 담고 secret-like 값을 담지 않는다.",
+            "개인정보 처리방침, 이용약관, 커뮤니티 가이드, 운영자가 env/deploy 상태를 점검하는 방법이 문서화된다.",
+        ],
+        "native": [
+            "goal에 맞는 Capacitor/Expo/React Native 전략과 이유가 문서화된다.",
+            "iOS와 Android build path가 production API/env를 바라보도록 준비된다.",
+            "개발자 계정/서명 credential 누락은 goal 완료가 아니라 operator-wait 조건으로 남는다.",
+        ],
+        "store": [
+            "App Store와 Play Store 제출 준비 체크리스트가 있다.",
+            "privacy labels, icons/splash, signing, release notes 준비 항목이 정리된다.",
+            "실제 제출 credential이 없으면 completed가 아니라 operator-wait로 남는다.",
         ],
     }
     return acceptances[kind]
@@ -1307,7 +1623,54 @@ def _production_task_validation(kind: str) -> list[str]:
         return ["`npm test`", "`npm run build`"]
     if kind == "deploy":
         return ["`npm run production:readiness`", "`npm run build`"]
+    if kind in {"native", "store"}:
+        return [
+            "`npm run build`",
+            "`git diff -- README.md docs/** ios/** android/** capacitor.config.ts capacitor.config.json app.json eas.json`",
+        ]
+    if kind == "docs":
+        return ["`npm run build`", "`git diff -- README.md docs/** .env.example package.json src/** tests/**`"]
     return ["`npm run validate`"]
+
+
+def _attachment_refs_from_goal_payload(goal_payload: Mapping[str, object]) -> list[str]:
+    attachments = goal_payload.get("attachments")
+    if not isinstance(attachments, list):
+        return []
+    return [
+        str(attachment.get("path") or "").strip()
+        for attachment in attachments
+        if isinstance(attachment, Mapping) and str(attachment.get("path") or "").strip()
+    ]
+
+
+def _expected_evidence_for_gate_ids(
+    gate_ids: Sequence[str],
+    completion_gates: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    gate_lookup = {
+        str(gate.get("id") or "").strip(): gate
+        for gate in completion_gates
+        if str(gate.get("id") or "").strip()
+    }
+    expected: list[dict[str, object]] = []
+    for gate_id in gate_ids:
+        normalized_gate_id = str(gate_id).strip()
+        if not normalized_gate_id:
+            continue
+        gate = gate_lookup.get(normalized_gate_id, {})
+        entry: dict[str, object] = {
+            "gate_id": normalized_gate_id,
+            "label": str(gate.get("label") or normalized_gate_id),
+            "operation": harness_goal_gates.REQUIRED_GATE_OPERATION,
+            "source": "runs/harness/**/generated-evidence.json",
+        }
+        for key in ("environment", "evidence_kind", "validator"):
+            value = str(gate.get(key) or "").strip()
+            if value:
+                entry[key] = value
+        expected.append(entry)
+    return expected
 
 
 def build_roadmap(
@@ -1354,10 +1717,26 @@ def build_roadmap_model(
     spec_context = f" 상세 명세: {context_summary}" if context_summary else ""
     tasks: list[dict[str, object]] = []
     service_level = str(goal_payload.get("service_level") or _classify_service_level(title, context_summary))
+    goal_contract = goal_payload.get("goal_contract") if isinstance(goal_payload.get("goal_contract"), Mapping) else {}
+    product_standard = str(goal_contract.get("product_standard") or ("prototype" if service_level == "prototype" else "production_web"))
+    attachment_manifest_path = str(goal_payload.get("attachment_manifest_path") or "")
+    traceability_path = str(goal_payload.get("traceability_path") or goal_contract.get("traceability_path") or "")
+    spec_refs = [spec_path] if spec_path else []
+    attachment_refs = _attachment_refs_from_goal_payload(goal_payload)
     if service_level == "production":
-        specs = _production_goal_specs(title, spec_context)
+        completion_gates = _completion_gates_for_goal_contract(goal_contract) if goal_contract else _completion_gates_for_service_level(service_level)
+        completion_gate_ids = sorted(harness_goal_gates.gate_ids(completion_gates))
+        specs = _production_goal_specs(title, spec_context, gate_ids=completion_gate_ids)
+        if product_standard == "production_native":
+            specs.extend(_native_goal_specs(title, spec_context))
+        allowed_gate_ids = set(completion_gate_ids)
         for index, (kind, task_title, summary, scope) in enumerate(specs, start=1):
             previous = [] if index == 1 else [f"task-{index - 1:02d}-{specs[index - 2][0]}"]
+            gate_ids = [
+                gate_id
+                for gate_id in _gate_ids_for_task_kind(kind, product_standard=product_standard)
+                if gate_id in allowed_gate_ids
+            ]
             tasks.append(
                 {
                     "task_key": f"task-{index:02d}-{kind}",
@@ -1374,8 +1753,15 @@ def build_roadmap_model(
                     "milestone_id": f"m{index}",
                     "depends_on": previous,
                     "goal_spec_path": spec_path,
+                    "attachment_manifest_path": attachment_manifest_path,
+                    "traceability_path": traceability_path,
+                    "spec_refs": list(spec_refs),
+                    "attachment_refs": list(attachment_refs),
                     "attachment_count": attachment_count,
                     "service_level": service_level,
+                    "product_standard": product_standard,
+                    "gate_ids": gate_ids,
+                    "expected_evidence": _expected_evidence_for_gate_ids(gate_ids, completion_gates),
                 }
             )
         return {
@@ -1386,7 +1772,8 @@ def build_roadmap_model(
             "created_at": created_at,
             "updated_at": created_at,
             "service_level": service_level,
-            "completion_gates": _completion_gates_for_service_level(service_level),
+            "product_standard": product_standard,
+            "completion_gates": completion_gates,
             "milestones": [
                 {
                     "id": f"m{index}",
@@ -1456,7 +1843,13 @@ def build_roadmap_model(
                 "milestone_id": f"m{index}",
                 "depends_on": [],
                 "goal_spec_path": spec_path,
+                "attachment_manifest_path": attachment_manifest_path,
+                "traceability_path": traceability_path,
+                "spec_refs": list(spec_refs),
+                "attachment_refs": list(attachment_refs),
                 "attachment_count": attachment_count,
+                "gate_ids": [],
+                "expected_evidence": [],
             }
         )
     return {
@@ -1547,21 +1940,34 @@ def _goal_task_notes(goal: GoalRecord, plan_id: str, task: Mapping[str, object])
         notes.append(f"Goal-Service-Level: {service_level}")
     spec_path = str(goal_payload.get("spec_path") or "").strip()
     if spec_path:
-        notes.append("Goal-Spec-Summary: incorporated into this backlog; do not open the full spec during implementation.")
+        notes.append(f"Goal-Spec-Path: {spec_path}")
+        notes.append("Goal-Source-Of-Truth: full goal spec and gate contract must be checked before implementation.")
+    manifest_path = str(goal_payload.get("attachment_manifest_path") or "").strip()
+    if manifest_path:
+        notes.append(f"Goal-Attachment-Manifest: {manifest_path}")
+    traceability_path = str(goal_payload.get("traceability_path") or "").strip()
+    if traceability_path:
+        notes.append(f"Goal-Traceability-Path: {traceability_path}")
+    contract = goal_payload.get("goal_contract")
+    if isinstance(contract, Mapping):
+        standard = str(contract.get("product_standard") or "").strip()
+        if standard:
+            notes.append(f"Goal-Product-Standard: {standard}")
+    gate_ids = task.get("gate_ids") if isinstance(task.get("gate_ids"), Sequence) and not isinstance(task.get("gate_ids"), str) else ()
+    for gate_id in gate_ids or ():
+        if str(gate_id).strip():
+            notes.append(f"Goal-Gate-ID: {str(gate_id).strip()}")
+    if task.get("expected_evidence"):
+        notes.append(f"Goal-Gate-Evidence-Operation: {harness_goal_gates.REQUIRED_GATE_OPERATION}")
+        notes.append("Goal-Gate-Evidence-Rule: production gates require typed generated-evidence receipts plus product audit pass.")
     attachments = goal_payload.get("attachments")
     if isinstance(attachments, list):
-        visible_attachments = attachments[:3]
-        for attachment in visible_attachments:
+        for attachment in attachments:
             if not isinstance(attachment, Mapping):
                 continue
             caption = str(attachment.get("caption") or "").strip()
             caption_suffix = f" - {caption}" if caption else ""
             notes.append(f"Goal-Attachment: {attachment.get('path')} ({attachment.get('media_type')}){caption_suffix}")
-        omitted = max(0, len(attachments) - len(visible_attachments))
-        if omitted:
-            notes.append(
-                f"Goal-Attachment-Omitted: {omitted} more attachments; use backlog Summary/Acceptance and listed captions only."
-            )
     return tuple(notes)
 
 
@@ -1704,16 +2110,33 @@ def refresh_progress(*, state_root: Path, goal: GoalRecord) -> dict[str, object]
     else:
         goal_payload.pop("publication_blocked_backlog_ids", None)
     service_level = str(goal_payload.get("service_level") or "").strip()
+    goal_contract = goal_payload.get("goal_contract") if isinstance(goal_payload.get("goal_contract"), Mapping) else None
+    if goal_contract is None:
+        success_criteria = [str(item) for item in goal_payload.get("success_criteria") or () if str(item)]
+        goal_contract = _build_goal_contract(
+            title=str(goal_payload.get("title") or goal.title),
+            spec_text=str(goal_payload.get("context_summary") or ""),
+            success_criteria=success_criteria,
+            spec_path=str(goal_payload.get("spec_path") or ""),
+            attachment_manifest_path=str(goal_payload.get("attachment_manifest_path") or ""),
+            attachments=[item for item in goal_payload.get("attachments") or [] if isinstance(item, Mapping)]
+            if isinstance(goal_payload.get("attachments"), list)
+            else [],
+        )
+        goal_payload["goal_contract"] = goal_contract
     if not service_level:
-        service_level = _classify_service_level(
+        service_level = str(goal_contract.get("service_level") or _classify_service_level(
             str(goal_payload.get("title") or goal.title),
             str(goal_payload.get("context_summary") or ""),
-        )
+        ))
         goal_payload["service_level"] = service_level
-    if not isinstance(goal_payload.get("completion_gates"), list):
-        goal_payload["completion_gates"] = _completion_gates_for_service_level(service_level)
     if service_level != "production":
         goal_payload["completion_gates"] = []
+    else:
+        goal_payload["completion_gates"] = _completion_gates_with_required_contract_gates(
+            goal_payload.get("completion_gates"),
+            goal_contract,
+        )
     completion_gates = goal_payload.get("completion_gates")
     allowed_gate_ids = (
         {
@@ -1724,17 +2147,23 @@ def refresh_progress(*, state_root: Path, goal: GoalRecord) -> dict[str, object]
         if isinstance(completion_gates, list)
         else set()
     )
-    gate_evidence = goal_payload.get("completion_gate_evidence")
-    merged_gate_evidence = _sanitize_completion_gate_evidence(gate_evidence, allowed_gate_ids=allowed_gate_ids)
-    merged_gate_evidence.update(
-        _collect_completion_gate_evidence(
-            state_root=state_root,
-            target_id=goal.target_id,
-            goal_id=goal.goal_id,
-            allowed_gate_ids=allowed_gate_ids,
-        )
+    merged_gate_evidence = _collect_completion_gate_evidence(
+        state_root=state_root,
+        target_id=goal.target_id,
+        goal_id=goal.goal_id,
+        allowed_gate_ids=allowed_gate_ids,
+    )
+    merged_gate_evidence, product_audit = _apply_product_audit_to_gate_evidence(
+        state_root=state_root,
+        goal_payload=goal_payload,
+        allowed_gate_ids=allowed_gate_ids,
+        gate_evidence=merged_gate_evidence,
     )
     goal_payload["completion_gate_evidence"] = merged_gate_evidence
+    if product_audit is not None:
+        goal_payload["product_audit"] = product_audit
+    else:
+        goal_payload.pop("product_audit", None)
     gate_status = _completion_gate_status(goal_payload)
     goal_payload["completion_gate_status"] = gate_status
     gates_blocked = gate_status.get("status") == "pending"
@@ -1816,6 +2245,138 @@ def refill_goal_tasks(
                 message="goal waiting on publication",
             )
         executable = _goal_executable_progress_tasks(state_root, existing_tasks)
+        gate_status = goal_payload.get("completion_gate_status") if isinstance(goal_payload.get("completion_gate_status"), Mapping) else {}
+        pending_gate_ids = [
+            str(item)
+            for item in gate_status.get("pending_gate_ids", [])
+            if str(item)
+        ] if isinstance(gate_status, Mapping) and isinstance(gate_status.get("pending_gate_ids"), list) else []
+        has_gate_verification_task = any(
+            str(item.get("gate_verification_created_at") or "") or str(item.get("task_key") or "") == "task-verify-gates"
+            for item in existing_tasks
+        )
+        if not executable and pending_gate_ids and not has_gate_verification_task:
+            completion_gates = goal_payload.get("completion_gates") if isinstance(goal_payload.get("completion_gates"), list) else []
+            product_audit = goal_payload.get("product_audit") if isinstance(goal_payload.get("product_audit"), Mapping) else {}
+            audit_findings = product_audit.get("findings") if isinstance(product_audit, Mapping) else []
+            audit_summaries = [
+                str(finding.get("summary") or finding.get("id") or "").strip()
+                for finding in audit_findings
+                if isinstance(finding, Mapping) and str(finding.get("summary") or finding.get("id") or "").strip()
+            ][:5]
+            plan_id = str(goal_payload.get("active_plan_id") or "") or str(
+                build_roadmap(state_root=state_root, target_id=target_id, target_repo=target_repo, goal=active)["plan_id"]
+            )
+            gate_task = {
+                "task_key": "task-verify-gates",
+                "title": "production gate 검증 증거 생성",
+                "summary": (
+                    "남은 production completion gate를 실제 제품 경로로 검증하고 "
+                    f"`{harness_goal_gates.REQUIRED_GATE_OPERATION}` generated evidence를 남긴다: "
+                    + ", ".join(pending_gate_ids)
+                    + (". 우선 해결할 product audit blocker: " + " / ".join(audit_summaries) if audit_summaries else "")
+                ),
+                "acceptance": [
+                    "각 pending gate는 실제 production/remote/provider/native/store 경로로 검증된다.",
+                    *[f"Product audit blocker를 해결한다: {summary}" for summary in audit_summaries],
+                    f"`operation={harness_goal_gates.REQUIRED_GATE_OPERATION}` generated-evidence.json이 생성된다.",
+                    "localStorage, seed, mock, README-only, screenshot-only 증거는 사용하지 않는다.",
+                    "credential/env/provider/store 권한이 없으면 completed가 아니라 operator-wait 또는 blocker evidence로 남긴다.",
+                ],
+                "file_scope": [
+                    "src/**",
+                    "app/**",
+                    "pages/**",
+                    "components/**",
+                    "lib/**",
+                    "tests/**",
+                    "supabase/**",
+                    "docs/**",
+                    "ios/**",
+                    "android/**",
+                    "capacitor.config.ts",
+                    "capacitor.config.json",
+                    "app.json",
+                    "eas.json",
+                    "README.md",
+                    "package.json",
+                ],
+                "forbidden_scope": [],
+                "validation": ["`npm test`", "`npm run build`"],
+                "manual_checks": [
+                    "production/provider credential이 없으면 operator-wait로 남긴다.",
+                    *[f"Audit finding: {summary}" for summary in audit_summaries],
+                ],
+                "priority": "P1",
+                "labels": ["product", "goal-driven", "production", "gate-verification"],
+                "goal_id": active.goal_id,
+                "milestone_id": "gate-verification",
+                "depends_on": [str(item.get("backlog_id")) for item in existing_tasks if str(item.get("backlog_id") or "")],
+                "goal_spec_path": str(goal_payload.get("spec_path") or ""),
+                "attachment_manifest_path": str(goal_payload.get("attachment_manifest_path") or ""),
+                "traceability_path": str(goal_payload.get("traceability_path") or ""),
+                "gate_ids": pending_gate_ids,
+                "expected_evidence": _expected_evidence_for_gate_ids(pending_gate_ids, completion_gates),
+            }
+            item = _queue_task(
+                state_root=state_root,
+                target_id=target_id,
+                target_repo=target_repo,
+                goal=active,
+                plan_id=plan_id,
+                task=gate_task,
+            )
+            now = utc_timestamp()
+            item["gate_verification_created_at"] = now
+            item["pending_gate_ids"] = pending_gate_ids
+            progress = _read_json(active.progress_json)
+            tasks = [entry for entry in progress.get("tasks") or [] if isinstance(entry, Mapping)]
+            tasks.append(item)
+            progress["tasks"] = tasks
+            progress["updated_at"] = now
+            progress.setdefault("events", []).append(
+                {
+                    "event": "goal-gate-verification-task",
+                    "created_at": now,
+                    "pending_gate_ids": pending_gate_ids,
+                    "queued": 1 if item.get("queued_backlog_path") else 0,
+                }
+            )
+            _write_json(active.progress_json, progress)
+            goal_payload = _read_json(active.goal_json)
+            linked = [str(entry.get("backlog_id")) for entry in tasks if str(entry.get("backlog_id") or "")]
+            goal_payload["linked_backlog_ids"] = linked
+            goal_payload["updated_at"] = now
+            _write_json(active.goal_json, goal_payload)
+            report_path = active.goal_dir / "queue-report.json"
+            _write_json(
+                report_path,
+                {
+                    "schema_version": GOAL_SCHEMA_VERSION,
+                    "goal_id": active.goal_id,
+                    "target_id": target_id,
+                    "plan_id": plan_id,
+                    "created_at": now,
+                    "tasks": tasks,
+                    "queued": 1 if item.get("queued_backlog_path") else 0,
+                    "manual_review": 0 if item.get("queued_backlog_path") else 1,
+                    "gate_verification": True,
+                    "pending_gate_ids": pending_gate_ids,
+                },
+            )
+            completed_count = int(progress.get("completed_count") or 0)
+            _write_goal_markdown(active.goal_dir / "goal.md", goal_payload, queued=len(linked), completed=completed_count)
+            return GoalRefillResult(
+                goal_id=active.goal_id,
+                plan_id=plan_id,
+                created=1,
+                queued=1 if item.get("queued_backlog_path") else 0,
+                manual_review=0 if item.get("queued_backlog_path") else 1,
+                completed=False,
+                queue_report_path=report_path,
+                generated_backlog_ids=tuple(str(entry.get("backlog_id")) for entry in tasks if str(entry.get("backlog_id") or "")),
+                message="goal gate verification task generated",
+            )
         if not executable and not any(str(item.get("fallback_created_at") or "") for item in existing_tasks):
             roadmap = build_roadmap(state_root=state_root, target_id=target_id, target_repo=target_repo, goal=active)
             plan_id = str(roadmap["plan_id"])

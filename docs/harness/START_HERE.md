@@ -70,7 +70,9 @@ Telegram/Redis relay를 새 컴퓨터에서 붙일 때는 controller local runti
 
 `goal`은 `targets/<target-id>/goals/` 아래에만 저장된다. 기존 active goal을 바꾸려면 `./harness goal "새 목표" --replace`를 쓴다. 현재 상태만 보려면 `./harness goal`을 실행한다.
 
-목표에 배포, production, Vercel, DB, 인증, AI, 실사용자 같은 표현이 들어가면 하네스는 production goal로 분류한다. production goal은 3개 작업으로 끝내지 않고 architecture, auth, database, realtime, AI, media, moderation, deploy, E2E, docs 작업을 만들며, PR merge만으로 완료 처리하지 않는다. Vercel URL, DB persistence, auth flow, realtime chat, AI reply, image upload, report/block, production smoke evidence가 모두 있어야 active goal이 completed가 된다. 명시적으로 목업, 프로토타입, 로컬만, MVP라고 쓴 경우에만 prototype goal로 처리한다.
+목표에 배포, production, Vercel, DB, 인증, AI, 실사용자 같은 표현이 들어가면 하네스는 production goal로 분류한다. production goal은 3개 작업으로 끝내지 않고 architecture, auth, database, realtime, AI, media, moderation, deploy, E2E, maintainability handoff 작업을 만들며, PR merge만으로 완료 처리하지 않는다. Vercel URL, DB persistence, auth flow, realtime chat, AI reply, image upload, report/block, production smoke, 유지보수 인수인계 evidence가 모두 있어야 active goal이 completed가 된다. localStorage나 seed 데이터만 통과한 화면, mock-only API, README-only checklist, placeholder 문서, 깨진 CODEMAP은 가짜 성공(fake success)으로 보고 production gate evidence로 인정하지 않는다. `MVP`나 `smoke`라는 단어만으로 prototype으로 낮추지 않으며, 명시적으로 `목업만`, `로컬 데모만`, `프로토타입만`, `local-only`, `no backend`처럼 전체 목표 축소를 요청한 경우에만 prototype goal로 처리한다.
+
+production 목표로 만든 product repo는 사람이든 AI든 이어받아 운영할 수 있어야 한다. 그래서 `README.md`, `docs/ARCHITECTURE.md`, `docs/CODEMAP.md`, `docs/OPERATIONS.md`, `docs/TESTING.md`, `.env.example`, `docs/DECISIONS.md` 또는 `docs/ADR.md`가 필요하다. 어떤 controller 파일이 어떤 책임을 가지는지는 [MODULE_MAP.md](MODULE_MAP.md)에 정리돼 있다.
 
 짧은 goal 문장으로 부족하면 문서 기반 입력을 쓴다.
 

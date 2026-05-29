@@ -34,6 +34,61 @@ def _init_product(path: Path) -> None:
     subprocess.run(["git", "commit", "-m", "initial"], cwd=path, check=True, stdout=subprocess.PIPE)
 
 
+def _init_wired_production_product(path: Path) -> None:
+    (path / "src").mkdir(parents=True)
+    (path / "docs").mkdir(parents=True)
+    (path / "tests" / "e2e").mkdir(parents=True)
+    (path / "src" / "app.js").write_text(
+        "\n".join(
+            [
+                "const supabase = window.supabaseClient;",
+                "await supabase.auth.getSession();",
+                "await supabase.from('messages').select('*');",
+                "supabase.channel('messages').subscribe();",
+                "await supabase.storage.from('media').upload('a.png', file);",
+                "await fetch('/api/ai/reply');",
+                "await fetch('/api/reports');",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (path / "tests" / "e2e" / "production.spec.js").write_text("test('production browser smoke', () => {})\n", encoding="utf-8")
+    (path / "README.md").write_text(
+        "# Production chat\n\nRun `npm test` and `npm run build`; see docs/CODEMAP.md for ownership.\n",
+        encoding="utf-8",
+    )
+    (path / "docs" / "ARCHITECTURE.md").write_text(
+        "# Architecture\n\n`src/app.js` owns mounted production UI wiring and calls provider-backed APIs.\n",
+        encoding="utf-8",
+    )
+    (path / "docs" / "CODEMAP.md").write_text(
+        "# Codemap\n\n- `src/app.js`: mounted production UI and backend integration.\n- `tests/e2e/production.spec.js`: production smoke owner.\n",
+        encoding="utf-8",
+    )
+    (path / "docs" / "OPERATIONS.md").write_text(
+        "# Operations\n\nOperators verify deployment health, logs, environment readiness, and rollback before release.\n",
+        encoding="utf-8",
+    )
+    (path / "docs" / "TESTING.md").write_text(
+        "# Testing\n\nRun `npm test` for smoke checks and `npm run build` before publishing production changes.\n",
+        encoding="utf-8",
+    )
+    (path / "docs" / "DECISIONS.md").write_text(
+        "# Decisions\n\n- Use remote provider-backed persistence and realtime instead of browser-local demo storage.\n",
+        encoding="utf-8",
+    )
+    (path / ".env.example").write_text(
+        "NEXT_PUBLIC_SUPABASE_URL=\nSUPABASE_SERVICE_ROLE_KEY=\nOPENAI_API_KEY=\n",
+        encoding="utf-8",
+    )
+    (path / "package.json").write_text(json.dumps({"scripts": {"test": "node --test", "build": "node --check src/app.js"}}), encoding="utf-8")
+    subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, stdout=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "test@example.test"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True)
+    subprocess.run(["git", "add", "."], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=path, check=True, stdout=subprocess.PIPE)
+
+
 def _write_successful_publication(state_root: Path, *, target_id: str, goal_id: str, backlog_id: str) -> None:
     receipt_dir = state_root / "runs" / "harness" / f"external-20260529-000000-backlog-pr-{backlog_id}"
     receipt_dir.mkdir(parents=True, exist_ok=True)
@@ -52,6 +107,31 @@ def _write_successful_publication(state_root: Path, *, target_id: str, goal_id: 
         ),
         encoding="utf-8",
     )
+
+
+GATE_EVIDENCE_TERMS = {
+    "deployed_url": ("https_deployment_probe_v1", "https://chatapp.example.test production URL passed"),
+    "database_persistence": ("write_read_persistence_v1", "Supabase Postgres row write-read persistence passed"),
+    "auth_flow": ("auth_session_probe_v1", "production auth session login flow passed"),
+    "realtime_two_user_chat": ("two_client_message_sync_v1", "realtime two-client message sync passed"),
+    "ai_reply": ("ai_reply_route_probe_v1", "OpenAI provider-backed AI reply route passed"),
+    "image_upload": ("media_upload_hash_probe_v1", "remote storage image upload hash probe passed"),
+    "report_block": ("moderation_persistence_probe_v1", "report and block moderation persistence passed"),
+    "production_e2e_smoke": ("production_e2e_smoke_v1", "production E2E browser smoke passed"),
+    "native_strategy": ("native_strategy_v1", "native Capacitor strategy verified"),
+    "ios_native_build": ("ios_native_build_v1", "iOS Xcode/TestFlight native build path verified"),
+    "android_native_build": ("android_native_build_v1", "Android Gradle AAB Play Store build path verified"),
+    "store_release_readiness": ("store_release_readiness_v1", "App Store and Play Store release signing checklist verified"),
+    "maintainability_handoff": (
+        "maintainability_handoff_audit_v1",
+        "README ARCHITECTURE CODEMAP OPERATIONS TESTING .env.example DECISIONS handoff audit passed",
+    ),
+}
+
+
+def _gate_evidence_entry(gate_id: str) -> dict[str, str]:
+    validator, evidence = GATE_EVIDENCE_TERMS.get(gate_id, ("production_gate_probe_v1", f"production gate {gate_id} passed"))
+    return {"id": gate_id, "status": "passed", "evidence": evidence, "validator": validator, "observed_result": evidence}
 
 
 def test_goal_service_level_production_generates_production_roadmap(tmp_path: Path) -> None:
@@ -77,22 +157,76 @@ def test_goal_service_level_production_generates_production_roadmap(tmp_path: Pa
         "image_upload",
         "report_block",
         "production_e2e_smoke",
+        "maintainability_handoff",
     ]
     task_keys = [task["task_key"] for task in roadmap["tasks"]]
     assert len(task_keys) >= 10
-    assert task_keys[:10] == [
+    assert task_keys[:11] == [
         "task-01-architecture",
         "task-02-auth",
         "task-03-database",
-        "task-04-realtime",
-        "task-05-ai",
-        "task-06-media",
-        "task-07-moderation",
-        "task-08-deploy",
-        "task-09-e2e",
-        "task-10-docs",
+        "task-04-ui-backend",
+        "task-05-realtime",
+        "task-06-ai",
+        "task-07-media",
+        "task-08-moderation",
+        "task-09-deploy",
+        "task-10-e2e",
+        "task-11-docs",
     ]
+    assert roadmap["tasks"][10]["gate_ids"] == ["maintainability_handoff"]
     assert roadmap["tasks"][1]["depends_on"] == ["task-01-architecture"]
+
+
+def test_production_roadmap_tasks_are_gate_derived_and_traceable(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    spec = tmp_path / "goal-spec.md"
+    image = tmp_path / "reference.png"
+    spec.write_text(
+        "\n".join(
+            [
+                "# Production AI chat service",
+                "",
+                "## Completion Evidence",
+                "- Production URL supports signup and profiles.",
+                "- Remote DB persists conversations and media.",
+                "- Realtime two-user chat, AI replies, reports, and blocks are verified.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    image.write_bytes(b"png reference")
+
+    goal = module.create_goal_from_spec(
+        state_root=state_root,
+        target_id="chatapp",
+        source=spec,
+        images=[image],
+        image_captions=["main chat reference"],
+    )
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    roadmap = json.loads(goal.roadmap_json.read_text(encoding="utf-8"))
+
+    required_gate_ids = {gate["id"] for gate in payload["completion_gates"]}
+    planned_gate_ids = {
+        gate_id
+        for task in roadmap["tasks"]
+        for gate_id in task["gate_ids"]
+    }
+    assert required_gate_ids.issubset(planned_gate_ids)
+    assert "task-04-ui-backend" in [task["task_key"] for task in roadmap["tasks"]]
+    assert roadmap["tasks"][4]["depends_on"] == ["task-04-ui-backend"]
+
+    for task in roadmap["tasks"]:
+        assert task["goal_spec_path"] == payload["spec_path"]
+        assert task["attachment_manifest_path"] == payload["attachment_manifest_path"]
+        assert task["spec_refs"] == [payload["spec_path"]]
+        assert task["attachment_refs"] == [payload["attachments"][0]["path"]]
+        assert "gate_ids" in task
+        assert "expected_evidence" in task
+        for gate_id in task["gate_ids"]:
+            assert any(item["gate_id"] == gate_id for item in task["expected_evidence"])
 
 
 def test_goal_service_level_prototype_requires_explicit_local_or_mvp_language(tmp_path: Path) -> None:
@@ -117,12 +251,45 @@ def test_goal_service_level_explicit_prototype_overrides_production_keywords(tmp
     goal = module.create_goal(
         state_root=state_root,
         target_id="demo",
-        text="Vercel AI prototype 목업으로 화면 방향만 확인한다",
+        text="로컬 프로토타입만 만들고 외부 서버와 배포는 하지 않는다",
     )
     payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
 
     assert payload["service_level"] == "prototype"
     assert payload["completion_gates"] == []
+
+
+def test_goal_service_level_mvp_and_smoke_do_not_downgrade_production(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="배포 가능한 MVP 채팅 서비스 production smoke 검증 포함 Vercel Supabase 인증 DB",
+    )
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+
+    assert payload["service_level"] == "production"
+    assert payload["goal_contract"]["product_standard"] == "production_web"
+    assert [gate["id"] for gate in payload["completion_gates"]]
+
+
+def test_goal_service_level_native_store_goal_adds_native_gates(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="배포 가능한 iOS Android 네이티브 채팅 서비스와 앱스토어 출시까지 완료",
+    )
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+
+    assert payload["service_level"] == "production"
+    assert payload["goal_contract"]["product_standard"] == "production_native"
+    gate_ids = {gate["id"] for gate in payload["completion_gates"]}
+    assert {"native_strategy", "ios_native_build", "android_native_build", "store_release_readiness"}.issubset(gate_ids)
 
 
 def test_new_production_goal_markdown_shows_gates_pending(tmp_path: Path) -> None:
@@ -255,6 +422,21 @@ def test_status_payload_redacts_secretish_completion_gate_evidence(tmp_path: Pat
 def test_production_goal_completes_after_gate_evidence_and_publication(tmp_path: Path) -> None:
     module = _load_module()
     state_root = tmp_path / "targets" / "chatapp"
+    product = tmp_path / "product"
+    product.mkdir()
+    _init_wired_production_product(product)
+    state_root.mkdir(parents=True, exist_ok=True)
+    current_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=product,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (state_root / "target.json").write_text(
+        json.dumps({"target_id": "chatapp", "repo": product.as_posix(), "state_root": state_root.as_posix()}),
+        encoding="utf-8",
+    )
     goal = module.create_goal(
         state_root=state_root,
         target_id="chatapp",
@@ -279,14 +461,14 @@ def test_production_goal_completes_after_gate_evidence_and_publication(tmp_path:
     (evidence_dir / "generated-evidence.json").write_text(
         json.dumps(
             {
-                "operation": "goal-completion-gates",
+                "operation": "goal-gate-verification",
                 "applied": True,
                 "target_id": "chatapp",
                 "goal_id": goal.goal_id,
-                "completion_gates": [
-                    {"id": gate_id, "status": "passed", "evidence": f"receipt://{gate_id}"}
-                    for gate_id in gate_ids
-                ],
+                "product_commit_sha": current_head,
+                "environment": "production",
+                "checked_at": "2026-05-29T00:00:00Z",
+                "completion_gates": [_gate_evidence_entry(gate_id) for gate_id in gate_ids],
             },
             ensure_ascii=False,
         ),
@@ -300,6 +482,247 @@ def test_production_goal_completes_after_gate_evidence_and_publication(tmp_path:
     assert payload["completion_gate_status"]["status"] == "passed"
     assert payload["completion_gate_status"]["pending_gate_ids"] == []
     assert not (state_root / "goals" / "active-goal.json").exists()
+
+
+def test_production_goal_stays_active_without_registered_product_repo_for_audit(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="배포 가능한 실시간 AI 채팅 서비스 production Vercel Supabase DB 인증 OpenAI",
+    )
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    gate_ids = [gate["id"] for gate in payload["completion_gates"]]
+    progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    progress["tasks"] = [{"task_key": "task-01", "backlog_id": "BL-01"}]
+    goal.progress_json.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
+    completed = state_root / "backlog" / "completed"
+    completed.mkdir(parents=True)
+    (completed / "BL-01.md").write_text(
+        "\n".join(["ID: BL-01", "Status: completed", f"Goal: {goal.goal_id}", ""]),
+        encoding="utf-8",
+    )
+    _write_successful_publication(state_root, target_id="chatapp", goal_id=goal.goal_id, backlog_id="BL-01")
+    evidence_dir = state_root / "runs" / "harness" / "external-production-smoke"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "operation": "goal-gate-verification",
+                "applied": True,
+                "target_id": "chatapp",
+                "goal_id": goal.goal_id,
+                "product_commit_sha": "abc1234",
+                "environment": "production",
+                "checked_at": "2026-05-29T00:00:00Z",
+                "completion_gates": [_gate_evidence_entry(gate_id) for gate_id in gate_ids],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    module.refresh_progress(state_root=state_root, goal=goal)
+
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    assert payload["status"] == "active"
+    assert payload["product_audit"]["status"] == "failed"
+    assert payload["product_audit"]["findings"][0]["id"] == "missing_target_repo_for_gate_audit"
+
+
+def test_stale_gate_receipts_do_not_complete_after_product_head_changes(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    product = tmp_path / "product"
+    product.mkdir()
+    _init_product(product)
+    old_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=product,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (product / "README.md").write_text("# Product\n\nchanged\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True)
+    subprocess.run(["git", "commit", "-m", "chore: change"], cwd=product, check=True, stdout=subprocess.PIPE)
+    state_root.mkdir(parents=True, exist_ok=True)
+    (state_root / "target.json").write_text(
+        json.dumps({"target_id": "chatapp", "repo": product.as_posix(), "state_root": state_root.as_posix()}),
+        encoding="utf-8",
+    )
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="배포 가능한 실시간 AI 채팅 서비스 production Vercel Supabase DB 인증 OpenAI",
+    )
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    gate_ids = [gate["id"] for gate in payload["completion_gates"]]
+    progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    progress["tasks"] = [{"task_key": "task-01", "backlog_id": "BL-01"}]
+    goal.progress_json.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
+    completed = state_root / "backlog" / "completed"
+    completed.mkdir(parents=True)
+    (completed / "BL-01.md").write_text(
+        "\n".join(["ID: BL-01", "Status: completed", f"Goal: {goal.goal_id}", ""]),
+        encoding="utf-8",
+    )
+    _write_successful_publication(state_root, target_id="chatapp", goal_id=goal.goal_id, backlog_id="BL-01")
+    evidence_dir = state_root / "runs" / "harness" / "external-production-smoke"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "operation": "goal-gate-verification",
+                "applied": True,
+                "target_id": "chatapp",
+                "goal_id": goal.goal_id,
+                "product_commit_sha": old_head,
+                "environment": "production",
+                "checked_at": "2026-05-29T00:00:00Z",
+                "completion_gates": [_gate_evidence_entry(gate_id) for gate_id in gate_ids],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    module.refresh_progress(state_root=state_root, goal=goal)
+
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    assert payload["status"] == "active"
+    assert payload["completion_gate_status"]["status"] == "pending"
+
+
+def test_product_audit_failed_gates_keep_production_goal_active(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    product = tmp_path / "product"
+    (product / "src").mkdir(parents=True)
+    (product / "src" / "app.js").write_text(
+        "import { friends } from './seed.js';\nlocalStorage.setItem('messages', JSON.stringify(friends));\n",
+        encoding="utf-8",
+    )
+    (product / "src" / "seed.js").write_text("export const friends = [];\n", encoding="utf-8")
+    state_root.mkdir(parents=True, exist_ok=True)
+    (state_root / "target.json").write_text(
+        json.dumps({"target_id": "chatapp", "repo": product.as_posix(), "state_root": state_root.as_posix()}),
+        encoding="utf-8",
+    )
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="배포 가능한 실시간 AI 채팅 서비스 production Vercel Supabase DB 인증 OpenAI",
+    )
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    gate_ids = [gate["id"] for gate in payload["completion_gates"]]
+    progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    progress["tasks"] = [{"task_key": "task-01", "backlog_id": "BL-01"}]
+    goal.progress_json.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
+    completed = state_root / "backlog" / "completed"
+    completed.mkdir(parents=True)
+    (completed / "BL-01.md").write_text(
+        "\n".join(["ID: BL-01", "Status: completed", f"Goal: {goal.goal_id}", ""]),
+        encoding="utf-8",
+    )
+    _write_successful_publication(state_root, target_id="chatapp", goal_id=goal.goal_id, backlog_id="BL-01")
+    evidence_dir = state_root / "runs" / "harness" / "external-production-smoke"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "operation": "goal-gate-verification",
+                "applied": True,
+                "target_id": "chatapp",
+                "goal_id": goal.goal_id,
+                "product_commit_sha": "abc1234",
+                "environment": "production",
+                "checked_at": "2026-05-29T00:00:00Z",
+                "completion_gates": [_gate_evidence_entry(gate_id) for gate_id in gate_ids],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    module.refresh_progress(state_root=state_root, goal=goal)
+
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    assert payload["status"] == "active"
+    assert payload["completion_gate_status"]["status"] == "pending"
+    assert "database_persistence" in payload["completion_gate_status"]["pending_gate_ids"]
+    assert payload["product_audit"]["status"] == "failed"
+    assert (state_root / "goals" / "active-goal.json").exists()
+
+
+def test_refresh_backfills_native_gates_for_legacy_native_goal(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="배포 가능한 iOS Android 앱스토어 채팅 서비스 Vercel Supabase 인증 DB",
+    )
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    payload["completion_gates"] = [
+        gate
+        for gate in payload["completion_gates"]
+        if gate["id"] not in {"native_strategy", "ios_native_build", "android_native_build", "store_release_readiness"}
+    ]
+    payload["goal_contract"]["completion_gates"] = list(payload["completion_gates"])
+    goal.goal_json.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    module.refresh_progress(state_root=state_root, goal=goal)
+
+    refreshed = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    gate_ids = {gate["id"] for gate in refreshed["completion_gates"]}
+    assert {"native_strategy", "ios_native_build", "android_native_build", "store_release_readiness"}.issubset(gate_ids)
+
+
+def test_old_gate_operation_does_not_complete_production_goal(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="배포 가능한 실시간 AI 채팅 서비스 production Vercel Supabase DB 인증 OpenAI",
+    )
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    progress["tasks"] = [{"task_key": "task-01", "backlog_id": "BL-01"}]
+    goal.progress_json.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
+    completed = state_root / "backlog" / "completed"
+    completed.mkdir(parents=True)
+    (completed / "BL-01.md").write_text(
+        "\n".join(["ID: BL-01", "Status: completed", f"Goal: {goal.goal_id}", ""]),
+        encoding="utf-8",
+    )
+    _write_successful_publication(state_root, target_id="chatapp", goal_id=goal.goal_id, backlog_id="BL-01")
+    evidence_dir = state_root / "runs" / "harness" / "external-old-gate"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "operation": "goal-completion-gates",
+                "applied": True,
+                "target_id": "chatapp",
+                "goal_id": goal.goal_id,
+                "completion_gates": [
+                    {"id": gate["id"], "status": "passed", "evidence": f"receipt://{gate['id']}"}
+                    for gate in payload["completion_gates"]
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    module.refresh_progress(state_root=state_root, goal=goal)
+
+    refreshed = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    assert refreshed["status"] == "active"
+    assert refreshed["completion_gate_status"]["status"] == "pending"
 
 
 def test_goal_spec_draft_uses_operator_language(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -331,7 +754,7 @@ def test_goal_spec_draft_uses_operator_language(tmp_path: Path, monkeypatch: pyt
     assert "제품 목표" not in en_body
 
 
-def test_goal_task_notes_limit_attachment_paths_for_prompt_budget(tmp_path: Path) -> None:
+def test_goal_task_notes_preserve_full_spec_and_attachment_manifest(tmp_path: Path) -> None:
     module = _load_module()
     goal_dir = tmp_path / "targets" / "game" / "goals" / "goal-1"
     goal_dir.mkdir(parents=True)
@@ -340,6 +763,7 @@ def test_goal_task_notes_limit_attachment_paths_for_prompt_budget(tmp_path: Path
         json.dumps(
             {
                 "spec_path": "goals/goal-1/inputs/goal-spec.md",
+                "attachment_manifest_path": "goals/goal-1/attachments/attachment-manifest.json",
                 "attachments": [
                     {"path": f"goals/goal-1/attachments/image-{index:02d}.png", "media_type": "image/png"}
                     for index in range(1, 6)
@@ -361,11 +785,11 @@ def test_goal_task_notes_limit_attachment_paths_for_prompt_budget(tmp_path: Path
 
     notes = module._goal_task_notes(goal, "plan-1", {"task_key": "task-01"})
 
-    attachment_notes = [note for note in notes if note.startswith("Goal-Attachment:")]
-    assert len(attachment_notes) == 3
-    assert "Goal-Spec-Summary: incorporated into this backlog; do not open the full spec during implementation." in notes
-    assert all(not note.startswith("Goal-Spec:") for note in notes)
-    assert "Goal-Attachment-Omitted: 2 more attachments; use backlog Summary/Acceptance and listed captions only." in notes
+    assert "Goal-Spec-Path: goals/goal-1/inputs/goal-spec.md" in notes
+    assert "Goal-Source-Of-Truth: full goal spec and gate contract must be checked before implementation." in notes
+    assert "Goal-Attachment-Manifest: goals/goal-1/attachments/attachment-manifest.json" in notes
+    assert not any("do not open the full spec" in note for note in notes)
+    assert not any(note.startswith("Goal-Attachment-Omitted:") for note in notes)
 
 
 def test_goal_spec_draft_rejects_symlinked_goals_root(tmp_path: Path) -> None:
@@ -425,6 +849,43 @@ def test_goal_from_spec_imports_spec_attachments_and_criteria(tmp_path: Path) ->
     assert payload["spec_path"].endswith("/inputs/goal-spec.md")
     assert payload["attachments"][0]["path"].endswith(".png")
     assert payload["attachments"][0]["caption"] == "현재 선택 화면 참고"
+    assert payload["attachment_manifest_path"].endswith("attachment-manifest.json")
+    assert payload["traceability_path"].endswith("traceability.json")
+    manifest = json.loads((state_root / payload["attachment_manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["attachments"][0]["caption"] == "현재 선택 화면 참고"
+    traceability = json.loads((state_root / payload["traceability_path"]).read_text(encoding="utf-8"))
+    assert traceability["source_spec_path"] == payload["spec_path"]
+    assert traceability["attachment_manifest_path"] == payload["attachment_manifest_path"]
+
+
+def test_goal_from_spec_parses_completion_evidence_as_gates(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    spec = tmp_path / "goal-spec.md"
+    spec.write_text(
+        "\n".join(
+            [
+                "# 배포 가능한 채팅 서비스",
+                "",
+                "## Completion Evidence",
+                "- Vercel production URL이 존재한다.",
+                "- iOS와 Android 네이티브 빌드가 존재한다.",
+                "",
+                "## 앱스토어 기준",
+                "- App Store 제출 준비 문서가 있다.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    goal = module.create_goal_from_spec(state_root=state_root, target_id="chatapp", source=spec)
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+
+    assert "Vercel production URL이 존재한다." in payload["success_criteria"]
+    assert "iOS와 Android 네이티브 빌드가 존재한다." in payload["success_criteria"]
+    assert payload["goal_contract"]["product_standard"] == "production_native"
+    gate_ids = {gate["id"] for gate in payload["completion_gates"]}
+    assert {"native_strategy", "ios_native_build", "android_native_build", "store_release_readiness"}.issubset(gate_ids)
 
 
 def test_refresh_progress_keeps_goal_active_when_publication_is_blocked(tmp_path: Path) -> None:
@@ -671,7 +1132,7 @@ def test_goal_refill_generates_queued_tasks_without_product_mutation(tmp_path: P
     result = module.refill_goal_tasks(state_root=state_root, target_id="game", target_repo=product, goal=goal)
 
     assert result is not None
-    assert result.created == 3
+    assert result.created >= 10
     assert result.queued >= 2
     assert result.queue_report_path.exists()
     queued = sorted((state_root / "backlog" / "queued").glob("*.md"))
@@ -818,7 +1279,7 @@ def test_goal_refill_is_idempotent_after_tasks_exist(tmp_path: Path) -> None:
     product = tmp_path / "product"
     product.mkdir()
     _init_product(product)
-    goal = module.create_goal(state_root=state_root, target_id="game", text="완성도 있는 MVP")
+    goal = module.create_goal(state_root=state_root, target_id="game", text="로컬 프로토타입만 완성도 있게 만든다")
 
     first = module.refill_goal_tasks(state_root=state_root, target_id="game", target_repo=product, goal=goal)
     second = module.refill_goal_tasks(state_root=state_root, target_id="game", target_repo=product, goal=goal)
@@ -829,10 +1290,47 @@ def test_goal_refill_is_idempotent_after_tasks_exist(tmp_path: Path) -> None:
     assert second.message == "goal already has generated tasks"
 
 
+def test_goal_refill_creates_gate_verification_task_when_production_gates_remain(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    product = tmp_path / "product"
+    product.mkdir()
+    _init_product(product)
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="배포 가능한 실시간 채팅 서비스 Vercel Supabase DB 인증 OpenAI",
+    )
+    progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    progress["tasks"] = [{"task_key": "task-01-core", "backlog_id": "BL-core"}]
+    goal.progress_json.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
+    completed = state_root / "backlog" / "completed" / "BL-core.md"
+    completed.parent.mkdir(parents=True, exist_ok=True)
+    completed.write_text(
+        "\n".join(["ID: BL-core", "Status: completed", f"Goal: {goal.goal_id}", ""]),
+        encoding="utf-8",
+    )
+    _write_successful_publication(state_root, target_id="chatapp", goal_id=goal.goal_id, backlog_id="BL-core")
+
+    result = module.refill_goal_tasks(state_root=state_root, target_id="chatapp", target_repo=product, goal=goal)
+
+    assert result is not None
+    assert result.created == 1
+    assert result.message == "goal gate verification task generated"
+    progress_after = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    gate_tasks = [task for task in progress_after["tasks"] if task.get("task_key") == "task-verify-gates"]
+    assert gate_tasks
+    assert "database_persistence" in gate_tasks[0]["pending_gate_ids"]
+    queued = tuple((state_root / "backlog" / "queued").glob("*.md"))
+    assert queued
+    body = queued[0].read_text(encoding="utf-8")
+    assert "Goal-Gate-Evidence-Operation: goal-gate-verification" in body
+
+
 def test_goal_refresh_progress_removes_active_pointer_when_completed(tmp_path: Path) -> None:
     module = _load_module()
     state_root = tmp_path / "targets" / "game"
-    goal = module.create_goal(state_root=state_root, target_id="game", text="완성도 있는 MVP")
+    goal = module.create_goal(state_root=state_root, target_id="game", text="로컬 프로토타입만 완성도 있게 만든다")
     progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
     progress["tasks"] = [{"backlog_id": "BL-done"}]
     goal.progress_json.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
@@ -858,7 +1356,7 @@ def test_goal_refresh_progress_removes_active_pointer_when_completed(tmp_path: P
 def test_status_payload_refreshes_completed_backlog_progress(tmp_path: Path) -> None:
     module = _load_module()
     state_root = tmp_path / "targets" / "game"
-    goal = module.create_goal(state_root=state_root, target_id="game", text="완성도 있는 MVP")
+    goal = module.create_goal(state_root=state_root, target_id="game", text="로컬 프로토타입만 완성도 있게 만든다")
     progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
     progress["tasks"] = [{"backlog_id": "BL-done"}, {"backlog_id": "BL-next"}]
     goal.progress_json.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
@@ -892,7 +1390,7 @@ def test_goal_refill_does_not_create_fallback_after_goal_completion(tmp_path: Pa
     product = tmp_path / "product"
     product.mkdir()
     _init_product(product)
-    goal = module.create_goal(state_root=state_root, target_id="game", text="완성도 있는 MVP")
+    goal = module.create_goal(state_root=state_root, target_id="game", text="로컬 프로토타입만 완성도 있게 만든다")
     progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
     progress["tasks"] = [{"backlog_id": "BL-done"}]
     goal.progress_json.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
@@ -919,7 +1417,7 @@ def test_goal_refill_creates_fallback_when_existing_tasks_are_manual_only(tmp_pa
     product = tmp_path / "product"
     product.mkdir()
     _init_product(product)
-    goal = module.create_goal(state_root=state_root, target_id="game", text="완성도 있는 MVP")
+    goal = module.create_goal(state_root=state_root, target_id="game", text="로컬 프로토타입만 완성도 있게 만든다")
     progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
     progress["tasks"] = [
         {
@@ -952,7 +1450,7 @@ def test_goal_refill_creates_fallback_when_existing_linked_backlog_is_not_execut
     product = tmp_path / "product"
     product.mkdir()
     _init_product(product)
-    goal = module.create_goal(state_root=state_root, target_id="game", text="완성도 있는 MVP")
+    goal = module.create_goal(state_root=state_root, target_id="game", text="로컬 프로토타입만 완성도 있게 만든다")
     backlog_path = state_root / "backlog" / "queued" / "BL-manual.md"
     backlog_path.parent.mkdir(parents=True, exist_ok=True)
     backlog_path.write_text(
