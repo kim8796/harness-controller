@@ -25,6 +25,7 @@ import harness_bootstrap_wizard
 import harness_controller
 import harness_env
 import harness_export
+import harness_fleet
 import harness_goal
 import harness_incident
 import harness_loop
@@ -72,6 +73,7 @@ CONTROLLER_RELEASE_CHECK_RUFF_PATHS = (
     "scripts/harness_controller.py",
     "scripts/harness_env.py",
     "scripts/harness_export.py",
+    "scripts/harness_fleet.py",
     "scripts/harness_goal.py",
     "scripts/harness_guard.py",
     "scripts/harness_incident.py",
@@ -93,6 +95,7 @@ CONTROLLER_RELEASE_CHECK_RUFF_PATHS = (
     "tests/test_harness_controller.py",
     "tests/test_harness_env.py",
     "tests/test_harness_export.py",
+    "tests/test_harness_fleet.py",
     "tests/test_harness_goal.py",
     "tests/test_harness_guard.py",
     "tests/test_harness_incident.py",
@@ -115,6 +118,7 @@ CONTROLLER_RELEASE_CHECK_PYTEST_PATHS = (
     "tests/test_harness_controller.py",
     "tests/test_harness_env.py",
     "tests/test_harness_export.py",
+    "tests/test_harness_fleet.py",
     "tests/test_harness_goal.py",
     "tests/test_harness_guard.py",
     "tests/test_harness_incident.py",
@@ -196,19 +200,27 @@ BEGINNER_HELP_TEXT = """하네스 시작
 2. ./harness goal "이 프로젝트를 완성도 있는 MVP로 만든다"
 3. ./harness watch
 
+상세 목표를 문서로 줄 때:
+- ./harness goal draft "목표 제목"
+- 문서를 편집한 뒤 ./harness goal from <goal-spec.md> screenshots/ --caption "설명"
+
 무엇을 하는지:
 - install: 제품 저장소를 하네스 관리 대상으로 등록합니다. 제품 저장소에는 하네스 파일을 쓰지 않습니다.
   터미널에서 ./harness install만 입력하면 제품 저장소 경로만 물어봅니다.
 - goal: 제품 완성 목표를 등록합니다. watch가 이 목표를 계획/task로 나눕니다.
 - watch: Telegram relay와 goal/task backlog를 계속 감시하며 구현, 검증, commit, push/PR publication을 반복합니다.
 - do: 특정 작업 하나를 즉시 처리하는 보조 명령입니다.
+- fleet status: 등록된 여러 프로젝트의 goal, backlog, watch, operator-wait 상태를 한 화면에서 봅니다.
+- target remove: 더 이상 관리하지 않을 프로젝트를 controller 등록에서 제거합니다. 제품 저장소 파일은 삭제하지 않습니다.
 - task/run/finish/archive: 복구와 디버깅을 위한 고급 명령입니다.
 
 자주 쓰는 확인:
 - ./harness status
 - ./harness dashboard
+- ./harness fleet status
 - ./harness goal
 - ./harness watch
+- ./harness target remove my-app
 - ./harness telegram setup --target-id my-app --repo-id my-app --dry-run
 - ./harness verify --loop-ready
 - ./harness smoke implementation
@@ -1263,6 +1275,16 @@ def _append_autopilot_memory(
     }
     path.open("a", encoding="utf-8").write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
     _trim_autopilot_memory(path)
+    try:
+        harness_fleet.promote_reusable_lesson(
+            controller_root=repo_root(),
+            record=record,
+            event=event,
+            payload=dict(payload or {}),
+            created_at=str(entry["created_at"]),
+        )
+    except harness_fleet.FleetError as exc:
+        raise HarnessCliError(str(exc)) from exc
     return path
 
 
@@ -1483,6 +1505,11 @@ def command_goal(args: argparse.Namespace) -> int:
             print(f"- goal: `{goal.get('goal_id')}`")
             print(f"- 제목: {goal.get('title')}")
             print(f"- 상태: `{goal.get('status')}`")
+            if goal.get("spec_path"):
+                print(f"- 명세: `{goal.get('spec_path')}`")
+            attachments = goal.get("attachments")
+            if isinstance(attachments, list) and attachments:
+                print(f"- 첨부: {len(attachments)}개")
             print(f"- linked backlog: {len(goal.get('linked_backlog_ids') or [])}")
             print(f"- completed: {progress.get('completed_count', 0)}")
             print("다음 명령: `./harness watch`")
@@ -1501,6 +1528,121 @@ def command_goal(args: argparse.Namespace) -> int:
         print(f"- goal: `{goal.goal_id}`")
         print(f"- 제목: {goal.title}")
         print(f"- 위치: `{goal.goal_dir.as_posix()}`")
+        print("다음 명령: `./harness watch`")
+        return 0
+    except (HarnessCliError, harness_controller.ControllerError, harness_goal.GoalError) as exc:
+        print(f"error: {exc}")
+        return 2
+
+
+def _build_goal_draft_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="harness goal draft", description="Create an editable goal-spec markdown draft.")
+    parser.add_argument("title", nargs="*", help="Goal title for the draft.")
+    parser.add_argument("--target", default="@default", help=argparse.SUPPRESS)
+    parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    return parser
+
+
+def _build_goal_from_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="harness goal from",
+        description="Register a product goal from a markdown spec.",
+        epilog=(
+            "Examples:\n"
+            "  harness goal from goal-spec.md screen1.png screen2.jpg screenshots/\n"
+            "  harness goal from goal-spec.md screenshots/ --caption 'current screen reference'\n"
+            "  harness goal from goal-spec.md --image screen1.png screen2.jpg screenshots/"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("source", type=Path, help="Path to goal-spec.md.")
+    parser.add_argument("attachments", nargs="*", type=Path, help="Optional image files or non-recursive image directories.")
+    parser.add_argument(
+        "--image",
+        type=Path,
+        action="append",
+        nargs="+",
+        default=[],
+        metavar="PATH",
+        help="Attach one or more image files/directories to the goal.",
+    )
+    parser.add_argument(
+        "--caption",
+        action="append",
+        default=[],
+        help="Caption for attachments; one caption applies to all, or repeat per image.",
+    )
+    parser.add_argument("--replace", action="store_true", help="Archive the current active goal before registering this one.")
+    parser.add_argument("--target", default="@default", help=argparse.SUPPRESS)
+    parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    return parser
+
+
+def _goal_from_image_paths(args: argparse.Namespace) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    paths.extend(Path(path) for path in getattr(args, "attachments", []) or ())
+    for group in getattr(args, "image", []) or ():
+        if isinstance(group, (list, tuple)):
+            paths.extend(Path(path) for path in group)
+        else:
+            paths.append(Path(group))
+    return tuple(_target_path(path) for path in paths)
+
+
+def command_goal_draft(args: argparse.Namespace) -> int:
+    try:
+        record = _resolve_task_target(getattr(args, "target", None))
+        title = " ".join(str(item).strip() for item in getattr(args, "title", []) if str(item).strip()).strip()
+        path = harness_goal.create_goal_spec_draft(
+            state_root=record.state_root,
+            target_id=record.target_id,
+            title=title or None,
+        )
+        if getattr(args, "json", False):
+            payload = {
+                "command": "goal draft",
+                "target_id": record.target_id,
+                "spec_path": path.as_posix(),
+                "next_command": f"./harness goal from {path.as_posix()}",
+            }
+            print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+        print("하네스 goal draft 생성 완료")
+        print(f"- 대상: `{record.target_id}`")
+        print(f"- 문서: `{path.as_posix()}`")
+        print("- 이 파일을 편집해서 목표, 완료 조건, 제약, 검증을 적으세요.")
+        print(f"등록: `./harness goal from {path.as_posix()}`")
+        print('이미지 포함: `./harness goal from <goal-spec.md> screenshots/ --caption "설명"`')
+        return 0
+    except (HarnessCliError, harness_controller.ControllerError, harness_goal.GoalError) as exc:
+        print(f"error: {exc}")
+        return 2
+
+
+def command_goal_from(args: argparse.Namespace) -> int:
+    try:
+        record = _resolve_task_target(getattr(args, "target", None))
+        goal = harness_goal.create_goal_from_spec(
+            state_root=record.state_root,
+            target_id=record.target_id,
+            source=_target_path(args.source),
+            images=_goal_from_image_paths(args),
+            image_captions=tuple(str(caption) for caption in getattr(args, "caption", []) or ()),
+            replace=bool(getattr(args, "replace", False)),
+        )
+        payload = harness_goal.status_payload(state_root=record.state_root)
+        if getattr(args, "json", False):
+            print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+        goal_payload = payload["goal"] if isinstance(payload.get("goal"), Mapping) else {}
+        attachments = goal_payload.get("attachments")
+        attachment_count = len(attachments) if isinstance(attachments, list) else 0
+        print("하네스 goal 등록 완료")
+        print(f"- 대상: `{record.target_id}`")
+        print(f"- goal: `{goal.goal_id}`")
+        print(f"- 제목: {goal.title}")
+        print(f"- 명세: `{goal_payload.get('spec_path')}`")
+        print(f"- 첨부: {attachment_count}개")
         print("다음 명령: `./harness watch`")
         return 0
     except (HarnessCliError, harness_controller.ControllerError, harness_goal.GoalError) as exc:
@@ -2963,6 +3105,96 @@ def command_controller_release_check(args: argparse.Namespace) -> int:
     return 0 if payload["ok"] else 2
 
 
+def _render_fleet_status_text(payload: Mapping[str, object]) -> None:
+    summary = payload.get("summary") if isinstance(payload.get("summary"), Mapping) else {}
+    global_memory = payload.get("global_memory") if isinstance(payload.get("global_memory"), Mapping) else {}
+    print("하네스 fleet status")
+    if not payload.get("targets"):
+        print("- targets: 0")
+        print("다음 명령: `./harness install /path/to/product`")
+        return
+    print(
+        "- targets: "
+        f"{summary.get('targets_total', 0)} total, "
+        f"{summary.get('targets_ready', 0)} ready, "
+        f"{summary.get('targets_attention', 0)} attention"
+    )
+    print(f"- active goals: {summary.get('active_goals', 0)}")
+    print(
+        "- queued backlog: "
+        f"{summary.get('queued_auto_backlog', 0)} auto / {summary.get('queued_backlog', 0)} total"
+    )
+    print(f"- operator wait: {summary.get('operator_waits', 0)}")
+    print(
+        "- watch: "
+        f"{summary.get('watch_running', 0)} running, "
+        f"{summary.get('watch_idle', 0)} idle, "
+        f"{summary.get('watch_missing', 0)} missing"
+    )
+    print(f"- global learning: {global_memory.get('lesson_count', 0)} reusable lessons")
+    for target in payload.get("targets", []):
+        if not isinstance(target, Mapping):
+            continue
+        default_marker = " 기본 대상" if target.get("default") else ""
+        aliases = ", ".join("@" + str(alias) for alias in target.get("aliases", []) if str(alias))
+        alias_text = f" ({aliases})" if aliases else ""
+        readiness = target.get("readiness") if isinstance(target.get("readiness"), Mapping) else {}
+        goal = target.get("active_goal") if isinstance(target.get("active_goal"), Mapping) else {}
+        backlog = target.get("backlog") if isinstance(target.get("backlog"), Mapping) else {}
+        watch = target.get("watch") if isinstance(target.get("watch"), Mapping) else {}
+        memory = target.get("memory") if isinstance(target.get("memory"), Mapping) else {}
+        print(f"\n- `{target.get('target_id')}`{default_marker}{alias_text}: {readiness.get('status', target.get('status'))}")
+        blockers = readiness.get("blockers") if isinstance(readiness.get("blockers"), list) else []
+        if blockers:
+            print(f"  - blockers: {', '.join(str(item) for item in blockers)}")
+        print(f"  - goal: {goal.get('goal_id') if goal.get('status') == 'active' else 'none'}")
+        print(
+            "  - backlog: "
+            f"queued {backlog.get('queued', 0)} auto {backlog.get('queued_auto', 0)} "
+            f"active {backlog.get('active', 0)} blocked {backlog.get('blocked', 0)} "
+            f"completed {backlog.get('completed', 0)}"
+        )
+        print(f"  - watch: {watch.get('status', 'missing')} / {watch.get('phase', 'none')}")
+        print(
+            "  - memory: "
+            f"target {memory.get('target_lessons', 0)}, global {memory.get('global_lessons', 0)}"
+        )
+        last_status = watch.get("transaction_status") or ""
+        if last_status:
+            print(f"  - last: {last_status}")
+        print(f"  - next: {target.get('next_action')}")
+
+
+def command_fleet_status(args: argparse.Namespace) -> int:
+    try:
+        payload = harness_fleet.build_fleet_status(controller_root=repo_root())
+    except harness_fleet.FleetError as exc:
+        payload = {
+            "schema_version": 1,
+            "command": "fleet status",
+            "ok": False,
+            "status": "fleet-error",
+            "errors": [str(exc)],
+        }
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        else:
+            print(f"error: {exc}")
+        return 2
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        _render_fleet_status_text(payload)
+    return 0 if payload.get("status") == "no-targets" or payload.get("ok") else 2
+
+
+def command_fleet(args: argparse.Namespace) -> int:
+    args.fleet_command = args.fleet_command or "status"
+    if args.fleet_command == "status":
+        return command_fleet_status(args)
+    raise HarnessCliError(f"unsupported fleet command: {args.fleet_command}")
+
+
 def _load_controller_target(target_id: str) -> harness_controller.TargetRecord:
     return harness_controller.load_target(repo_root(), target_id)
 
@@ -4266,6 +4498,14 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument("--command-template", help=argparse.SUPPRESS)
     watch.set_defaults(func=command_watch)
 
+    fleet = subparsers.add_parser("fleet", help="Show read-only multi-target controller status.")
+    fleet_subparsers = fleet.add_subparsers(dest="fleet_command")
+    fleet_status = fleet_subparsers.add_parser("status", help="Show all registered targets in one secret-safe view.")
+    fleet_status.add_argument("--json", action="store_true")
+    fleet_status.set_defaults(func=command_fleet_status)
+    fleet.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    fleet.set_defaults(func=command_fleet)
+
     task = subparsers.add_parser("task", help="Beginner task intake: interview, review, and queue a product request.")
     task.add_argument("--target", default="@default", help="Target selector for `./harness task`; default is @default.")
     task.add_argument("--title", help="Title for the default draft command.")
@@ -4697,6 +4937,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not argv:
         print(BEGINNER_HELP_TEXT.rstrip())
         return 0
+    if len(argv) >= 2 and argv[0] == "goal" and argv[1] == "draft":
+        return command_goal_draft(_build_goal_draft_parser().parse_args(argv[2:]))
+    if len(argv) >= 2 and argv[0] == "goal" and argv[1] == "from":
+        return command_goal_from(_build_goal_from_parser().parse_args(argv[2:]))
     args = build_parser().parse_args(argv)
     return int(args.func(args))
 

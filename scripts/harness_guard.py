@@ -460,6 +460,11 @@ def _guess_related_tests(path: Path, root: Path) -> tuple[Path, ...]:
             Path("tests/test_harness_cli.py"),
             Path("tests/test_harness_export.py"),
         ),
+        "scripts/harness_fleet.py": (
+            Path("tests/test_harness_fleet.py"),
+            Path("tests/test_harness_cli.py"),
+            Path("tests/test_harness_export.py"),
+        ),
         "scripts/harness_profiles.py": (
             Path("tests/test_harness_cli.py"),
             Path("tests/test_harness_export.py"),

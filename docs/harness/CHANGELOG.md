@@ -1,5 +1,13 @@
 # Harness Changelog
 
+## 1.8.32 - 2026-05-28
+
+- Added read-only `./harness fleet status` / `--json` for multi-target readiness, goal, backlog, watch, operator-wait, and publication/merge state.
+- Added controller-local global reusable learning memory under `targets/_global/memory/`.
+- Promoted only compact allowlisted lessons from target memory, keeping raw evidence, product file contents, and secret-like values out of global memory.
+- Added document-first goal input with localized `./harness goal draft` templates and shorter `./harness goal from <goal-spec.md> [images-or-directories...]` import, including sidecar-only image attachment metadata.
+- Added focused fleet tests and export/release-check coverage for the new fleet module.
+
 ## 1.8.31 - 2026-05-18
 
 - Added operator-wait core files and tests to export/release coverage.

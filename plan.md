@@ -1,3 +1,162 @@
+# Sidecar Symlink Boundary Correction Plan
+
+## Objective
+
+Fix two sidecar boundary issues found during review before merging: `goal draft` must not write through a symlinked `goals` directory, and `fleet status` must not read global memory through symlinked sidecar parents.
+
+Change-Class: security-correction
+Diet-Exception: focused symlink tests are required to preserve controller/product boundary guarantees.
+
+## Implementation Plan
+
+1. Add failing tests:
+   - `create_goal_spec_draft()` rejects a symlinked `targets/<id>/goals` directory and does not write outside the target sidecar.
+   - `build_fleet_status()` reports attention/errors when `targets/_global/memory` is a symlink and does not read external reusable-index content.
+
+2. Patch root causes:
+   - Route draft creation through `_goals_root(state_root)` before appending `drafts/<draft-id>`.
+   - Add a read-only global memory index loader that validates `targets`, `_global`, and `memory` path components for symlinks/non-directories before reading.
+
+3. Verify:
+   - focused goal/fleet tests
+   - ruff for changed files
+   - focused CLI/export/guard tests
+   - full `harness_guard.py --mode pre-push --run-lint --run-pytest`
+
+# Goal Attachment Short Input Correction Plan
+
+## Objective
+
+Shorten `./harness goal from` image attachment input without removing existing repeated `--image --caption` compatibility. Support positional image files, non-recursive image directories, and multi-value `--image`.
+
+Change-Class: public-contract
+Diet-Exception: goal attachment UX tests add small coverage so detailed goal specs stay usable without long commands.
+
+## Implementation Plan
+
+1. Add failing tests first:
+   - multiple positional image files attach to one goal
+   - directory input expands only direct image files in sorted order
+   - empty directory, direct non-image, symlink input, and more than 50 attachments fail
+   - one caption applies to all images; N captions map one-to-one; other mismatch fails
+   - CLI accepts `goal from spec.md a.png b.jpg dir/`
+   - CLI accepts `goal from spec.md --image a.png b.jpg dir/`
+   - existing repeated `--image a.png --caption "..."` keeps working
+
+2. Implement focused helpers in `scripts/harness_goal.py`:
+   - expand image files and directories before copying
+   - keep directory expansion non-recursive
+   - reject symlink file/directory inputs before resolving
+   - cap expanded attachments at 50
+   - normalize captions with `0 / 1 / N == image count` rules
+
+3. Update `scripts/harness_cli.py`:
+   - parse `goal from <spec.md> [attachments ...]`
+   - make `--image` accept multiple paths per occurrence
+   - flatten positional and option images into one ordered list
+   - keep hidden `--target`/`--json` behavior
+
+4. Update beginner docs/help:
+   - show short positional/directories examples
+   - keep repeated `--image --caption` as compatibility, not the primary recommendation
+
+## Validation Commands
+
+- `python3 -m ruff check scripts/harness_goal.py scripts/harness_cli.py tests/test_harness_goal.py tests/test_harness_cli.py`
+- `python3 -m pytest tests/test_harness_goal.py tests/test_harness_cli.py tests/test_harness_export.py -q`
+- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+
+# Global Learning Memory + Fleet Status Implementation Plan
+
+## Objective
+
+Make multiple product targets easier to operate from the controller CLI by adding target-safe global reusable learning and a read-only fleet status surface. Keep the beginner path unchanged: `install -> goal -> watch`.
+
+Change-Class: public-contract
+Diet-Exception: fleet status module plus global learning memory tests add controller code to prevent repeated multi-project operator drift.
+
+## Correction: Beginner Remove Guidance
+
+The implementation includes `target remove`, but the bare `./harness` beginner command guide still hides the remove/unregister path behind generic advanced wording. Update the beginner help text so operators can discover:
+
+- `./harness fleet status` for multi-project overview.
+- `./harness target remove <target>` for unregistering a target from the controller.
+- The safety boundary: remove archives controller sidecar registration and never deletes product repo files.
+
+Verify with focused CLI tests and pre-push guard.
+
+## Implementation Plan
+
+1. Add a cohesive `scripts/harness_fleet.py` module for:
+   - deterministic reusable lesson promotion from target memory events into `targets/_global/memory/`
+   - secret-safe compact lesson/index records
+   - read-only fleet status aggregation over active registered targets
+
+2. Wire existing target memory append to global learning:
+   - keep `targets/<id>/memory/autopilot-lessons.jsonl` as target-local evidence
+   - promote only compact signals for reusable events
+   - never copy raw logs, raw evidence bodies, product file contents, or secret-like values
+
+3. Add CLI surface:
+   - `./harness fleet status`
+   - `./harness fleet status --json`
+   - human output stays concise and status-focused
+
+4. Update export, docs, and release focused checks:
+   - include `harness_fleet.py` and `tests/test_harness_fleet.py`
+   - document global learning as controller-local ignored sidecar state
+
+## Validation Commands
+
+- `python3 -m pytest tests/test_harness_fleet.py tests/test_harness_cli.py tests/test_harness_export.py`
+- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+
+# Goal Spec + Attachments Input Execution Plan
+
+## Objective
+
+Add a detailed document-first goal input path without changing the beginner loop: `install -> goal -> watch`. Short goals keep working through `./harness goal "..."`; detailed goals use `./harness goal draft`, edit the generated `goal-spec.md`, then `./harness goal from <spec.md> --image <file> --caption <text>`.
+
+Change-Class: public-contract
+Diet-Exception: goal spec import adds a narrow public CLI surface so detailed product goals can become watch-driven plans without introducing another beginner command.
+
+## Implementation Plan
+
+1. Extend `scripts/harness_goal.py` with controller-side goal spec helpers:
+   - create sidecar-only draft spec files under `targets/<id>/goals/drafts/`
+   - localize draft templates from `HARNESS_LANGUAGE`, `LC_MESSAGES`, `LC_ALL`, or `LANG`: Korean for `ko*`, English for `en*`
+   - import UTF-8 spec files into `targets/<id>/goals/<goal-id>/inputs/spec.md`
+   - copy image attachments into `targets/<id>/goals/<goal-id>/attachments/`
+   - reject secret-like text, unsafe filenames, non-image attachments, oversized inputs, symlink artifacts, and caption count mismatches
+
+2. Store spec metadata in `goal.json`:
+   - `source: spec`
+   - sidecar-relative `spec_path`
+   - compact `attachments` metadata
+   - `context_summary`
+   - success criteria extracted from the spec acceptance section when present
+
+3. Make planner output consume spec metadata:
+   - generated roadmap/task summaries include the context summary
+   - generated task notes include `Goal-Spec` and attachment references
+   - image bytes/base64 never appear in backlog, status JSON, or stdout
+
+4. Add CLI surface:
+   - `./harness goal draft "목표 제목"`
+   - `./harness goal from <spec.md> [--image ... --caption ...] [--replace]`
+   - hide `--target` and `--json` as automation/test options
+   - do not add `--title`; derive the title from the markdown H1
+   - keep existing `./harness goal "plain text"` and status behavior
+
+5. Update docs/export/release coverage:
+   - beginner docs mention detailed goal docs without adding a new core flow
+   - export tests continue including the changed files
+
+## Validation Commands
+
+- `python3 -m pytest tests/test_harness_goal.py tests/test_harness_cli.py tests/test_harness_export.py`
+- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+
 # Harness Growth Control + Sidecar Compactness Execution Plan
 
 ## Objective
@@ -283,7 +442,7 @@ Keep the beginner UX as `./harness install -> ./harness goal -> ./harness watch`
 ## Worker A Locked Scope
 
 Agent: Worker A
-Change-Class: kernel-internal
+Historical change class: kernel-internal
 
 ### Goal
 
@@ -312,7 +471,7 @@ Implement only the controller-owned operator-wait core primitives.
 ## Worker F Locked Scope
 
 Agent: Worker F
-Change-Class: docs-export-release
+Historical change class: docs-export-release
 
 ### Goal
 

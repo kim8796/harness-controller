@@ -14,6 +14,15 @@
 
 `goal`은 제품 완성 목표를 controller sidecar에 등록한다. `watch`는 Telegram relay, active goal, queued backlog를 계속 감시하는 기본 운영 명령이다. `do`는 한 작업을 즉시 처리하고 싶을 때 쓰는 보조 명령이다.
 
+상세한 제품 명세, 화면 이미지, 참고 자료가 있으면 한 줄 goal 대신 문서 기반 goal을 쓴다.
+
+```bash
+./harness goal draft "목표 제목"
+./harness goal from <goal-spec.md> screenshots/ --caption "설명"
+```
+
+`goal draft`는 operator 언어 설정이 한국어면 한국어 템플릿, 영어면 영어 템플릿을 만든다. `goal from`은 markdown H1에서 제목을 가져오며, 이미지 파일이나 디렉토리를 뒤에 나열하면 참고 이미지를 controller sidecar에 붙인다. `--caption`은 1개면 모든 이미지에 공통 적용되고, 여러 개면 이미지 순서대로 적용된다. 기존 `--image <file>`도 호환된다. 이미 active goal이 있으면 `--replace`를 붙여 기존 goal을 archive한다.
+
 ## 상태 확인
 
 ```bash
@@ -21,11 +30,13 @@
 ./harness dashboard
 ./harness telegram setup --target-id my-app --repo-id my-app --dry-run
 ./harness target list
+./harness fleet status
 ./harness target verify my-app
 ./harness target dashboard my-app
 ```
 
 `dashboard`와 `status`는 운영자가 읽는 projection이다. 상태 변경 source of truth는 sidecar backlog, inbox, receipt, report다.
+`fleet status`는 여러 target의 readiness, active goal, backlog, watch, operator-wait, compact learning 상태를 한 화면에 모아 보여주는 read-only projection이다.
 
 ## 실행
 
@@ -162,6 +173,10 @@ sidecar backlog selection만 보는 plan smoke:
 ```bash
 ./harness target run my-app --plan-once
 ```
+
+## Global Learning
+
+target별 실행 증거와 상세 memory는 계속 `targets/<target-id>/` 아래에 남는다. 하네스는 그중 재사용 가능한 compact signal만 `targets/_global/memory/reusable-lessons.jsonl`과 `reusable-index.json`으로 승격한다. 이 global memory는 product repo에 쓰지 않고, raw log, raw evidence, product file content, secret-like 값은 복사하지 않는다.
 
 ## Controller release
 

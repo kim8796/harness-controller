@@ -31,7 +31,12 @@ def test_beginner_help_home_no_args_and_help_are_static(monkeypatch, tmp_path: P
     assert "하네스 시작" in no_arg_output
     assert "./harness install /path/to/product" in no_arg_output
     assert './harness goal "이 프로젝트를 완성도 있는 MVP로 만든다"' in no_arg_output
+    assert './harness goal draft "목표 제목"' in no_arg_output
+    assert "./harness goal from <goal-spec.md>" in no_arg_output
     assert "./harness watch" in no_arg_output
+    assert "./harness fleet status" in no_arg_output
+    assert "./harness target remove my-app" in no_arg_output
+    assert "제품 저장소 파일은 삭제하지 않습니다" in no_arg_output
     assert "./harness task review <packet-id> --normalize auto" not in no_arg_output
     assert "./harness target archive plan my-app" not in no_arg_output
     assert "./harness telegram setup --target-id my-app --repo-id my-app --dry-run" in no_arg_output
@@ -56,6 +61,7 @@ def test_argparse_help_and_invalid_command_remain_advanced_reference(capsys) -> 
     assert "usage: harness" in output
     assert "do" in output
     assert "watch" in output
+    assert "fleet" in output
     assert "target" in output
     assert "하네스 시작" not in output
 
@@ -86,10 +92,195 @@ def test_argparse_help_and_invalid_command_remain_advanced_reference(capsys) -> 
     assert "--stop-on-idle" in output
     assert "--status" in output
 
+    with pytest.raises(SystemExit) as goal_draft_help:
+        module.main(["goal", "draft", "--help"])
+    assert goal_draft_help.value.code == 0
+    output = capsys.readouterr().out
+    assert "usage: harness goal draft" in output
+    assert "--target" not in output
+
+    with pytest.raises(SystemExit) as goal_from_help:
+        module.main(["goal", "from", "--help"])
+    assert goal_from_help.value.code == 0
+    output = capsys.readouterr().out
+    assert "usage: harness goal from" in output
+    assert "attachments" in output
+    assert "--image" in output
+    assert "--caption" in output
+    assert "--target" not in output
+
     with pytest.raises(SystemExit) as invalid:
         module.main(["unknown-command"])
     assert invalid.value.code == 2
     assert "invalid choice" in capsys.readouterr().err
+
+
+def test_fleet_status_no_targets_is_beginner_safe(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    controller.mkdir()
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+
+    assert module.main(["fleet", "status"]) == 0
+    output = capsys.readouterr().out
+
+    assert "하네스 fleet status" in output
+    assert "targets: 0" in output
+    assert "./harness install /path/to/product" in output
+
+
+def test_fleet_status_json_reports_registered_targets(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    record = module.harness_controller.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.0",
+    )
+    module.harness_controller.set_default_target(controller, "demo")
+    queued = record.state_root / "backlog" / "queued" / "BL-demo.md"
+    queued.parent.mkdir(parents=True, exist_ok=True)
+    queued.write_text("Autonomy-Execute: auto\n", encoding="utf-8")
+
+    assert module.main(["fleet", "status", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["command"] == "fleet status"
+    assert payload["summary"]["targets_total"] == 1
+    assert payload["summary"]["queued_auto_backlog"] == 1
+    assert payload["targets"][0]["target_id"] == "demo"
+    assert payload["targets"][0]["default"] is True
+    assert payload["controller_root"] == "."
+    assert controller.as_posix() not in json.dumps(payload, ensure_ascii=False)
+    assert product.as_posix() not in json.dumps(payload, ensure_ascii=False)
+    assert not (product / "targets").exists()
+
+
+def test_goal_draft_and_goal_from_spec_cli_are_beginner_safe(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module, "_controller_version", lambda: "test")
+    monkeypatch.setenv("HARNESS_LANGUAGE", "ko")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    capsys.readouterr()
+
+    assert module.main(["goal", "draft", "상세", "MVP"]) == 0
+    output = capsys.readouterr().out
+    assert "하네스 goal draft 생성 완료" in output
+    assert "등록: `./harness goal from" in output
+    draft = next((controller / "targets" / "demo" / "goals" / "drafts").glob("*/goal-spec.md"))
+    assert "## 제품 목표" in draft.read_text(encoding="utf-8")
+
+    draft.write_text(
+        "\n".join(
+            [
+                "# 말 종류 확장",
+                "",
+                "## 배경",
+                "- 말 종류가 적어 전략 차이가 약하다.",
+                "",
+                "## 완료 조건",
+                "- 말 종류가 4가지로 보인다.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    image = tmp_path / "screen.png"
+    image.write_bytes(b"fake-png")
+
+    assert module.main(["goal", "from", str(draft), "--image", str(image), "--caption", "선택 화면 참고"]) == 0
+    output = capsys.readouterr().out
+    assert "하네스 goal 등록 완료" in output
+    assert "- 명세: `goals/" in output
+    assert "- 첨부: 1개" in output
+    assert "다음 명령: `./harness watch`" in output
+
+    active = json.loads((controller / "targets" / "demo" / "goals" / "active-goal.json").read_text(encoding="utf-8"))
+    goal_payload = json.loads(
+        (controller / "targets" / "demo" / "goals" / active["goal_id"] / "goal.json").read_text(encoding="utf-8")
+    )
+    assert goal_payload["title"] == "말 종류 확장"
+    assert goal_payload["source"] == "spec"
+    assert goal_payload["attachments"][0]["caption"] == "선택 화면 참고"
+    assert not (product / "targets").exists()
+
+
+def test_goal_from_cli_accepts_positional_files_and_directories(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module, "_controller_version", lambda: "test")
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    capsys.readouterr()
+
+    spec = tmp_path / "goal-spec.md"
+    spec.write_text("# 화면 목표\n\n## 완료 조건\n- 참고 이미지를 반영한다.\n", encoding="utf-8")
+    first = tmp_path / "first.png"
+    first.write_bytes(b"first")
+    screenshots = tmp_path / "screenshots"
+    screenshots.mkdir()
+    (screenshots / "b.jpg").write_bytes(b"b")
+    (screenshots / "a.png").write_bytes(b"a")
+    (screenshots / "ignore.txt").write_text("ignore\n", encoding="utf-8")
+
+    assert module.main(["goal", "from", str(spec), str(first), str(screenshots), "--caption", "공통 참고"]) == 0
+    output = capsys.readouterr().out
+    assert "- 첨부: 3개" in output
+
+    active = json.loads((controller / "targets" / "demo" / "goals" / "active-goal.json").read_text(encoding="utf-8"))
+    goal_payload = json.loads(
+        (controller / "targets" / "demo" / "goals" / active["goal_id"] / "goal.json").read_text(encoding="utf-8")
+    )
+    assert [item["caption"] for item in goal_payload["attachments"]] == ["공통 참고", "공통 참고", "공통 참고"]
+    assert [Path(item["path"]).name for item in goal_payload["attachments"]] == [
+        "image-01-first.png",
+        "image-02-a.png",
+        "image-03-b.jpg",
+    ]
+
+
+def test_goal_from_cli_accepts_multi_value_image_option(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module, "_controller_version", lambda: "test")
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    capsys.readouterr()
+
+    spec = tmp_path / "goal-spec.md"
+    spec.write_text("# 이미지 옵션 목표\n\n## 완료 조건\n- 된다.\n", encoding="utf-8")
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.jpg"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+
+    assert module.main(["goal", "from", str(spec), "--image", str(first), str(second), "--caption", "첫", "--caption", "둘"]) == 0
+    output = capsys.readouterr().out
+    assert "- 첨부: 2개" in output
+
+    active = json.loads((controller / "targets" / "demo" / "goals" / "active-goal.json").read_text(encoding="utf-8"))
+    goal_payload = json.loads(
+        (controller / "targets" / "demo" / "goals" / active["goal_id"] / "goal.json").read_text(encoding="utf-8")
+    )
+    assert [item["caption"] for item in goal_payload["attachments"]] == ["첫", "둘"]
 
 
 def test_repo_harness_shim_reexecs_controller_venv(tmp_path: Path) -> None:
@@ -3941,9 +4132,12 @@ def test_controller_release_check_runs_optional_focused_checks(monkeypatch, tmp_
     assert payload["checks"]["pytest"]["ok"] is True
     assert len(calls) == 2
     assert calls[0][1:4] == ["-m", "ruff", "check"]
+    assert "scripts/harness_fleet.py" in calls[0]
     assert "scripts/harness_telegram_setup.py" in calls[0]
     assert "scripts/harness_profiles.py" in calls[0]
+    assert "tests/test_harness_fleet.py" in calls[0]
     assert calls[1][1:4] == ["-m", "pytest", "tests/test_harness_autonomy.py"]
+    assert "tests/test_harness_fleet.py" in calls[1]
     assert "tests/test_harness_guard.py" in calls[1]
     assert "tests/test_harness_task_intake.py" in calls[1]
     assert "tests/test_harness_telegram_setup.py" in calls[1]

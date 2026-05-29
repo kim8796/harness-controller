@@ -2,7 +2,7 @@
 
 하네스를 처음 쓰는 사람이 보는 입구 문서다. 이 파일은 짧게 유지하고, 자세한 운영/설정/문제 해결은 아래 문서로 연결한다.
 
-현재 기준은 `v1.8.31` 이다. 전체 변경 이력은 [VERSION.md](VERSION.md), export 계약은 [FRAMEWORK_EXPORT.md](FRAMEWORK_EXPORT.md), starter 파일 구조는 [STARTER_SCAFFOLD.md](STARTER_SCAFFOLD.md)를 본다. Telegram/Redis relay drain 은 controller-owned Upstash adapter 를 사용하며 외부 app 내부 RedisStore 를 요구하지 않는다.
+현재 기준은 `v1.8.32` 이다. 전체 변경 이력은 [VERSION.md](VERSION.md), export 계약은 [FRAMEWORK_EXPORT.md](FRAMEWORK_EXPORT.md), starter 파일 구조는 [STARTER_SCAFFOLD.md](STARTER_SCAFFOLD.md)를 본다. Telegram/Redis relay drain 은 controller-owned Upstash adapter 를 사용하며 외부 app 내부 RedisStore 를 요구하지 않는다.
 
 ## 어디부터 보면 되나
 
@@ -69,6 +69,16 @@ Telegram/Redis relay를 새 컴퓨터에서 붙일 때는 controller local runti
 ```
 
 `goal`은 `targets/<target-id>/goals/` 아래에만 저장된다. 기존 active goal을 바꾸려면 `./harness goal "새 목표" --replace`를 쓴다. 현재 상태만 보려면 `./harness goal`을 실행한다.
+
+짧은 goal 문장으로 부족하면 문서 기반 입력을 쓴다.
+
+```bash
+./harness goal draft "1인 플레이 MVP 상세 명세"
+# 생성된 goal-spec.md를 편집한다.
+./harness goal from <goal-spec.md> screenshots/ --caption "설명"
+```
+
+`goal draft` 템플릿은 `HARNESS_LANGUAGE`, `LC_MESSAGES`, `LC_ALL`, `LANG` 값이 `ko*`이면 한국어, `en*`이면 영어로 만들어진다. `goal from`은 markdown H1을 제목으로 쓰고, 명세와 이미지 첨부를 product repo가 아니라 controller sidecar에 복사한다. 이미지 파일이나 이미지가 들어 있는 디렉토리를 뒤에 나열하면 되고, 디렉토리는 바로 아래 이미지 파일만 정렬해서 읽는다. `--caption`은 1개면 모든 이미지에 공통 적용되고, 여러 개면 이미지 순서대로 적용된다. 기존 `--image <file>`도 호환된다. 이미 active goal이 있으면 기존 목표를 archive해야 하므로 `--replace`를 명시한다.
 
 4. 계속 감시하는 loop를 켠다.
 
@@ -153,13 +163,15 @@ archive apply는 저장된 plan에 들어 있는 `targets/<target-id>/` 경로�
 ```bash
 ./harness status
 ./harness dashboard
+./harness fleet status
 ./harness goal "제품 목표"
 ./harness do "요청"
 ./harness watch
+./harness target remove my-app
 ./harness controller audit-size
 ```
 
-고급 명령은 [OPERATOR_GUIDE.md](OPERATOR_GUIDE.md)에 정리돼 있다. `./harness --help`는 raw argparse reference이고, bare `./harness`와 `./harness help`는 한국어 beginner home이다.
+여러 프로젝트를 등록했다면 `./harness fleet status`가 전체 target의 goal, backlog, watch, operator-wait, reusable learning 상태를 한 화면에 보여준다. 더 이상 관리하지 않을 프로젝트는 `./harness target remove my-app`으로 controller 등록만 archive한다. product repo 파일은 삭제하지 않는다. 고급 명령은 [OPERATOR_GUIDE.md](OPERATOR_GUIDE.md)에 정리돼 있다. `./harness --help`는 raw argparse reference이고, bare `./harness`와 `./harness help`는 한국어 beginner home이다.
 
 ## Telegram을 붙이는 경우
 

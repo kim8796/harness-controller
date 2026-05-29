@@ -162,6 +162,17 @@ def test_target_remove_has_explicit_related_tests() -> None:
     assert Path("tests/test_harness_export.py") in related
 
 
+def test_fleet_has_explicit_related_tests() -> None:
+    module = _load_module()
+    root = Path(__file__).resolve().parents[1]
+
+    related = module._guess_related_tests(Path("scripts/harness_fleet.py"), root)
+
+    assert Path("tests/test_harness_fleet.py") in related
+    assert Path("tests/test_harness_cli.py") in related
+    assert Path("tests/test_harness_export.py") in related
+
+
 def test_new_oversized_python_file_blocks(tmp_path: Path) -> None:
     module = _load_module()
     _init_repo(tmp_path)

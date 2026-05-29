@@ -34,6 +34,199 @@ def _init_product(path: Path) -> None:
     subprocess.run(["git", "commit", "-m", "initial"], cwd=path, check=True, stdout=subprocess.PIPE)
 
 
+def test_goal_spec_draft_uses_operator_language(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "game"
+
+    monkeypatch.setenv("HARNESS_LANGUAGE", "ko")
+    ko_path = module.create_goal_spec_draft(
+        state_root=state_root,
+        target_id="game",
+        title="상세 MVP",
+        now="20260528-010101",
+    )
+    ko_body = ko_path.read_text(encoding="utf-8")
+    assert "## 제품 목표" in ko_body
+    assert "## 완료 조건" in ko_body
+    assert "## Product Goal" not in ko_body
+
+    monkeypatch.setenv("HARNESS_LANGUAGE", "en")
+    en_path = module.create_goal_spec_draft(
+        state_root=state_root,
+        target_id="game",
+        title="Detailed MVP",
+        now="20260528-010102",
+    )
+    en_body = en_path.read_text(encoding="utf-8")
+    assert "## Product Goal" in en_body
+    assert "## Acceptance Criteria" in en_body
+    assert "제품 목표" not in en_body
+
+
+def test_goal_spec_draft_rejects_symlinked_goals_root(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "game"
+    external = tmp_path / "external-goals"
+    external.mkdir()
+    state_root.mkdir(parents=True)
+    (state_root / "goals").symlink_to(external)
+
+    with pytest.raises(module.GoalError, match="goal root must not be a symlink"):
+        module.create_goal_spec_draft(
+            state_root=state_root,
+            target_id="game",
+            title="상세 MVP",
+            now="20260529-010101",
+        )
+
+    assert not (external / "drafts").exists()
+
+
+def test_goal_from_spec_imports_spec_attachments_and_criteria(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "game"
+    spec = tmp_path / "goal-spec.md"
+    spec.write_text(
+        "\n".join(
+            [
+                "# 말 종류 확장",
+                "",
+                "## 배경",
+                "- 지금 말 종류가 적어 전략 차이가 약하다.",
+                "",
+                "## 완료 조건",
+                "- 말 종류가 4가지로 보인다.",
+                "- 각 말마다 구분되는 스킬이 있다.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    image = tmp_path / "screen.png"
+    image.write_bytes(b"fake-png")
+
+    goal = module.create_goal_from_spec(
+        state_root=state_root,
+        target_id="game",
+        source=spec,
+        images=(image,),
+        image_captions=("현재 선택 화면 참고",),
+    )
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+
+    assert payload["title"] == "말 종류 확장"
+    assert payload["source"] == "spec"
+    assert payload["success_criteria"] == ["말 종류가 4가지로 보인다.", "각 말마다 구분되는 스킬이 있다."]
+    assert payload["spec_path"].endswith("/inputs/goal-spec.md")
+    assert payload["attachments"][0]["path"].endswith(".png")
+    assert payload["attachments"][0]["caption"] == "현재 선택 화면 참고"
+
+
+def test_goal_from_spec_expands_multiple_files_and_directory_images(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "game"
+    spec = tmp_path / "goal-spec.md"
+    spec.write_text("# 시각 참고 목표\n\n## 완료 조건\n- 화면이 참고 이미지와 맞다.\n", encoding="utf-8")
+    direct = tmp_path / "direct.png"
+    direct.write_bytes(b"direct")
+    directory = tmp_path / "screens"
+    directory.mkdir()
+    (directory / "b.jpg").write_bytes(b"b")
+    (directory / "a.png").write_bytes(b"a")
+    (directory / "note.txt").write_text("not an image\n", encoding="utf-8")
+
+    goal = module.create_goal_from_spec(
+        state_root=state_root,
+        target_id="game",
+        source=spec,
+        images=(direct, directory),
+        image_captions=("공통 참고",),
+    )
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+
+    assert [item["media_type"] for item in payload["attachments"]] == ["image/png", "image/png", "image/jpeg"]
+    assert [item["caption"] for item in payload["attachments"]] == ["공통 참고", "공통 참고", "공통 참고"]
+    assert payload["attachments"][0]["path"].endswith("direct.png")
+    assert payload["attachments"][1]["path"].endswith("a.png")
+    assert payload["attachments"][2]["path"].endswith("b.jpg")
+
+
+def test_goal_from_spec_maps_per_image_captions(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "game"
+    spec = tmp_path / "goal-spec.md"
+    spec.write_text("# 캡션 목표\n\n## 완료 조건\n- 된다.\n", encoding="utf-8")
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.jpg"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+
+    goal = module.create_goal_from_spec(
+        state_root=state_root,
+        target_id="game",
+        source=spec,
+        images=(first, second),
+        image_captions=("첫 화면", "두 번째 화면"),
+    )
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+
+    assert [item["caption"] for item in payload["attachments"]] == ["첫 화면", "두 번째 화면"]
+
+
+def test_goal_from_spec_rejects_secret_text_and_caption_mismatch(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "game"
+    secret_spec = tmp_path / "goal-spec.md"
+    secret_spec.write_text("OPENAI_API_KEY=sk-12345678901234567890\n", encoding="utf-8")
+
+    with pytest.raises(module.GoalError, match="secret"):
+        module.create_goal_from_spec(state_root=state_root, target_id="game", source=secret_spec)
+
+    safe_spec = tmp_path / "safe.md"
+    safe_spec.write_text("# 안전한 목표\n\n## 완료 조건\n- 된다.\n", encoding="utf-8")
+    image = tmp_path / "screen.png"
+    image.write_bytes(b"fake-png")
+
+    with pytest.raises(module.GoalError, match="caption count"):
+        module.create_goal_from_spec(
+            state_root=state_root,
+            target_id="game",
+            source=safe_spec,
+            images=(image,),
+            image_captions=("하나", "둘"),
+        )
+
+
+def test_goal_from_spec_rejects_invalid_attachment_inputs(tmp_path: Path) -> None:
+    module = _load_module()
+    spec = tmp_path / "safe.md"
+    spec.write_text("# 안전한 목표\n\n## 완료 조건\n- 된다.\n", encoding="utf-8")
+
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    with pytest.raises(module.GoalError, match="no images"):
+        module.create_goal_from_spec(state_root=tmp_path / "empty-state", target_id="game", source=spec, images=(empty_dir,))
+
+    text_file = tmp_path / "note.txt"
+    text_file.write_text("not an image\n", encoding="utf-8")
+    with pytest.raises(module.GoalError, match="not an image"):
+        module.create_goal_from_spec(state_root=tmp_path / "text-state", target_id="game", source=spec, images=(text_file,))
+
+    image = tmp_path / "image.png"
+    image.write_bytes(b"image")
+    symlink = tmp_path / "linked.png"
+    symlink.symlink_to(image)
+    with pytest.raises(module.GoalError, match="symlink"):
+        module.create_goal_from_spec(state_root=tmp_path / "symlink-state", target_id="game", source=spec, images=(symlink,))
+
+    many_dir = tmp_path / "many"
+    many_dir.mkdir()
+    for index in range(51):
+        (many_dir / f"{index:02d}.png").write_bytes(b"x")
+    with pytest.raises(module.GoalError, match="too many"):
+        module.create_goal_from_spec(state_root=tmp_path / "many-state", target_id="game", source=spec, images=(many_dir,))
+
+
 def test_goal_create_status_and_replace(tmp_path: Path) -> None:
     module = _load_module()
     state_root = tmp_path / "targets" / "game"
