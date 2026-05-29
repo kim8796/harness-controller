@@ -19,11 +19,13 @@
 ```bash
 ./harness controller doctor
 ./harness install /path/to/product-repo
-./harness goal "이 프로젝트를 완성도 있는 MVP로 만든다"
+./harness goal "이 프로젝트를 배포 가능한 완성도 있는 제품으로 만든다"
 ./harness watch
 ```
 
 짧은 한 줄 목표로 부족하면 먼저 `./harness goal draft "목표 제목"`으로 한국어/영어 locale에 맞는 `goal-spec.md` 템플릿을 만들고, 문서와 이미지를 정리한 뒤 `./harness goal from <goal-spec.md> screenshots/ --caption "설명"`으로 등록한다.
+
+배포/production/DB/인증/AI/실사용자 목표는 production goal로 분류되어 deploy, DB, auth, realtime, AI, media, moderation, E2E smoke evidence가 있어야 완료된다. 명시적으로 목업/프로토타입/로컬만/MVP라고 쓴 경우에만 prototype goal로 처리한다.
 
 한 번만 검증하려면 `./harness watch --max-cycles 1 --no-telegram-drain` 을 쓰고, 상태는 `./harness watch --status` 로 본다.
 

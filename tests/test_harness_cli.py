@@ -31,7 +31,7 @@ def test_beginner_help_home_no_args_and_help_are_static(monkeypatch, tmp_path: P
     no_arg_output = capsys.readouterr().out
     assert "하네스 시작" in no_arg_output
     assert "./harness install /path/to/product" in no_arg_output
-    assert './harness goal "이 프로젝트를 완성도 있는 MVP로 만든다"' in no_arg_output
+    assert './harness goal "이 프로젝트를 배포 가능한 완성도 있는 제품으로 만든다"' in no_arg_output
     assert './harness goal draft "목표 제목"' in no_arg_output
     assert "./harness goal from <goal-spec.md>" in no_arg_output
     assert "./harness watch" in no_arg_output
@@ -454,7 +454,7 @@ def test_goal_command_creates_and_reports_active_goal(monkeypatch, tmp_path: Pat
     assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
     capsys.readouterr()
 
-    assert module.main(["goal", "이 프로젝트를 완성도 있는 MVP로 만든다"]) == 0
+    assert module.main(["goal", "이 프로젝트를 배포 가능한 완성도 있는 제품으로 만든다"]) == 0
     output = capsys.readouterr().out
     assert "하네스 goal 등록 완료" in output
     assert "다음 명령: `./harness watch`" in output
@@ -463,7 +463,7 @@ def test_goal_command_creates_and_reports_active_goal(monkeypatch, tmp_path: Pat
     assert module.main(["goal"]) == 0
     status_output = capsys.readouterr().out
     assert "하네스 goal 상태" in status_output
-    assert "완성도 있는 MVP" in status_output
+    assert "배포 가능한 완성도 있는 제품" in status_output
     _assert_no_product_harness_pollution(product)
 
 
@@ -477,7 +477,7 @@ def test_goal_watch_refill_generates_backlog_when_idle(monkeypatch, tmp_path: Pa
     monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.27")
 
     assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
-    assert module.main(["goal", "README 기반 MVP를 정리한다"]) == 0
+    assert module.main(["goal", "로컬만 README 기반 제품을 정리한다"]) == 0
     capsys.readouterr()
 
     record = module.harness_controller.default_target(controller)
@@ -503,7 +503,7 @@ def test_watch_public_flow_refills_and_runs_goal_task(monkeypatch, tmp_path: Pat
     calls: list[str] = []
 
     assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
-    assert module.main(["goal", "README 기반 MVP를 정리한다"]) == 0
+    assert module.main(["goal", "README 기반 제품을 정리한다"]) == 0
     capsys.readouterr()
 
     def fake_transaction(_record, _args):

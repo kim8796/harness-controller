@@ -6,13 +6,15 @@
 
 ```bash
 ./harness install /path/to/my-app --id my-app --branch main --default
-./harness goal "이 프로젝트를 완성도 있는 MVP로 만든다"
+./harness goal "이 프로젝트를 배포 가능한 완성도 있는 제품으로 만든다"
 ./harness watch
 ```
 
 `install`은 global wrapper 설치가 아니라 product repo를 controller target으로 등록하는 명령이다. global convenience wrapper는 `./harness self install`이다.
 
 `goal`은 제품 완성 목표를 controller sidecar에 등록한다. `watch`는 Telegram relay, active goal, queued backlog를 계속 감시하는 기본 운영 명령이다. `do`는 한 작업을 즉시 처리하고 싶을 때 쓰는 보조 명령이다.
+
+배포 가능한 서비스 목표는 production goal로 처리된다. 이 경우 하네스는 기본 3개 task로 축소하지 않고 인증, DB, realtime, AI, media, moderation, deploy, E2E smoke까지 분해한다. goal 완료는 backlog 완료 개수가 아니라 completion gate evidence 기준이다. provider env나 credential이 없으면 goal을 날리지 않고 operator-wait/readiness 상태로 남긴다.
 
 상세한 제품 명세, 화면 이미지, 참고 자료가 있으면 한 줄 goal 대신 문서 기반 goal을 쓴다.
 

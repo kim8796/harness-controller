@@ -341,7 +341,7 @@ def build_drafts(interview: Mapping[str, Any]) -> tuple[DraftFile, ...]:
 
 ## Current Goals
 
-## Goal: {product} MVP
+## Goal: {product} 제품 목표
 
 - Goal ID: G-001
 - Status: {status}
@@ -381,7 +381,7 @@ def build_drafts(interview: Mapping[str, Any]) -> tuple[DraftFile, ...]:
   "acceptance_keywords": [
     "test",
     "validation",
-    "mvp"
+    "product"
   ],
   "linked_backlog_ids": []
 }}

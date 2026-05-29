@@ -35,7 +35,7 @@ python3 -m venv .venv
 
 ```bash
 ./harness install /path/to/my-app
-./harness goal "이 프로젝트를 1인 플레이 가능한 완성도 있는 MVP로 만든다"
+./harness goal "이 프로젝트를 배포 가능한 완성도 있는 제품으로 만든다"
 ./harness watch
 ```
 
@@ -65,15 +65,17 @@ Telegram/Redis relay를 새 컴퓨터에서 붙일 때는 controller local runti
 3. 제품 목표를 등록한다.
 
 ```bash
-./harness goal "이 프로젝트를 1인 플레이 가능한 완성도 있는 MVP로 만든다"
+./harness goal "이 프로젝트를 배포 가능한 완성도 있는 제품으로 만든다"
 ```
 
 `goal`은 `targets/<target-id>/goals/` 아래에만 저장된다. 기존 active goal을 바꾸려면 `./harness goal "새 목표" --replace`를 쓴다. 현재 상태만 보려면 `./harness goal`을 실행한다.
 
+목표에 배포, production, Vercel, DB, 인증, AI, 실사용자 같은 표현이 들어가면 하네스는 production goal로 분류한다. production goal은 3개 작업으로 끝내지 않고 architecture, auth, database, realtime, AI, media, moderation, deploy, E2E, docs 작업을 만들며, PR merge만으로 완료 처리하지 않는다. Vercel URL, DB persistence, auth flow, realtime chat, AI reply, image upload, report/block, production smoke evidence가 모두 있어야 active goal이 completed가 된다. 명시적으로 목업, 프로토타입, 로컬만, MVP라고 쓴 경우에만 prototype goal로 처리한다.
+
 짧은 goal 문장으로 부족하면 문서 기반 입력을 쓴다.
 
 ```bash
-./harness goal draft "1인 플레이 MVP 상세 명세"
+./harness goal draft "제품 목표 상세 명세"
 # 생성된 goal-spec.md를 편집한다.
 ./harness goal from <goal-spec.md> screenshots/ --caption "설명"
 ```
