@@ -648,7 +648,28 @@ def watch_active_goal_id(record: harness_controller.TargetRecord) -> str:
         return ""
     if active is None or active.status != "active":
         return ""
+    try:
+        harness_goal.refresh_progress(state_root=record.state_root, goal=active)
+        active = harness_goal.load_active_goal(record.state_root)
+    except harness_goal.GoalError:
+        return ""
+    if active is None or active.status != "active":
+        return ""
     return active.goal_id
+
+
+def refresh_active_goal_progress(record: harness_controller.TargetRecord) -> Mapping[str, object] | None:
+    try:
+        active = harness_goal.load_active_goal(record.state_root)
+    except harness_goal.GoalError:
+        return None
+    if active is None or active.status != "active":
+        return None
+    try:
+        progress = harness_goal.refresh_progress(state_root=record.state_root, goal=active)
+    except harness_goal.GoalError:
+        return None
+    return progress if isinstance(progress, Mapping) else None
 
 
 def _status_text(payload: Mapping[str, object], key: str) -> str:
@@ -1152,6 +1173,7 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
 
     idle_seconds = max(0, int(args.idle_seconds or 0))
     processed = 0
+    attempted = 0
     idle_count = 0
     last_idle_phase = ""
     last_idle_reason = ""
@@ -1245,6 +1267,7 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                         (item for item in merge_results if str(item.get("status") or "") != "merged"),
                         None,
                     )
+                    refresh_active_goal_progress(record)
                     for result in merge_results:
                         print(
                             "- pending PR auto-merge: "
@@ -1316,6 +1339,7 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                         record=record,
                     )
                     if not pending_pushes:
+                        refresh_active_goal_progress(record)
                         if args.watch:
                             runtime.write_watch_status(
                                 record,
@@ -1489,6 +1513,7 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
             return 0
 
         backlog_id = str(getattr(item, "item_id", ""))
+        attempted += 1
         print(f"transaction 시작: `{backlog_id}`")
         if args.watch:
             gh_ready = runtime.github_credentials_ready(cwd=record.repo)
@@ -1582,18 +1607,6 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                     "error": sanitize_for_outbox(str(exc))[:240],
                 },
             )
-            if int(incident["count"]) >= runtime.autopilot_incident_threshold:
-                print("- 반복 실패: 해당 task를 격리하고 goal/watch는 다음 correction 또는 다음 task를 찾습니다.")
-                if args.watch:
-                    blocked_ok, blocked_path = runtime.block_sidecar_backlog_for_incident(
-                        record=record,
-                        backlog_id=backlog_id,
-                        reason=f"repeated incident {incident['signature']}",
-                    )
-                    print(f"- blocked backlog: `{blocked_path}`")
-                    if not blocked_ok:
-                        print("- watch 중단: 반복 실패 task 격리에 실패했습니다.")
-                        return 2
             if args.watch:
                 wait = _handle_transaction_operator_wait(
                     runtime,
@@ -1616,6 +1629,31 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                     idle_count=idle_count,
                     next_action="continue watch if non-hard-stop; inspect doctor diagnosis",
                 )
+                if max_cycles and attempted >= max_cycles:
+                    runtime.write_watch_status(
+                        record,
+                        phase="max-cycles-failed",
+                        status="stopped",
+                        selected_backlog_id=backlog_id,
+                        pending_reason=str(exc),
+                        processed_count=processed,
+                        idle_count=idle_count,
+                        next_action="inspect `./harness watch --status` and rerun after resolving the failure",
+                    )
+                    print(f"watch 종료: max-cycles={max_cycles}, 실패한 backlog {attempted - processed}개")
+                    return 2
+            if int(incident["count"]) >= runtime.autopilot_incident_threshold:
+                print("- 반복 실패: 해당 task를 격리하고 goal/watch는 다음 correction 또는 다음 task를 찾습니다.")
+                if args.watch:
+                    blocked_ok, blocked_path = runtime.block_sidecar_backlog_for_incident(
+                        record=record,
+                        backlog_id=backlog_id,
+                        reason=f"repeated incident {incident['signature']}",
+                    )
+                    print(f"- blocked backlog: `{blocked_path}`")
+                    if not blocked_ok:
+                        print("- watch 중단: 반복 실패 task 격리에 실패했습니다.")
+                        return 2
             if args.watch and not bool(incident_record.get("hard_stop")):
                 continue
             return 2
@@ -1687,6 +1725,7 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                     continue
                 return 2
             if args.watch:
+                refresh_active_goal_progress(record)
                 runtime.write_watch_status(
                     record,
                     phase=outcome.status,
@@ -1709,6 +1748,7 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
             if not args.watch:
                 return 2
             if args.once or (max_cycles and processed >= max_cycles):
+                refresh_active_goal_progress(record)
                 runtime.write_watch_status(
                     record,
                     phase=outcome.status,
@@ -1742,6 +1782,7 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                 "merge_commit_sha": getattr(outcome, "merge_commit_sha", ""),
             },
         )
+        refresh_active_goal_progress(record)
         if args.watch:
             runtime.write_watch_status(
                 record,

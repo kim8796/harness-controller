@@ -296,6 +296,139 @@ def test_command_run_projects_operator_wait_for_operator_actionable_transaction(
     assert status["operator_wait"]["backlog_id"] == "BL-dirty"
 
 
+def test_command_run_operator_wait_prevents_repeated_dirty_quarantine(tmp_path, capsys) -> None:
+    module = _load_module()
+    module.ERROR_CLASS = RuntimeError
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    state_root = controller / "targets" / "demo"
+    state_root.mkdir(parents=True)
+    product.mkdir(parents=True)
+    record = SimpleNamespace(target_id="demo", repo=product, branch="main", state_root=state_root)
+    item = SimpleNamespace(item_id="BL-dirty")
+    blocked_calls: list[dict[str, object]] = []
+
+    runtime = SimpleNamespace(
+        repo_root=lambda: controller,
+        default_target=lambda _root: record,
+        target_executable_backlog_items=lambda _record: [item],
+        target_next_auto_backlog_item=lambda _record: item,
+        drain_telegram_relay_for_record=lambda _record: {},
+        process_operator_task_inbox=lambda _record: {},
+        refill_goal_if_idle=lambda _record: None,
+        pending_backlog_product_pushes=lambda **_kwargs: [],
+        github_credentials_ready=lambda **_kwargs: True,
+        write_watch_status=module.write_watch_status,
+        watch_active_goal_id=lambda _record: "goal-demo",
+        print_watch_status=lambda _record: 0,
+        record_autopilot_doctor_diagnosis=lambda **_kwargs: {"path": "doctor.json"},
+        append_autopilot_memory=lambda *_args, **_kwargs: state_root / "memory.json",
+        record_autopilot_incident=lambda **_kwargs: {"signature": "sig-dirty", "count": 2},
+        target_open_incident_blocker=lambda _record, _backlog_id: None,
+        block_sidecar_backlog_for_incident=lambda **kwargs: blocked_calls.append(kwargs) or (True, "blocked.md"),
+        run_autopilot_transaction=lambda _record, _args: (_ for _ in ()).throw(
+            RuntimeError("AI 구현 lane이 실패했습니다.\n- run blockers: target-git-dirty")
+        ),
+        print_beginner_transaction_error=lambda exc: print(f"transaction error: {exc}"),
+        backlog_goal_id=lambda _record, _backlog_id: "goal-demo",
+        run_target_sidecar_maintenance=lambda _record: {},
+        incident_record_incident=lambda **_kwargs: {},
+        materialize_controller_repair_task=lambda **_kwargs: state_root / "repair.md",
+        sleep=lambda _seconds: None,
+        finish_push_caution="push caution",
+        autopilot_incident_threshold=2,
+        controller_errors=(RuntimeError,),
+        discover_errors=(RuntimeError,),
+        transaction_errors=(RuntimeError,),
+    )
+    args = argparse.Namespace(
+        extra=[],
+        once=False,
+        watch=True,
+        max_cycles=1,
+        idle_seconds=1,
+        stop_on_idle=False,
+        drain_telegram=False,
+        auto_maintenance=False,
+    )
+
+    assert module.command_run(args, runtime) == 2
+    output = capsys.readouterr().out
+    assert "transaction operator-wait" in output
+    assert blocked_calls == []
+    status = json.loads((state_root / "watch" / "latest.json").read_text(encoding="utf-8"))
+    assert status["phase"] == "operator-wait"
+    assert status["operator_wait_class"] == "dirty-repo-wait"
+
+
+def test_command_run_bounded_watch_stops_after_failed_attempt(tmp_path, capsys) -> None:
+    module = _load_module()
+    module.ERROR_CLASS = RuntimeError
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    state_root = controller / "targets" / "demo"
+    state_root.mkdir(parents=True)
+    product.mkdir(parents=True)
+    record = SimpleNamespace(target_id="demo", repo=product, branch="main", state_root=state_root)
+    items = [SimpleNamespace(item_id="BL-one"), SimpleNamespace(item_id="BL-two")]
+    selected: list[str] = []
+
+    def next_item(_record):
+        item = items[len(selected)]
+        selected.append(item.item_id)
+        return item
+
+    runtime = SimpleNamespace(
+        repo_root=lambda: controller,
+        default_target=lambda _root: record,
+        target_executable_backlog_items=lambda _record: items,
+        target_next_auto_backlog_item=next_item,
+        drain_telegram_relay_for_record=lambda _record: {},
+        process_operator_task_inbox=lambda _record: {},
+        refill_goal_if_idle=lambda _record: None,
+        pending_backlog_product_pushes=lambda **_kwargs: [],
+        github_credentials_ready=lambda **_kwargs: True,
+        write_watch_status=module.write_watch_status,
+        watch_active_goal_id=lambda _record: "goal-demo",
+        print_watch_status=lambda _record: 0,
+        record_autopilot_doctor_diagnosis=lambda **_kwargs: {"path": "doctor.json"},
+        append_autopilot_memory=lambda *_args, **_kwargs: state_root / "memory.json",
+        record_autopilot_incident=lambda **_kwargs: {"signature": "sig-product", "count": 1},
+        target_open_incident_blocker=lambda _record, _backlog_id: None,
+        block_sidecar_backlog_for_incident=lambda **_kwargs: pytest.fail("first failed attempt must not quarantine"),
+        run_autopilot_transaction=lambda _record, _args: (_ for _ in ()).throw(RuntimeError("AI 구현 lane이 실패했습니다.")),
+        print_beginner_transaction_error=lambda exc: print(f"transaction error: {exc}"),
+        backlog_goal_id=lambda _record, _backlog_id: "goal-demo",
+        run_target_sidecar_maintenance=lambda _record: {},
+        incident_record_incident=lambda **_kwargs: {},
+        materialize_controller_repair_task=lambda **_kwargs: state_root / "repair.md",
+        sleep=lambda _seconds: None,
+        finish_push_caution="push caution",
+        autopilot_incident_threshold=2,
+        controller_errors=(RuntimeError,),
+        discover_errors=(RuntimeError,),
+        transaction_errors=(RuntimeError,),
+    )
+    args = argparse.Namespace(
+        extra=[],
+        once=False,
+        watch=True,
+        max_cycles=1,
+        idle_seconds=1,
+        stop_on_idle=False,
+        drain_telegram=False,
+        auto_maintenance=False,
+    )
+
+    assert module.command_run(args, runtime) == 2
+    output = capsys.readouterr().out
+    assert "watch 종료: max-cycles=1, 실패한 backlog 1개" in output
+    assert selected == ["BL-one"]
+    status = json.loads((state_root / "watch" / "latest.json").read_text(encoding="utf-8"))
+    assert status["phase"] == "max-cycles-failed"
+    assert status["selected_backlog_id"] == "BL-one"
+
+
 def test_command_run_retries_pending_pr_merge_before_selecting_new_task(tmp_path, capsys) -> None:
     module = _load_module()
     module.ERROR_CLASS = RuntimeError
@@ -369,6 +502,111 @@ def test_command_run_retries_pending_pr_merge_before_selecting_new_task(tmp_path
     assert status["phase"] == "merge-pending"
     assert status["transaction_status"] == "merge-pending"
     assert status["pr_url"] == "https://github.com/acme/demo/pull/7"
+
+
+def test_command_run_refreshes_goal_progress_after_pending_merge_retry(tmp_path, capsys) -> None:
+    module = _load_module()
+    module.ERROR_CLASS = RuntimeError
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    state_root = controller / "targets" / "demo"
+    state_root.mkdir(parents=True)
+    product.mkdir(parents=True)
+    record = SimpleNamespace(target_id="demo", repo=product, branch="main", state_root=state_root)
+    goal = module.harness_goal.create_goal(state_root=state_root, target_id="demo", text="MVP")
+    progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    progress["tasks"] = [{"backlog_id": "BL-done"}, {"backlog_id": "BL-next"}]
+    goal.progress_json.write_text(json.dumps(progress), encoding="utf-8")
+    completed = state_root / "backlog" / "completed" / "BL-done.md"
+    completed.parent.mkdir(parents=True, exist_ok=True)
+    completed.write_text(
+        "\n".join(["ID: BL-done", "Status: completed", f"Goal: {goal.goal_id}", ""]),
+        encoding="utf-8",
+    )
+    queued = state_root / "backlog" / "queued" / "BL-next.md"
+    queued.parent.mkdir(parents=True, exist_ok=True)
+    queued.write_text(
+        "\n".join(["ID: BL-next", "Status: queued", f"Goal: {goal.goal_id}", "Autonomy-Execute: auto", ""]),
+        encoding="utf-8",
+    )
+    receipt_dir = state_root / "runs" / "harness" / "external-demo-backlog-pr-merge-run"
+    receipt_dir.mkdir(parents=True)
+    (receipt_dir / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "operation": "backlog-product-pr-merge",
+                "applied": True,
+                "status": "merged",
+                "target_id": "demo",
+                "goal_id": goal.goal_id,
+                "backlog_id": "BL-done",
+            }
+        ),
+        encoding="utf-8",
+    )
+    merge_results = [
+        {
+            "status": "merged",
+            "branch": "harness/demo/BL-done",
+            "base": "main",
+            "pr_url": "https://github.com/acme/demo/pull/7",
+            "message": "merged",
+            "merge_commit_sha": "merge123",
+            "backlog_id": "BL-done",
+            "run_id": "run-old",
+            "commit_sha": "abc1234",
+        }
+    ]
+    runtime = SimpleNamespace(
+        repo_root=lambda: controller,
+        default_target=lambda _root: record,
+        target_executable_backlog_items=lambda _record: [],
+        target_next_auto_backlog_item=lambda _record: None,
+        drain_telegram_relay_for_record=lambda _record: {},
+        process_operator_task_inbox=lambda _record: {},
+        refill_goal_if_idle=lambda _record: None,
+        pending_backlog_product_pushes=lambda **_kwargs: [],
+        auto_merge_pending_publications=lambda **_kwargs: merge_results,
+        github_credentials_ready=lambda **_kwargs: True,
+        write_watch_status=module.write_watch_status,
+        watch_active_goal_id=module.watch_active_goal_id,
+        print_watch_status=lambda _record: 0,
+        record_autopilot_doctor_diagnosis=lambda **_kwargs: {"path": "doctor.json"},
+        append_autopilot_memory=lambda *_args, **_kwargs: state_root / "memory.json",
+        record_autopilot_incident=lambda **_kwargs: {"signature": "sig", "count": 1},
+        target_open_incident_blocker=lambda _record, _backlog_id: None,
+        block_sidecar_backlog_for_incident=lambda **_kwargs: (True, "blocked.md"),
+        run_autopilot_transaction=lambda _record, _args: None,
+        print_beginner_transaction_error=lambda exc: print(f"transaction error: {exc}"),
+        backlog_goal_id=lambda _record, _backlog_id: goal.goal_id,
+        run_target_sidecar_maintenance=lambda _record: {},
+        incident_record_incident=lambda **_kwargs: {},
+        materialize_controller_repair_task=lambda **_kwargs: state_root / "repair.md",
+        sleep=lambda _seconds: None,
+        finish_push_caution="push caution",
+        autopilot_incident_threshold=2,
+        controller_errors=(RuntimeError,),
+        discover_errors=(RuntimeError,),
+        transaction_errors=(RuntimeError,),
+    )
+    args = argparse.Namespace(
+        extra=[],
+        once=False,
+        watch=True,
+        max_cycles=0,
+        idle_seconds=1,
+        stop_on_idle=True,
+        drain_telegram=False,
+        auto_maintenance=False,
+        auto_merge=True,
+    )
+
+    assert module.command_run(args, runtime) == 0
+    capsys.readouterr()
+    refreshed = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    assert refreshed["completed_count"] == 1
+    assert refreshed["tasks"][0]["backlog_status"] == "completed"
+    assert refreshed["tasks"][1]["backlog_status"] == "queued"
 
 
 def test_command_watch_delegates_to_command_run_for_long_running_mode() -> None:

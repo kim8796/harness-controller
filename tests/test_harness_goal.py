@@ -83,6 +83,43 @@ def test_goal_spec_draft_uses_operator_language(tmp_path: Path, monkeypatch: pyt
     assert "제품 목표" not in en_body
 
 
+def test_goal_task_notes_limit_attachment_paths_for_prompt_budget(tmp_path: Path) -> None:
+    module = _load_module()
+    goal_dir = tmp_path / "targets" / "game" / "goals" / "goal-1"
+    goal_dir.mkdir(parents=True)
+    goal_json = goal_dir / "goal.json"
+    goal_json.write_text(
+        json.dumps(
+            {
+                "spec_path": "goals/goal-1/inputs/goal-spec.md",
+                "attachments": [
+                    {"path": f"goals/goal-1/attachments/image-{index:02d}.png", "media_type": "image/png"}
+                    for index in range(1, 6)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    goal = module.GoalRecord(
+        goal_id="goal-1",
+        target_id="game",
+        title="Chat MVP",
+        status="active",
+        goal_dir=goal_dir,
+        goal_json=goal_json,
+        roadmap_json=goal_dir / "roadmap.json",
+        progress_json=goal_dir / "progress.json",
+    )
+
+    notes = module._goal_task_notes(goal, "plan-1", {"task_key": "task-01"})
+
+    attachment_notes = [note for note in notes if note.startswith("Goal-Attachment:")]
+    assert len(attachment_notes) == 3
+    assert "Goal-Spec-Summary: incorporated into this backlog; do not open the full spec during implementation." in notes
+    assert all(not note.startswith("Goal-Spec:") for note in notes)
+    assert "Goal-Attachment-Omitted: 2 more attachments; use backlog Summary/Acceptance and listed captions only." in notes
+
+
 def test_goal_spec_draft_rejects_symlinked_goals_root(tmp_path: Path) -> None:
     module = _load_module()
     state_root = tmp_path / "targets" / "game"
@@ -421,6 +458,110 @@ def test_goal_refill_scaffolds_empty_product_instead_of_docs_only(tmp_path: Path
     assert task_keys[:3] == ["task-01-scaffold", "task-02-ui", "task-03-test"]
     assert any("package.json" in task["file_scope"] for task in roadmap["tasks"])
     assert any("src/**" in task["file_scope"] for task in roadmap["tasks"])
+    scaffold = roadmap["tasks"][0]
+    scaffold_acceptance = "\n".join(scaffold["acceptance"])
+    assert "최소 실행 가능한" in scaffold_acceptance
+    assert "상세 친구/채팅/포인트" in scaffold_acceptance
+    assert "전체 핵심 플로우" not in scaffold_acceptance
+    assert "무료 포인트" not in scaffold_acceptance
+    assert scaffold["validation"] == ["`git diff -- README.md package.json src/** public/**`"]
+
+
+def test_goal_refill_nonempty_client_repo_uses_product_scope_not_readme_only(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    product = tmp_path / "chatapp"
+    product.mkdir()
+    (product / "src").mkdir()
+    (product / "public").mkdir()
+    (product / "src" / "app.js").write_text("console.log('app')\n", encoding="utf-8")
+    (product / "public" / "index.html").write_text("<div id=\"app\"></div>\n", encoding="utf-8")
+    (product / "README.md").write_text("# Chat\n", encoding="utf-8")
+    (product / "package.json").write_text(
+        json.dumps({"scripts": {"check": "node --check src/app.js"}}),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, stdout=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "test@example.test"], cwd=product, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=product, check=True)
+    subprocess.run(["git", "add", "."], cwd=product, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=product, check=True, stdout=subprocess.PIPE)
+
+    goal = module.create_goal(state_root=state_root, target_id="chatapp", text="채팅앱 만들기")
+    result = module.refill_goal_tasks(state_root=state_root, target_id="chatapp", target_repo=product, goal=goal)
+    roadmap = json.loads(goal.roadmap_json.read_text(encoding="utf-8"))
+
+    assert result is not None
+    core_task = roadmap["tasks"][0]
+    test_task = roadmap["tasks"][2]
+    assert core_task["file_scope"] != ["README.md"]
+    assert "src/**" in core_task["file_scope"]
+    assert "public/**" in core_task["file_scope"]
+    assert "package.json" in core_task["file_scope"]
+    assert "tests/**" in test_task["file_scope"]
+    assert "package.json" in test_task["file_scope"]
+
+
+def test_goal_progress_does_not_complete_when_only_fallback_task_merged(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    goal = module.create_goal(state_root=state_root, target_id="chatapp", text="채팅앱 만들기")
+    progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    progress["tasks"] = [
+        {
+            "task_key": "task-01-scaffold",
+            "auto_eligible": False,
+            "backlog_id": "",
+            "queued_backlog_path": "",
+            "risk_flags": ["validation unavailable"],
+        },
+        {
+            "task_key": "task-repair-scope",
+            "auto_eligible": True,
+            "fallback_created_at": "2026-05-29T00:00:00Z",
+            "backlog_id": "BL-repair",
+            "queued_backlog_path": str(state_root / "backlog" / "queued" / "BL-repair.md"),
+        },
+    ]
+    goal.progress_json.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
+    completed = state_root / "backlog" / "completed"
+    completed.mkdir(parents=True)
+    (completed / "BL-repair.md").write_text(
+        "\n".join(
+            [
+                "ID: BL-repair",
+                "Title: repair",
+                "Status: completed",
+                f"Goal: {goal.goal_id}",
+                "Autonomy-Execute: auto",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    evidence_dir = state_root / "runs" / "harness" / "external-test-backlog-pr-merge-BL-repair"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "operation": "backlog-product-pr-merge",
+                "applied": True,
+                "status": "merged",
+                "target_id": "chatapp",
+                "goal_id": goal.goal_id,
+                "backlog_id": "BL-repair",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    module.refresh_progress(state_root=state_root, goal=goal)
+
+    goal_payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    active_payload = json.loads((state_root / "goals" / "active-goal.json").read_text(encoding="utf-8"))
+    assert goal_payload["status"] == "active"
+    assert active_payload["goal_id"] == goal.goal_id
 
 
 def test_goal_refill_is_idempotent_after_tasks_exist(tmp_path: Path) -> None:
@@ -464,6 +605,37 @@ def test_goal_refresh_progress_removes_active_pointer_when_completed(tmp_path: P
     assert module.load_active_goal(state_root) is None
     listed = module.list_goals(state_root)
     assert listed[0]["status"] == "completed"
+
+
+def test_status_payload_refreshes_completed_backlog_progress(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "game"
+    goal = module.create_goal(state_root=state_root, target_id="game", text="완성도 있는 MVP")
+    progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    progress["tasks"] = [{"backlog_id": "BL-done"}, {"backlog_id": "BL-next"}]
+    goal.progress_json.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
+
+    completed = state_root / "backlog" / "completed" / "BL-done.md"
+    completed.parent.mkdir(parents=True, exist_ok=True)
+    completed.write_text(
+        "\n".join(["ID: BL-done", "Status: completed", f"Goal: {goal.goal_id}", ""]),
+        encoding="utf-8",
+    )
+    queued = state_root / "backlog" / "queued" / "BL-next.md"
+    queued.parent.mkdir(parents=True, exist_ok=True)
+    queued.write_text(
+        "\n".join(["ID: BL-next", "Status: queued", f"Goal: {goal.goal_id}", "Autonomy-Execute: auto", ""]),
+        encoding="utf-8",
+    )
+    _write_successful_publication(state_root, target_id="game", goal_id=goal.goal_id, backlog_id="BL-done")
+
+    payload = module.status_payload(state_root=state_root)
+
+    assert payload["active"] is True
+    assert payload["progress"]["completed_count"] == 1
+    tasks = payload["progress"]["tasks"]
+    assert tasks[0]["backlog_status"] == "completed"
+    assert tasks[1]["backlog_status"] == "queued"
 
 
 def test_goal_refill_does_not_create_fallback_after_goal_completion(tmp_path: Path) -> None:

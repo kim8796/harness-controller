@@ -244,6 +244,162 @@ def test_publish_task_pr_missing_origin_is_setup_blocked_with_next_action(tmp_pa
     assert "GitHub repo" in payload["next_action"]
 
 
+def test_publish_task_pr_bootstraps_missing_origin_with_gh_repo_create(tmp_path: Path) -> None:
+    module = _load_module()
+    repo = tmp_path / "chatapp-test"
+    state_root = tmp_path / "targets" / "chatapp-test"
+    repo.mkdir(parents=True)
+    branch = module.task_branch_name("chatapp-test", "BL-demo")
+    push_command = ("git", "push", "origin", f"abc1234:refs/heads/{branch}")
+    remote_get_url_command = ("git", "remote", "get-url", "origin")
+    repo_create_command = (
+        "gh",
+        "repo",
+        "create",
+        "chatapp-test",
+        "--private",
+        "--source",
+        ".",
+        "--remote",
+        "origin",
+        "--push",
+    )
+    pr_list_command = ("gh", "pr", "list", "--head", branch, "--base", "main", "--json", "url", "--jq", ".[0].url")
+    pr_create_command = (
+        "gh",
+        "pr",
+        "create",
+        "--base",
+        "main",
+        "--head",
+        branch,
+        "--title",
+        "Demo",
+        "--body",
+        "body",
+    )
+    fetch_command = ("git", "fetch", "--prune", "origin")
+    ancestor_command = ("git", "merge-base", "--is-ancestor", "abc1234", "origin/main")
+    runner = OrderedRunner(
+        {
+            push_command: [
+                _fail(
+                    push_command,
+                    "fatal: 'origin' does not appear to be a git repository\n"
+                    "fatal: Could not read from remote repository.",
+                ),
+                _ok(push_command),
+            ],
+            remote_get_url_command: [_fail(remote_get_url_command, "error: No such remote 'origin'")],
+            repo_create_command: [_ok(repo_create_command, stdout="https://github.com/kim8796/chatapp-test\n")],
+            pr_list_command: [_ok(pr_list_command, stdout="")],
+            pr_create_command: [_fail(pr_create_command, "GraphQL: No commits between main and harness/chatapp-test/BL-demo")],
+            fetch_command: [_ok(fetch_command)],
+            ancestor_command: [_ok(ancestor_command)],
+        }
+    )
+
+    result = module.publish_task_pr(
+        controller_root=tmp_path,
+        state_root=state_root,
+        target_repo=repo,
+        target_id="chatapp-test",
+        goal_id="goal-1",
+        backlog_id="BL-demo",
+        run_id="run-1",
+        commit_sha="abc1234",
+        base_branch="main",
+        title="Demo",
+        body="body",
+        runner=runner,
+    )
+
+    payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
+    assert result.status == "already-in-base"
+    assert payload["repo_bootstrap"]["status"] == "created"
+    assert payload["repo_bootstrap"]["repo"] == "chatapp-test"
+    assert payload["repo_bootstrap"]["pushed_base"] is True
+    assert [call[0] for call in runner.calls][:3] == [push_command, remote_get_url_command, repo_create_command]
+
+
+def test_publish_task_pr_creates_missing_github_repo_for_existing_origin(tmp_path: Path) -> None:
+    module = _load_module()
+    repo = tmp_path / "product"
+    state_root = tmp_path / "targets" / "demo"
+    repo.mkdir(parents=True)
+    branch = module.task_branch_name("demo", "BL-demo")
+    push_command = ("git", "push", "origin", f"abc1234:refs/heads/{branch}")
+    remote_get_url_command = ("git", "remote", "get-url", "origin")
+    repo_create_command = ("gh", "repo", "create", "acme/product", "--private")
+    push_base_command = ("git", "push", "-u", "origin", "HEAD:refs/heads/main")
+    pr_list_command = ("gh", "pr", "list", "--head", branch, "--base", "main", "--json", "url", "--jq", ".[0].url")
+    pr_create_command = (
+        "gh",
+        "pr",
+        "create",
+        "--base",
+        "main",
+        "--head",
+        branch,
+        "--title",
+        "Demo",
+        "--body",
+        "body",
+    )
+    fetch_command = ("git", "fetch", "--prune", "origin")
+    ancestor_command = ("git", "merge-base", "--is-ancestor", "abc1234", "origin/main")
+    runner = OrderedRunner(
+        {
+            push_command: [
+                _fail(push_command, "ERROR: Repository not found.\nfatal: Could not read from remote repository."),
+                _ok(push_command),
+            ],
+            remote_get_url_command: [_ok(remote_get_url_command, stdout="git@github.com:acme/product.git\n")],
+            repo_create_command: [_ok(repo_create_command, stdout="https://github.com/acme/product\n")],
+            push_base_command: [_ok(push_base_command)],
+            pr_list_command: [_ok(pr_list_command, stdout="")],
+            pr_create_command: [_fail(pr_create_command, "GraphQL: No commits between main and harness/demo/BL-demo")],
+            fetch_command: [_ok(fetch_command)],
+            ancestor_command: [_ok(ancestor_command)],
+        }
+    )
+
+    result = module.publish_task_pr(
+        controller_root=tmp_path,
+        state_root=state_root,
+        target_repo=repo,
+        target_id="demo",
+        goal_id="goal-1",
+        backlog_id="BL-demo",
+        run_id="run-1",
+        commit_sha="abc1234",
+        base_branch="main",
+        title="Demo",
+        body="body",
+        runner=runner,
+    )
+
+    payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
+    assert result.status == "already-in-base"
+    assert payload["repo_bootstrap"]["status"] == "created"
+    assert payload["repo_bootstrap"]["repo"] == "acme/product"
+    assert payload["repo_bootstrap"]["pushed_base"] is True
+    assert repo_create_command in [call[0] for call in runner.calls]
+    assert push_base_command in [call[0] for call in runner.calls]
+
+
+def test_github_repo_auto_create_disabled_for_pytest_default_runner(monkeypatch) -> None:
+    module = _load_module()
+
+    monkeypatch.delenv("HARNESS_GITHUB_AUTO_CREATE_REPO", raising=False)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/test_harness_cli.py::test_name")
+
+    assert module._github_repo_auto_create_enabled(module.default_runner) is False
+
+    monkeypatch.setenv("HARNESS_GITHUB_AUTO_CREATE_REPO", "1")
+    assert module._github_repo_auto_create_enabled(module.default_runner) is True
+
+
 def test_publish_task_pr_treats_commit_already_on_base_as_published(tmp_path: Path) -> None:
     module = _load_module()
     repo = tmp_path / "product"

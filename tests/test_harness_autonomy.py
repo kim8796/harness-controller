@@ -79,6 +79,42 @@ def _rev_parse(tmp_path: Path, ref: str = "HEAD") -> str:
     return _git_run(["git", "rev-parse", ref], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
 
 
+def test_external_product_prompt_includes_attachment_budget(tmp_path: Path) -> None:
+    module = _load_module()
+    context = module.AutonomyRootContext(
+        mode="external",
+        target_id="demo",
+        controller_root=tmp_path / "controller",
+        target_root=tmp_path / "product",
+        state_root=tmp_path / "controller" / "targets" / "demo",
+        control_path=tmp_path / "control.md",
+        runtime_path=tmp_path / "runtime.json",
+        lock_path=tmp_path / "lock",
+        inbox_path=tmp_path / "inbox",
+        inbox_processed_path=tmp_path / "processed",
+        outbox_path=tmp_path / "outbox",
+    )
+
+    prompt = module.build_external_product_implementation_prompt(
+        context,
+        backlog_payload={"id": "BL-demo", "path": "backlog/queued/BL-demo.md", "title": "Demo", "priority": "P2", "goal": "goal-1"},
+        backlog_text="\n".join(
+            [
+                "## Notes",
+                "- Goal-Attachment: goals/goal-1/attachments/image-01.png (image/png)",
+                "- Goal-Attachment: goals/goal-1/attachments/image-02.png (image/png)",
+                "- Goal-Attachment: goals/goal-1/attachments/image-03.png (image/png)",
+                "- Goal-Attachment-Omitted: 9 more attachments; use backlog Summary/Acceptance and listed captions only.",
+            ]
+        ),
+    )
+
+    assert "Do not open full goal spec files during implementation" in prompt
+    assert "Do not call `view_image`, screenshot, or other image-opening tools during implementation runs" in prompt
+    assert "Use listed captions and attachment filenames as visual direction" in prompt
+    assert "inspect at most 3 representative attachments with default/resized detail" in prompt
+
+
 def test_external_rootcontext_run_once_writes_sidecar_only(tmp_path: Path, capsys) -> None:
     module = _load_module()
     controller = tmp_path / "controller"
