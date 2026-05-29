@@ -205,6 +205,127 @@ def test_publish_task_pr_auth_failure_is_credential_blocked(tmp_path: Path) -> N
     assert payload["status"] == "credential-blocked"
 
 
+def test_publish_task_pr_missing_origin_is_setup_blocked_with_next_action(tmp_path: Path) -> None:
+    module = _load_module()
+    repo = tmp_path / "product"
+    state_root = tmp_path / "targets" / "demo"
+    repo.mkdir(parents=True)
+    branch = module.task_branch_name("demo", "BL-demo")
+    push_command = ("git", "push", "origin", f"abc1234:refs/heads/{branch}")
+    runner = FakeRunner(
+        {
+            push_command: _fail(
+                push_command,
+                "fatal: 'origin' does not appear to be a git repository\n"
+                "fatal: Could not read from remote repository.",
+            ),
+        }
+    )
+
+    result = module.publish_task_pr(
+        controller_root=tmp_path,
+        state_root=state_root,
+        target_repo=repo,
+        target_id="demo",
+        goal_id="goal-1",
+        backlog_id="BL-demo",
+        run_id="run-1",
+        commit_sha="abc1234",
+        base_branch="main",
+        title="Demo",
+        body="body",
+        runner=runner,
+    )
+
+    payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
+    assert result.status == "setup-blocked"
+    assert payload["status"] == "setup-blocked"
+    assert "origin" in payload["message"]
+    assert "GitHub repo" in payload["next_action"]
+
+
+def test_publish_task_pr_treats_commit_already_on_base_as_published(tmp_path: Path) -> None:
+    module = _load_module()
+    repo = tmp_path / "product"
+    state_root = tmp_path / "targets" / "demo"
+    repo.mkdir(parents=True)
+    branch = module.task_branch_name("demo", "BL-demo")
+    push_command = ("git", "push", "origin", f"abc1234:refs/heads/{branch}")
+    pr_list_command = ("gh", "pr", "list", "--head", branch, "--base", "main", "--json", "url", "--jq", ".[0].url")
+    pr_create_command = (
+        "gh",
+        "pr",
+        "create",
+        "--base",
+        "main",
+        "--head",
+        branch,
+        "--title",
+        "Demo",
+        "--body",
+        "body",
+    )
+    fetch_command = ("git", "fetch", "--prune", "origin")
+    ancestor_command = ("git", "merge-base", "--is-ancestor", "abc1234", "origin/main")
+    runner = FakeRunner(
+        {
+            push_command: _ok(push_command),
+            pr_list_command: _ok(pr_list_command, stdout=""),
+            pr_create_command: _fail(pr_create_command, "GraphQL: No commits between main and harness/demo/BL-demo"),
+            fetch_command: _ok(fetch_command),
+            ancestor_command: _ok(ancestor_command),
+        }
+    )
+
+    result = module.publish_task_pr(
+        controller_root=tmp_path,
+        state_root=state_root,
+        target_repo=repo,
+        target_id="demo",
+        goal_id="goal-1",
+        backlog_id="BL-demo",
+        run_id="run-1",
+        commit_sha="abc1234",
+        base_branch="main",
+        title="Demo",
+        body="body",
+        runner=runner,
+    )
+
+    payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
+    assert result.status == "already-in-base"
+    assert payload["status"] == "already-in-base"
+    assert payload["applied"] is True
+    assert payload["pr_url"] == ""
+
+
+def test_pending_task_pr_merges_ignores_already_in_base_receipts_without_pr(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    receipt_dir = state_root / "runs" / "harness" / "external-20260529-000000-backlog-pr-BL-demo"
+    receipt_dir.mkdir(parents=True)
+    (receipt_dir / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "operation": "backlog-product-pr",
+                "applied": True,
+                "status": "already-in-base",
+                "target_id": "demo",
+                "goal_id": "goal-1",
+                "backlog_id": "BL-demo",
+                "implementation_run_id": "run-1",
+                "product_commit_sha": "abc1234",
+                "branch": "harness/demo/BL-demo",
+                "base": "main",
+                "pr_url": "",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert module.pending_task_pr_merges(state_root=state_root, target_id="demo") == []
+
+
 def test_publish_task_branch_receipt_reuses_successful_existing_receipt(tmp_path: Path) -> None:
     module = _load_module()
     repo = tmp_path / "product"

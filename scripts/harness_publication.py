@@ -176,6 +176,57 @@ def _looks_like_credential_error(text: str) -> bool:
     )
 
 
+def _looks_like_setup_error(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        token in lowered
+        for token in (
+            "'origin' does not appear to be a git repository",
+            "origin does not appear to be a git repository",
+            "no such remote 'origin'",
+            "no configured push destination",
+            "repository not found",
+        )
+    )
+
+
+def _publication_block_status(message: str, *, default: str) -> str:
+    if _looks_like_credential_error(message):
+        return "credential-blocked"
+    if _looks_like_setup_error(message):
+        return "setup-blocked"
+    return default
+
+
+def _publication_next_action(message: str) -> str:
+    if _looks_like_setup_error(message):
+        return (
+            "Create or connect the GitHub repo, add a valid `origin` remote, push the base branch, "
+            "then rerun `./harness watch`."
+        )
+    if _looks_like_credential_error(message):
+        return "Run `gh auth status`; if needed run `gh auth login`, then rerun `./harness watch`."
+    return "Inspect the publication error, fix the remote/PR blocker, then rerun `./harness watch`."
+
+
+def _looks_like_no_commits_between(text: str) -> bool:
+    return "no commits between" in text.lower()
+
+
+def _commit_already_on_remote_base(
+    *,
+    runner: CommandRunner,
+    target_repo: Path,
+    commit_sha: str,
+    base_branch: str,
+) -> bool:
+    fetch = _run(runner, ("git", "fetch", "--prune", "origin"), target_repo)
+    if fetch.returncode != 0:
+        return False
+    ancestor = _run(runner, ("git", "merge-base", "--is-ancestor", commit_sha, f"origin/{base_branch}"), target_repo)
+    return ancestor.returncode == 0
+
+
 def _looks_like_pending_check(value: str) -> bool:
     return value.lower() in {
         "expected",
@@ -611,11 +662,13 @@ def publish_task_pr(
 
     push = _run(runner, ("git", "push", "origin", f"{commit_sha}:refs/heads/{branch}"), target_repo)
     if push.returncode != 0:
+        message = _redact((push.stderr or push.stdout).strip())[:1000]
+        result_status = _publication_block_status(message, default="push-blocked")
         payload = {
             "schema_version": 1,
             "operation": "backlog-product-pr",
             "applied": False,
-            "status": "push-blocked",
+            "status": result_status,
             "target_id": target_id,
             "goal_id": goal_id,
             "backlog_id": backlog_id,
@@ -624,16 +677,12 @@ def publish_task_pr(
             "branch": branch,
             "base": base_branch,
             "pr_url": "",
-            "message": _redact((push.stderr or push.stdout).strip())[:1000],
+            "message": message,
+            "next_action": _publication_next_action(message),
             "created_at": now,
         }
         _write_json(receipt_path, payload)
         _write_json(evidence_path, payload)
-        result_status = "credential-blocked" if _looks_like_credential_error(str(payload["message"])) else "push-blocked"
-        if result_status == "credential-blocked":
-            payload["status"] = result_status
-            _write_json(receipt_path, payload)
-            _write_json(evidence_path, payload)
         return PublicationResult(result_status, branch, base_branch, "", receipt_path, evidence_path, str(payload["message"]))
 
     existing = _run(
@@ -662,11 +711,46 @@ def publish_task_pr(
             target_repo,
         )
         if create.returncode != 0:
+            message = _redact((create.stderr or create.stdout).strip())[:1000]
+            if _looks_like_no_commits_between(message) and _commit_already_on_remote_base(
+                runner=runner,
+                target_repo=target_repo,
+                commit_sha=commit_sha,
+                base_branch=base_branch,
+            ):
+                payload = {
+                    "schema_version": 1,
+                    "operation": "backlog-product-pr",
+                    "applied": True,
+                    "status": "already-in-base",
+                    "target_id": target_id,
+                    "goal_id": goal_id,
+                    "backlog_id": backlog_id,
+                    "implementation_run_id": run_id,
+                    "product_commit_sha": commit_sha,
+                    "branch": branch,
+                    "base": base_branch,
+                    "pr_url": "",
+                    "message": f"product commit is already present in origin/{base_branch}",
+                    "created_at": now,
+                }
+                _write_json(receipt_path, payload)
+                _write_json(evidence_path, payload)
+                return PublicationResult(
+                    "already-in-base",
+                    branch,
+                    base_branch,
+                    "",
+                    receipt_path,
+                    evidence_path,
+                    str(payload["message"]),
+                )
+            result_status = _publication_block_status(message, default="pr-blocked")
             payload = {
                 "schema_version": 1,
                 "operation": "backlog-product-pr",
                 "applied": False,
-                "status": "pr-blocked",
+                "status": result_status,
                 "target_id": target_id,
                 "goal_id": goal_id,
                 "backlog_id": backlog_id,
@@ -675,16 +759,12 @@ def publish_task_pr(
                 "branch": branch,
                 "base": base_branch,
                 "pr_url": "",
-                "message": _redact((create.stderr or create.stdout).strip())[:1000],
+                "message": message,
+                "next_action": _publication_next_action(message),
                 "created_at": now,
             }
             _write_json(receipt_path, payload)
             _write_json(evidence_path, payload)
-            result_status = "credential-blocked" if _looks_like_credential_error(str(payload["message"])) else "pr-blocked"
-            if result_status == "credential-blocked":
-                payload["status"] = result_status
-                _write_json(receipt_path, payload)
-                _write_json(evidence_path, payload)
             return PublicationResult(result_status, branch, base_branch, "", receipt_path, evidence_path, str(payload["message"]))
         pr_url = _extract_url(create.stdout)
         status = "created"
@@ -768,6 +848,9 @@ def pending_task_pr_merges(*, state_root: Path, target_id: str) -> list[dict[str
         run_id = str(payload.get("implementation_run_id") or payload.get("run_id") or "")
         if not run_id or run_id in merged_run_ids:
             continue
+        pr_url = str(payload.get("pr_url") or "")
+        if not pr_url:
+            continue
         branch = str(payload.get("branch") or "")
         if not branch.startswith(f"harness/{_safe_slug(target_id, fallback='target')}/"):
             continue
@@ -784,7 +867,7 @@ def pending_task_pr_merges(*, state_root: Path, target_id: str) -> list[dict[str
                     "commit_sha": str(payload.get("product_commit_sha") or ""),
                     "branch": branch,
                     "base": str(payload.get("base") or "main"),
-                    "pr_url": str(payload.get("pr_url") or ""),
+                    "pr_url": pr_url,
                     "created_at": created_at,
                 },
             )

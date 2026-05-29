@@ -1,3 +1,16 @@
+# Goal Publication / Planner Correction Plan
+
+Goal:
+- Do not mark a goal complete or clear its active pointer when a linked completed task still has blocked/missing PR publication evidence.
+- Surface missing GitHub `origin` as an actionable setup blocker and retry pending publication after the operator fixes the remote.
+- Treat commits already present on `origin/<base>` as successful publication evidence instead of creating impossible empty PRs.
+- For empty/new product repos, generate scaffold/UI/test tasks instead of a single docs-only task.
+
+Validation:
+- TDD regressions in goal, publication, watch, CLI, and controller tests.
+- `python3 -m pytest tests/test_harness_goal.py tests/test_harness_publication.py tests/test_harness_watch.py tests/test_harness_cli.py tests/test_harness_controller.py -q`
+- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+
 # Sidecar Symlink Boundary Correction Plan
 
 ## Objective
@@ -646,3 +659,24 @@ Verification:
 
 - `python3 -m pytest tests/test_harness_operator_wait.py tests/test_harness_incident.py -q`
 - focused suite and guard.
+# Goal Publication Blocker Preservation Plan
+
+Goal:
+- A product goal must not disappear or be marked completed when its linked task only reached backlog `completed` but PR publication/merge is still blocked.
+- Missing `origin`/GitHub remote failures must be reported as actionable setup-wait style publication blockers, with a clear next action.
+
+Root cause:
+- `scripts/harness_goal.py::refresh_progress()` completes a goal when all linked backlog items are `completed`, but it does not inspect publication/merge receipts.
+- `scripts/harness_publication.py` classifies missing `origin` as generic push-blocked text and does not provide an operator-friendly setup action.
+
+Implementation:
+- Add TDD regression coverage for completed backlog plus failed publication receipt preserving active goal.
+- Add TDD regression coverage for missing-origin push failure producing a setup-oriented blocker message.
+- Update goal progress completion guard so all linked tasks require successful PR publication or merge evidence before goal status becomes completed.
+- Keep blocked/pending publication goals active so watch can retry/refill instead of switching to idle-no-goal.
+- Improve missing remote message without leaking secrets.
+
+Validation:
+- `python3 -m pytest tests/test_harness_goal.py tests/test_harness_publication.py tests/test_harness_watch.py -q`
+- `python3 -m pytest tests/test_harness_cli.py tests/test_harness_controller.py -q`
+- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`

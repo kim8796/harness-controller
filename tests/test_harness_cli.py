@@ -1474,7 +1474,8 @@ def test_beginner_run_once_autopilot_completes_and_commits_before_push_block(
     assert "완료 처리:" in output
     assert "product commit:" in output
     assert "product publication:" in output
-    assert "publication 보류" in output or "publication 중단" in output
+    assert "publication operator-wait" in output
+    assert "GitHub repo" in output
     assert _product_head(product) != before_head
     assert _product_git_status(product) == []
     assert not (controller / "targets" / "demo" / "backlog" / "queued" / "BL-demo.md").exists()
@@ -1497,10 +1498,10 @@ def test_beginner_run_once_autopilot_completes_and_commits_before_push_block(
     )
     assert module.main(["run", "--once", "--runner", "custom", "--command-template", "printf 'next\\n' > next.txt"]) == 2
     continued_output = capsys.readouterr().out
-    assert "product publication이 아직 닫히지 않았습니다" in continued_output
-    assert "pending publication은 run/watch 전체를 멈추지 않고" in continued_output
-    assert "BL-next" in continued_output
-    assert (product / "next.txt").exists()
+    assert "publication operator-wait" in continued_output
+    assert "GitHub repo" in continued_output
+    assert "BL-demo" in continued_output
+    assert not (product / "next.txt").exists()
 
 
 def test_beginner_run_projects_operator_wait_on_previous_credential_blocked_publication(
@@ -1550,6 +1551,57 @@ def test_beginner_run_projects_operator_wait_on_previous_credential_blocked_publ
     assert status["phase"] == "operator-wait"
     assert status["operator_wait"]["wait_class"] == "setup-wait"
     assert status["last_selected_backlog_id"] == "BL-old"
+
+
+def test_beginner_run_projects_operator_wait_on_previous_setup_blocked_publication(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    record = module.harness_controller.TargetRecord(
+        target_id="demo",
+        repo=product,
+        branch="main",
+        state_root=controller / "targets" / "demo",
+        controller_version="test",
+        created_at="",
+        updated_at="",
+        is_default=True,
+    )
+    record.state_root.mkdir(parents=True)
+
+    def fail_if_selected(_record):
+        raise AssertionError("setup-blocked publication must stop before selecting the next task")
+
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_controller, "default_target", lambda root: record)
+    monkeypatch.setattr(
+        module.harness_controller,
+        "pending_backlog_product_pushes",
+        lambda **kwargs: [
+            {
+                "run_id": "run-old",
+                "backlog_id": "BL-old",
+                "status": "setup-blocked",
+                "message": "Git remote `origin` is not configured.",
+            }
+        ],
+    )
+    monkeypatch.setattr(module, "_github_credentials_ready", lambda **kwargs: True)
+    monkeypatch.setattr(module, "_target_next_auto_backlog_item", fail_if_selected)
+
+    assert module.main(["run", "--once"]) == 2
+    output = capsys.readouterr().out
+    assert "publication operator-wait" in output
+    assert "origin" in output
+    assert "GitHub repo" in output
+    status = json.loads((controller / "targets" / "demo" / "watch" / "latest.json").read_text(encoding="utf-8"))
+    assert status["phase"] == "operator-wait"
+    assert status["transaction_status"] == "setup-blocked"
+    assert status["operator_wait"]["wait_class"] == "setup-wait"
 
 
 def test_watch_operator_wait_timeout_writes_status_without_sleep(monkeypatch, tmp_path: Path, capsys) -> None:

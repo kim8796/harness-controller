@@ -1342,7 +1342,7 @@ def pending_backlog_product_pushes(*, controller_root: Path, record: TargetRecor
     if not runs_root.exists():
         return pending
     push_run_ids: set[str] = set()
-    credential_blocked_run_ids: set[str] = set()
+    blocked_publication_by_run_id: dict[str, dict[str, str]] = {}
     for push_evidence in sorted(runs_root.glob("external-*-backlog-push-*/generated-evidence.json")):
         try:
             push_payload = _read_json_file(push_evidence, label="backlog product push generated evidence")
@@ -1365,14 +1365,18 @@ def pending_backlog_product_pushes(*, controller_root: Path, record: TargetRecor
             and str(pr_payload.get("target_id") or "") == record.target_id
         ):
             push_run_ids.add(str(pr_payload.get("implementation_run_id") or ""))
+        blocked_status = str(pr_payload.get("status") or pr_payload.get("publication_state") or "")
         if (
             str(pr_payload.get("operation") or "") == "backlog-product-pr"
             and str(pr_payload.get("target_id") or "") == record.target_id
-            and str(pr_payload.get("status") or pr_payload.get("publication_state") or "") == "credential-blocked"
+            and blocked_status in {"credential-blocked", "setup-blocked", "push-blocked", "pr-blocked"}
         ):
             run_id = str(pr_payload.get("implementation_run_id") or pr_payload.get("run_id") or "")
             if run_id:
-                credential_blocked_run_ids.add(run_id)
+                blocked_publication_by_run_id[run_id] = {
+                    "status": blocked_status,
+                    "message": str(pr_payload.get("message") or ""),
+                }
     publication_root = state_paths.state_root / "state" / "publication"
     if publication_root.exists() and not publication_root.is_symlink():
         for receipt_path in sorted(publication_root.glob("*.json")):
@@ -1393,14 +1397,18 @@ def pending_backlog_product_pushes(*, controller_root: Path, record: TargetRecor
                 run_id = str(receipt_payload.get("implementation_run_id") or receipt_payload.get("run_id") or "")
                 if run_id:
                     push_run_ids.add(run_id)
+            blocked_status = str(receipt_payload.get("status") or receipt_payload.get("publication_state") or "")
             if (
                 str(receipt_payload.get("operation") or "") == "backlog-product-pr"
                 and str(receipt_payload.get("target_id") or "") == record.target_id
-                and str(receipt_payload.get("status") or receipt_payload.get("publication_state") or "") == "credential-blocked"
+                and blocked_status in {"credential-blocked", "setup-blocked", "push-blocked", "pr-blocked"}
             ):
                 run_id = str(receipt_payload.get("implementation_run_id") or receipt_payload.get("run_id") or "")
                 if run_id:
-                    credential_blocked_run_ids.add(run_id)
+                    blocked_publication_by_run_id[run_id] = {
+                        "status": blocked_status,
+                        "message": str(receipt_payload.get("message") or ""),
+                    }
     for evidence_path in sorted(runs_root.glob("*/generated-evidence.json")):
         if evidence_path.is_symlink() or not evidence_path.is_file():
             continue
@@ -1415,12 +1423,14 @@ def pending_backlog_product_pushes(*, controller_root: Path, record: TargetRecor
             continue
         summary = _target_implementation_evidence_summary(record, state_paths, run_id, evidence_path, payload)
         if summary["backlog_status"] == "completed" and summary["matching_commit_receipt"]:
+            publication_blocker = blocked_publication_by_run_id.get(run_id, {})
             pending.append(
                 {
                     "run_id": run_id,
                     "backlog_id": str(summary["backlog_id"]),
                     "backlog_title": str(summary["backlog_title"]),
-                    "status": "credential-blocked" if run_id in credential_blocked_run_ids else "pending",
+                    "status": publication_blocker.get("status", "pending"),
+                    "message": publication_blocker.get("message", ""),
                 }
             )
     return pending

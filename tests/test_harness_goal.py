@@ -34,6 +34,26 @@ def _init_product(path: Path) -> None:
     subprocess.run(["git", "commit", "-m", "initial"], cwd=path, check=True, stdout=subprocess.PIPE)
 
 
+def _write_successful_publication(state_root: Path, *, target_id: str, goal_id: str, backlog_id: str) -> None:
+    receipt_dir = state_root / "runs" / "harness" / f"external-20260529-000000-backlog-pr-{backlog_id}"
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    (receipt_dir / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "operation": "backlog-product-pr",
+                "applied": True,
+                "status": "created",
+                "target_id": target_id,
+                "goal_id": goal_id,
+                "backlog_id": backlog_id,
+                "implementation_run_id": "run-done",
+                "pr_url": "https://github.com/acme/product/pull/1",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_goal_spec_draft_uses_operator_language(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_module()
     state_root = tmp_path / "targets" / "game"
@@ -120,6 +140,112 @@ def test_goal_from_spec_imports_spec_attachments_and_criteria(tmp_path: Path) ->
     assert payload["spec_path"].endswith("/inputs/goal-spec.md")
     assert payload["attachments"][0]["path"].endswith(".png")
     assert payload["attachments"][0]["caption"] == "현재 선택 화면 참고"
+
+
+def test_refresh_progress_keeps_goal_active_when_publication_is_blocked(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="채팅앱 만들기",
+        now="2026-05-29T00:00:00Z",
+    )
+    progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    progress["tasks"] = [
+        {
+            "task_key": "task-01-docs",
+            "backlog_id": "BL-chatapp-docs",
+            "packet_id": "task-chatapp-docs",
+        }
+    ]
+    goal.progress_json.write_text(json.dumps(progress), encoding="utf-8")
+    completed = state_root / "backlog" / "completed" / "BL-chatapp-docs.md"
+    completed.parent.mkdir(parents=True, exist_ok=True)
+    completed.write_text(
+        "\n".join(
+            [
+                "ID: BL-chatapp-docs",
+                "Title: Docs",
+                "Status: completed",
+                f"Goal: {goal.goal_id}",
+                "Autonomy-Execute: auto",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    receipt_dir = state_root / "runs" / "harness" / "external-20260529-000000-backlog-pr-BL-chatapp-docs"
+    receipt_dir.mkdir(parents=True)
+    (receipt_dir / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "operation": "backlog-product-pr",
+                "applied": False,
+                "status": "setup-blocked",
+                "target_id": "chatapp",
+                "goal_id": goal.goal_id,
+                "backlog_id": "BL-chatapp-docs",
+                "implementation_run_id": "run-docs",
+                "message": "Git remote `origin` is not configured.",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    module.refresh_progress(state_root=state_root, goal=goal)
+
+    goal_payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    assert goal_payload["status"] == "active"
+    assert module.load_active_goal(state_root).goal_id == goal.goal_id
+    assert goal_payload["publication_blocked_backlog_ids"] == ["BL-chatapp-docs"]
+
+
+def test_goal_refill_waits_when_existing_task_publication_is_blocked(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    product = tmp_path / "product"
+    product.mkdir()
+    _init_product(product)
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="채팅앱 만들기",
+        now="2026-05-29T00:00:00Z",
+    )
+    progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    progress["tasks"] = [{"task_key": "task-01-docs", "backlog_id": "BL-chatapp-docs"}]
+    goal.progress_json.write_text(json.dumps(progress), encoding="utf-8")
+    completed = state_root / "backlog" / "completed" / "BL-chatapp-docs.md"
+    completed.parent.mkdir(parents=True, exist_ok=True)
+    completed.write_text(
+        "\n".join(["ID: BL-chatapp-docs", "Status: completed", f"Goal: {goal.goal_id}", ""]),
+        encoding="utf-8",
+    )
+    receipt_dir = state_root / "runs" / "harness" / "external-20260529-000000-backlog-pr-BL-chatapp-docs"
+    receipt_dir.mkdir(parents=True)
+    (receipt_dir / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "operation": "backlog-product-pr",
+                "applied": False,
+                "status": "pr-blocked",
+                "target_id": "chatapp",
+                "goal_id": goal.goal_id,
+                "backlog_id": "BL-chatapp-docs",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = module.refill_goal_tasks(state_root=state_root, target_id="chatapp", target_repo=product, goal=goal)
+
+    assert result is not None
+    assert result.created == 0
+    assert result.queued == 0
+    assert result.completed is False
+    assert result.message == "goal waiting on publication"
+    assert not tuple((state_root / "backlog" / "queued").glob("*.md"))
 
 
 def test_goal_from_spec_expands_multiple_files_and_directory_images(tmp_path: Path) -> None:
@@ -273,6 +399,30 @@ def test_goal_refill_generates_queued_tasks_without_product_mutation(tmp_path: P
     assert after == before
 
 
+def test_goal_refill_scaffolds_empty_product_instead_of_docs_only(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    product = tmp_path / "product"
+    product.mkdir()
+    (product / "README.md").write_text("# Chatapp\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, stdout=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "test@example.test"], cwd=product, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=product, check=True)
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=product, check=True, stdout=subprocess.PIPE)
+
+    goal = module.create_goal(state_root=state_root, target_id="chatapp", text="채팅앱 만들기")
+    result = module.refill_goal_tasks(state_root=state_root, target_id="chatapp", target_repo=product, goal=goal)
+    roadmap = json.loads(goal.roadmap_json.read_text(encoding="utf-8"))
+
+    assert result is not None
+    assert result.created >= 3
+    task_keys = [task["task_key"] for task in roadmap["tasks"]]
+    assert task_keys[:3] == ["task-01-scaffold", "task-02-ui", "task-03-test"]
+    assert any("package.json" in task["file_scope"] for task in roadmap["tasks"])
+    assert any("src/**" in task["file_scope"] for task in roadmap["tasks"])
+
+
 def test_goal_refill_is_idempotent_after_tasks_exist(tmp_path: Path) -> None:
     module = _load_module()
     state_root = tmp_path / "targets" / "game"
@@ -303,6 +453,7 @@ def test_goal_refresh_progress_removes_active_pointer_when_completed(tmp_path: P
         "\n".join(["ID: BL-done", "Status: completed", f"Goal: {goal.goal_id}", ""]),
         encoding="utf-8",
     )
+    _write_successful_publication(state_root, target_id="game", goal_id=goal.goal_id, backlog_id="BL-done")
 
     refreshed = module.refresh_progress(state_root=state_root, goal=goal)
     goal_payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
@@ -331,6 +482,7 @@ def test_goal_refill_does_not_create_fallback_after_goal_completion(tmp_path: Pa
         "\n".join(["ID: BL-done", "Status: completed", f"Goal: {goal.goal_id}", ""]),
         encoding="utf-8",
     )
+    _write_successful_publication(state_root, target_id="game", goal_id=goal.goal_id, backlog_id="BL-done")
 
     result = module.refill_goal_tasks(state_root=state_root, target_id="game", target_repo=product, goal=goal)
 
