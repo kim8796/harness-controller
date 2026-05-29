@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -48,6 +49,25 @@ class TaskPublicationResult:
     receipt_path: Path
     evidence_path: Path
     receipt: dict[str, object]
+
+
+@dataclass(frozen=True)
+class RepoBootstrapResult:
+    ok: bool
+    status: str
+    repo: str
+    message: str
+    pushed_base: bool
+    next_action: str
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "status": self.status,
+            "repo": self.repo,
+            "message": self.message,
+            "pushed_base": self.pushed_base,
+            "next_action": self.next_action,
+        }
 
 
 def utc_timestamp() -> str:
@@ -190,6 +210,36 @@ def _looks_like_setup_error(text: str) -> bool:
     )
 
 
+def _parse_github_remote_repo(remote_url: str) -> str:
+    value = remote_url.strip()
+    if value.endswith(".git"):
+        value = value[:-4]
+    patterns = (
+        r"^git@github\.com:(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)$",
+        r"^ssh://git@github\.com/(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)$",
+        r"^https://github\.com/(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)$",
+        r"^http://github\.com/(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)$",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, value)
+        if match:
+            return match.group("repo")
+    return ""
+
+
+def _repo_name_from_path(path: Path) -> str:
+    return _safe_slug(path.name, fallback="product-repo", max_length=100)
+
+
+def _github_repo_auto_create_enabled(runner: CommandRunner) -> bool:
+    value = os.environ.get("HARNESS_GITHUB_AUTO_CREATE_REPO")
+    if value is not None:
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    if runner is default_runner and os.environ.get("PYTEST_CURRENT_TEST"):
+        return False
+    return True
+
+
 def _publication_block_status(message: str, *, default: str) -> str:
     if _looks_like_credential_error(message):
         return "credential-blocked"
@@ -211,6 +261,62 @@ def _publication_next_action(message: str) -> str:
 
 def _looks_like_no_commits_between(text: str) -> bool:
     return "no commits between" in text.lower()
+
+
+def _bootstrap_github_origin(
+    *,
+    runner: CommandRunner,
+    target_repo: Path,
+    base_branch: str,
+    setup_message: str,
+) -> RepoBootstrapResult:
+    remote = _run(runner, ("git", "remote", "get-url", "origin"), target_repo)
+    remote_url = remote.stdout.strip() if remote.returncode == 0 else ""
+    github_repo = _parse_github_remote_repo(remote_url)
+    repo_name = github_repo or _repo_name_from_path(target_repo)
+
+    if github_repo:
+        create_command = ("gh", "repo", "create", repo_name, "--private")
+    else:
+        create_command = ("gh", "repo", "create", repo_name, "--private", "--source", ".", "--remote", "origin", "--push")
+    create = _run(runner, create_command, target_repo)
+    if create.returncode != 0:
+        message = _completed_process_message(create)
+        status = "credential-blocked" if _looks_like_credential_error(message) else "setup-blocked"
+        next_action = (
+            "Run `gh auth status`; if needed run `gh auth login`, then rerun `./harness watch`."
+            if status == "credential-blocked"
+            else _publication_next_action(setup_message)
+        )
+        return RepoBootstrapResult(
+            False,
+            status,
+            repo_name,
+            f"{setup_message}\nrepo bootstrap failed: {message}".strip(),
+            False,
+            next_action,
+        )
+
+    pushed_base = True
+    if github_repo:
+        push_base = _run(runner, ("git", "push", "-u", "origin", f"HEAD:refs/heads/{base_branch}"), target_repo)
+        if push_base.returncode != 0:
+            message = _completed_process_message(push_base)
+            status = _publication_block_status(message, default="setup-blocked")
+            return RepoBootstrapResult(
+                False,
+                status,
+                repo_name,
+                f"GitHub repo created but base branch push failed: {message}".strip(),
+                False,
+                _publication_next_action(message),
+            )
+
+    output = _redact((create.stdout or create.stderr or "").strip())[:1000]
+    message = f"GitHub repo bootstrapped: {repo_name}"
+    if output:
+        message = f"{message} ({output})"
+    return RepoBootstrapResult(True, "created", repo_name, message, pushed_base, "retry publication")
 
 
 def _commit_already_on_remote_base(
@@ -660,31 +766,75 @@ def publish_task_pr(
         _write_json(evidence_path, payload)
         return PublicationResult("credential-blocked", branch, base_branch, "", receipt_path, evidence_path, "gh CLI is not available")
 
-    push = _run(runner, ("git", "push", "origin", f"{commit_sha}:refs/heads/{branch}"), target_repo)
+    bootstrap_payload: dict[str, object] = {}
+    push_command = ("git", "push", "origin", f"{commit_sha}:refs/heads/{branch}")
+    push = _run(runner, push_command, target_repo)
     if push.returncode != 0:
         message = _redact((push.stderr or push.stdout).strip())[:1000]
-        result_status = _publication_block_status(message, default="push-blocked")
-        payload = {
-            "schema_version": 1,
-            "operation": "backlog-product-pr",
-            "applied": False,
-            "status": result_status,
-            "target_id": target_id,
-            "goal_id": goal_id,
-            "backlog_id": backlog_id,
-            "implementation_run_id": run_id,
-            "product_commit_sha": commit_sha,
-            "branch": branch,
-            "base": base_branch,
-            "pr_url": "",
-            "message": message,
-            "next_action": _publication_next_action(message),
-            "created_at": now,
-        }
-        _write_json(receipt_path, payload)
-        _write_json(evidence_path, payload)
-        return PublicationResult(result_status, branch, base_branch, "", receipt_path, evidence_path, str(payload["message"]))
-
+        if _looks_like_setup_error(message) and _github_repo_auto_create_enabled(runner):
+            bootstrap = _bootstrap_github_origin(
+                runner=runner,
+                target_repo=target_repo,
+                base_branch=base_branch,
+                setup_message=message,
+            )
+            bootstrap_payload = bootstrap.payload()
+            if bootstrap.ok:
+                push = _run(runner, push_command, target_repo)
+                if push.returncode == 0:
+                    message = ""
+                else:
+                    message = _redact((push.stderr or push.stdout).strip())[:1000]
+            else:
+                result_status = bootstrap.status
+                payload = {
+                    "schema_version": 1,
+                    "operation": "backlog-product-pr",
+                    "applied": False,
+                    "status": result_status,
+                    "target_id": target_id,
+                    "goal_id": goal_id,
+                    "backlog_id": backlog_id,
+                    "implementation_run_id": run_id,
+                    "product_commit_sha": commit_sha,
+                    "branch": branch,
+                    "base": base_branch,
+                    "pr_url": "",
+                    "message": bootstrap.message,
+                    "next_action": bootstrap.next_action,
+                    "repo_bootstrap": bootstrap_payload,
+                    "created_at": now,
+                }
+                _write_json(receipt_path, payload)
+                _write_json(evidence_path, payload)
+                return PublicationResult(result_status, branch, base_branch, "", receipt_path, evidence_path, str(payload["message"]))
+        if push.returncode == 0:
+            pass
+        else:
+            message = message or _redact((push.stderr or push.stdout).strip())[:1000]
+            result_status = _publication_block_status(message, default="push-blocked")
+            payload = {
+                "schema_version": 1,
+                "operation": "backlog-product-pr",
+                "applied": False,
+                "status": result_status,
+                "target_id": target_id,
+                "goal_id": goal_id,
+                "backlog_id": backlog_id,
+                "implementation_run_id": run_id,
+                "product_commit_sha": commit_sha,
+                "branch": branch,
+                "base": base_branch,
+                "pr_url": "",
+                "message": message,
+                "next_action": _publication_next_action(message),
+                "created_at": now,
+            }
+            if bootstrap_payload:
+                payload["repo_bootstrap"] = bootstrap_payload
+            _write_json(receipt_path, payload)
+            _write_json(evidence_path, payload)
+            return PublicationResult(result_status, branch, base_branch, "", receipt_path, evidence_path, str(payload["message"]))
     existing = _run(
         runner,
         ("gh", "pr", "list", "--head", branch, "--base", base_branch, "--json", "url", "--jq", ".[0].url"),
@@ -734,6 +884,8 @@ def publish_task_pr(
                     "message": f"product commit is already present in origin/{base_branch}",
                     "created_at": now,
                 }
+                if bootstrap_payload:
+                    payload["repo_bootstrap"] = bootstrap_payload
                 _write_json(receipt_path, payload)
                 _write_json(evidence_path, payload)
                 return PublicationResult(
@@ -763,6 +915,8 @@ def publish_task_pr(
                 "next_action": _publication_next_action(message),
                 "created_at": now,
             }
+            if bootstrap_payload:
+                payload["repo_bootstrap"] = bootstrap_payload
             _write_json(receipt_path, payload)
             _write_json(evidence_path, payload)
             return PublicationResult(result_status, branch, base_branch, "", receipt_path, evidence_path, str(payload["message"]))
@@ -784,6 +938,8 @@ def publish_task_pr(
         "pr_url": pr_url,
         "created_at": now,
     }
+    if bootstrap_payload:
+        payload["repo_bootstrap"] = bootstrap_payload
     _write_json(receipt_path, payload)
     _write_json(evidence_path, payload)
     return PublicationResult(status, branch, base_branch, pr_url, receipt_path, evidence_path, f"PR {status}: {pr_url}")

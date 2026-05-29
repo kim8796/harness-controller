@@ -876,14 +876,28 @@ def _empty_product_profile() -> dict[str, object]:
 def _scope_for_profile(profile: Mapping[str, object], kind: str) -> list[str]:
     scopes: list[str] = []
     source_roots = tuple(str(item) for item in profile.get("source_roots") or ())
-    if kind in {"core", "all"} and profile.get("has_server"):
-        scopes.append("server/**")
+    if kind in {"core", "all"}:
+        if profile.get("has_server"):
+            scopes.extend(f"{root}/**" for root in source_roots if root in {"server", "api"})
+        if profile.get("has_client"):
+            scopes.extend(f"{root}/**" for root in source_roots if root in {"client", "src"})
+        if profile.get("has_public"):
+            scopes.append("public/**")
+        if profile.get("scripts"):
+            scopes.append("package.json")
     if kind in {"ui", "all"} and profile.get("has_client"):
         scopes.extend(f"{root}/**" for root in source_roots if root in {"client", "src"})
     if kind in {"ui", "all"} and profile.get("has_public"):
         scopes.append("public/**")
-    if kind in {"test", "all"} and profile.get("has_tests"):
-        scopes.extend(f"{root}/**" for root in source_roots if root in {"tests", "test"})
+    if kind in {"test", "all"}:
+        if profile.get("has_tests"):
+            scopes.extend(f"{root}/**" for root in source_roots if root in {"tests", "test"})
+        else:
+            scopes.append("tests/**")
+        if profile.get("scripts"):
+            scopes.append("package.json")
+        if profile.get("has_client"):
+            scopes.extend(f"{root}/**" for root in source_roots if root in {"client", "src"})
     if kind == "docs" and profile.get("has_readme"):
         scopes.append("README.md")
     if not scopes:
@@ -904,6 +918,41 @@ def _validation_for_profile(profile: Mapping[str, object], scope: Sequence[str])
         return commands
     joined = " ".join(scope)
     return [f"`git diff -- {joined}`"] if joined else ["`git diff -- README.md`"]
+
+
+def _empty_repo_task_acceptance(kind: str, title: str) -> list[str]:
+    if kind == "scaffold":
+        return [
+            "최소 실행 가능한 로컬 웹앱 뼈대가 생긴다: package scripts, 정적 entrypoint, 기본 layout, mock seed state.",
+            "상세 친구/채팅/포인트 플로우는 모두 구현하지 말고 이후 task가 확장할 수 있는 얇은 구조만 만든다.",
+            "외부 서비스와 dependency install 없이 로컬에서 파일과 스크립트를 확인할 수 있다.",
+        ]
+    if kind == "ui":
+        return [
+            f"{title} 목표의 주요 화면 흐름이 기존 scaffold 안에서 조작 가능해진다.",
+            "친구 탐색, 상세, 채팅, 포인트 흐름은 mock state 기반으로 연결된다.",
+            "기존 scaffold 실행 방식과 파일 경계가 깨지지 않는다.",
+        ]
+    if kind == "test":
+        return [
+            "핵심 도메인 흐름을 자동 검증하는 테스트 또는 validation script가 추가된다.",
+            "가입/필터/채팅/포인트/이미지 처리의 대표 케이스가 회귀 방지 근거로 남는다.",
+            "검증 명령이 package scripts 또는 명시적 실행 명령으로 문서화된다.",
+        ]
+    return [
+        f"{title} 목표를 만족하는 변경이 작은 범위 안에 반영된다.",
+        "기존 주요 흐름이 깨지지 않는다.",
+    ]
+
+
+def _empty_repo_task_validation(kind: str) -> list[str]:
+    if kind == "scaffold":
+        return ["`git diff -- README.md package.json src/** public/**`"]
+    if kind == "ui":
+        return ["`git diff -- src/** public/** README.md`"]
+    if kind == "test":
+        return ["`git diff -- package.json src/** tests/** README.md`"]
+    return ["`git diff -- README.md package.json src/** public/**`"]
 
 
 def build_roadmap(
@@ -975,23 +1024,30 @@ def build_roadmap_model(
                 ["package.json", "src/**", "tests/**", "README.md"],
             ),
         ]
+    is_empty_scaffold_profile = not profile.get("has_client") and not profile.get("has_server")
     success_criteria = [str(item) for item in goal_payload.get("success_criteria") or () if str(item)]
     task_acceptance = success_criteria[:8]
     for index, (kind, task_title, summary, scope_override) in enumerate(specs, start=1):
         scope = scope_override or _scope_for_profile(profile, kind)
+        acceptance = (
+            _empty_repo_task_acceptance(kind, title)
+            if is_empty_scaffold_profile
+            else task_acceptance
+            or [
+                f"{title} 목표를 만족하는 변경이 {', '.join(scope)} 안에 반영된다.",
+                "기존 주요 흐름이 깨지지 않는다.",
+            ]
+        )
+        validation = _empty_repo_task_validation(kind) if is_empty_scaffold_profile else _validation_for_profile(profile, scope)
         tasks.append(
             {
                 "task_key": f"task-{index:02d}-{kind}",
                 "title": task_title,
                 "summary": summary,
-                "acceptance": task_acceptance
-                or [
-                    f"{title} 목표를 만족하는 변경이 {', '.join(scope)} 안에 반영된다.",
-                    "기존 주요 흐름이 깨지지 않는다.",
-                ],
+                "acceptance": acceptance,
                 "file_scope": scope,
                 "forbidden_scope": [],
-                "validation": _validation_for_profile(profile, scope),
+                "validation": validation,
                 "manual_checks": [f"Goal spec `{spec_path}` 참고"] if spec_path else [],
                 "priority": "P1" if index == 1 else "P2",
                 "labels": ["product", "goal-driven", kind],
@@ -1087,15 +1143,21 @@ def _goal_task_notes(goal: GoalRecord, plan_id: str, task: Mapping[str, object])
         return tuple(notes)
     spec_path = str(goal_payload.get("spec_path") or "").strip()
     if spec_path:
-        notes.append(f"Goal-Spec: {spec_path}")
+        notes.append("Goal-Spec-Summary: incorporated into this backlog; do not open the full spec during implementation.")
     attachments = goal_payload.get("attachments")
     if isinstance(attachments, list):
-        for attachment in attachments[:8]:
+        visible_attachments = attachments[:3]
+        for attachment in visible_attachments:
             if not isinstance(attachment, Mapping):
                 continue
             caption = str(attachment.get("caption") or "").strip()
             caption_suffix = f" - {caption}" if caption else ""
             notes.append(f"Goal-Attachment: {attachment.get('path')} ({attachment.get('media_type')}){caption_suffix}")
+        omitted = max(0, len(attachments) - len(visible_attachments))
+        if omitted:
+            notes.append(
+                f"Goal-Attachment-Omitted: {omitted} more attachments; use backlog Summary/Acceptance and listed captions only."
+            )
     return tuple(notes)
 
 
@@ -1215,6 +1277,12 @@ def refresh_progress(*, state_root: Path, goal: GoalRecord) -> dict[str, object]
     goal_payload = _read_json(goal.goal_json)
     linked = [str(task.get("backlog_id")) for task in tasks if str(task.get("backlog_id") or "")]
     goal_payload["linked_backlog_ids"] = linked
+    required_tasks = [task for task in tasks if not str(task.get("fallback_created_at") or "")]
+    unresolved_required = []
+    for task in required_tasks:
+        backlog_id = str(task.get("backlog_id") or "")
+        if not backlog_id or statuses.get(backlog_id) != "completed":
+            unresolved_required.append(task)
     published = _goal_publication_success_backlog_ids(
         state_root=state_root,
         target_id=goal.target_id,
@@ -1231,9 +1299,15 @@ def refresh_progress(*, state_root: Path, goal: GoalRecord) -> dict[str, object]
             )
     else:
         goal_payload.pop("publication_blocked_backlog_ids", None)
-    if linked and completed >= len(linked) and not publication_blocked:
+    if required_tasks and not unresolved_required and not publication_blocked:
         goal_payload["status"] = "completed"
         _clear_active_pointer_if_matches(state_root, goal.goal_id)
+    elif goal_payload.get("status") == "completed":
+        goal_payload["status"] = "active"
+        _write_json(
+            _active_path(state_root),
+            {"schema_version": GOAL_SCHEMA_VERSION, "goal_id": goal.goal_id, "target_id": goal.target_id},
+        )
     goal_payload["updated_at"] = utc_timestamp()
     _write_json(goal.goal_json, goal_payload)
     _write_goal_markdown(goal.goal_dir / "goal.md", goal_payload, queued=len(linked) - completed, completed=completed)
@@ -1452,6 +1526,7 @@ def status_payload(*, state_root: Path) -> dict[str, object]:
     active = load_active_goal(state_root)
     if active is None:
         return {"schema_version": GOAL_SCHEMA_VERSION, "active": False}
+    refresh_progress(state_root=state_root, goal=active)
     goal = _read_json(active.goal_json)
     progress = _read_json(active.progress_json)
     return {

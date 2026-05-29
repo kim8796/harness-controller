@@ -2102,6 +2102,14 @@ def _backlog_goal_id(record: harness_controller.TargetRecord, backlog_id: str) -
     return "unlinked"
 
 
+def _implementation_failure_message(output: str) -> str:
+    lines = [line.rstrip() for line in sanitize_for_outbox(output).splitlines() if line.strip()]
+    if not lines:
+        return "AI 구현 lane이 실패했습니다."
+    detail = "\n".join(lines[-16:])
+    return f"AI 구현 lane이 실패했습니다.\n{detail}"
+
+
 def _run_autopilot_transaction(record: harness_controller.TargetRecord, args: argparse.Namespace) -> AutopilotTransaction:
     before_evidence = _target_evidence_paths(record)
     buffer = io.StringIO()
@@ -2126,7 +2134,7 @@ def _run_autopilot_transaction(record: harness_controller.TargetRecord, args: ar
     if rc != 0:
         if implementation_output:
             print(implementation_output)
-        raise HarnessCliError("AI 구현 lane이 실패했습니다.")
+        raise HarnessCliError(_implementation_failure_message(implementation_output))
     new_evidence = sorted(_target_evidence_paths(record) - before_evidence)
     if len(new_evidence) != 1:
         if implementation_output:

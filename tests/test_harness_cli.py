@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -1207,6 +1208,46 @@ def test_beginner_run_watch_rejects_zero_idle_interval(monkeypatch, tmp_path: Pa
 
     assert "idle interval" in output
     assert "1초 이상" in output
+
+
+def test_run_autopilot_transaction_includes_target_run_output_on_failure(monkeypatch, tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    record = module.harness_controller.TargetRecord(
+        target_id="demo",
+        repo=product,
+        branch="main",
+        state_root=controller / "targets" / "demo",
+        controller_version="test",
+        created_at="",
+        updated_at="",
+        is_default=True,
+    )
+    record.state_root.mkdir(parents=True)
+
+    def fake_target_run(_args) -> int:
+        print("target run 중단: product repo 상태가 예상과 다릅니다.")
+        print("- run blockers: target-git-dirty")
+        return 2
+
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module, "command_target_run", fake_target_run)
+    args = argparse.Namespace(
+        runner=None,
+        runner_model=None,
+        runner_reasoning_effort=None,
+        command_template=None,
+    )
+
+    with pytest.raises(module.HarnessCliError) as caught:
+        module._run_autopilot_transaction(record, args)
+
+    message = str(caught.value)
+    assert "AI 구현 lane이 실패했습니다." in message
+    assert "target-git-dirty" in message
 
 
 def test_beginner_run_once_autopilot_uses_default_target_transaction(monkeypatch, tmp_path: Path, capsys) -> None:

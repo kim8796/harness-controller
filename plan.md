@@ -1,3 +1,56 @@
+# GitHub Repo Auto-Bootstrap Publication Plan
+
+Progress/Smoke Correction:
+- `chatapp-test` smoke confirmed repo bootstrap and PR merge can proceed, but exposed a progress bug: a completed/merged backlog can remain `completed_count=0` until an explicit planner refill path refreshes progress.
+- `goal status` and `watch` must refresh active goal progress after completed, published, merged, and pending-merge events.
+- A failed/interrupted bounded watch must keep the active goal and queued backlog recoverable instead of silently clearing the goal.
+- Verify this with focused goal/watch tests before continuing smoke.
+
+Goal:
+- When product publication fails because the local product git repo has no usable GitHub `origin`, harness should create/connect the GitHub repo automatically when `gh` is available and authenticated, then retry publication instead of stopping at setup-blocked.
+- Keep goal progress alive: missing remote setup must not clear active goals or force the user to recreate the goal manually.
+- After the fix, run a `chatapp-test`/test_chatapp watch smoke and observe whether the goal continues through publication.
+
+Smoke Correction:
+- `chatapp-test` smoke exposed a second blocker: detailed goals with many image attachments caused the external implementer to open multiple original-resolution images, pushing the context above 200k tokens before any edit.
+- Add an attachment budget to product implementation prompts: inspect at most 3 representative images, avoid original-resolution image reads unless required, and use the markdown spec/attachment names as the primary source.
+- Reduce generated backlog notes to the first 3 attachment paths plus an omitted-count line so agent context stays bounded.
+- Follow-up smoke exposed that implementers still read the full `goal-spec.md`; remove direct full-spec paths from task notes and make backlog Summary/Acceptance the implementation contract.
+- Follow-up smoke on an existing scaffold exposed a planner scope bug: nonempty client-only repos got `README.md` as core scope. Expand core/test scopes to real product files (`src/**`, `public/**`, `package.json`, `tests/**`) instead of documentation-only work.
+
+Watch Failure Correction:
+- `chatapp-test` smoke exposed a third blocker: after an interrupted implementation left a product diff, `watch --max-cycles 1` kept selecting more tasks and eventually moved all generated goal tasks to blocked.
+- Bounded watch must count attempted transactions, not only successful transactions.
+- Operator-actionable transaction failures such as dirty product repo/setup/credential blockers must enter operator-wait before any repeated-failure quarantine.
+- Generic CLI transaction errors must include the captured run output summary so incident classification can detect `target-git-dirty`, setup, or credential blockers.
+- Goal tasks must not be poisoned by environmental/precondition failures; the user should get one clear next action and be able to resume the same goal.
+
+Root Cause:
+- `publish_task_pr()` currently classifies missing/invalid `origin` as `setup-blocked` and writes an actionable wait. That is correct when automation cannot safely act, but it is incomplete when `gh` can create the repo and add/push `origin`.
+- External product implementation prompts did not warn agents to avoid opening many original-resolution attachments, so large visual specs could stall before implementation.
+
+Implementation:
+- Add failing publication tests for:
+  - missing `origin` -> `gh repo create <repo> --private --source . --remote origin --push` -> retry push -> existing no-commit path records `already-in-base`.
+  - configured GitHub origin whose repo does not exist -> `gh repo create owner/repo --private` -> push current HEAD to base -> retry publication.
+- Add failing prompt/goal-note tests for:
+  - product implementation prompt contains a clear image attachment budget.
+  - goal task notes list only 3 attachments and record how many are omitted.
+- Add a focused bootstrap helper in `scripts/harness_publication.py`.
+  - Use repo basename as default repo name when no origin exists.
+  - Parse GitHub `owner/repo` from HTTPS or SSH origin when present.
+  - Default auto-created repos to private.
+  - Redact all command output in receipts.
+  - If bootstrap fails due credentials, return `credential-blocked`; otherwise keep `setup-blocked` with next action.
+- Preserve existing `setup-blocked` operator-wait behavior when `gh` is unavailable or repo bootstrap fails.
+
+Validation:
+- `python3 -m pytest tests/test_harness_publication.py -q`
+- `python3 -m pytest tests/test_harness_goal.py tests/test_harness_autonomy.py -q`
+- `python3 -m pytest tests/test_harness_watch.py tests/test_harness_cli.py -q`
+- `python3 -m pytest tests/test_harness_goal.py tests/test_harness_publication.py tests/test_harness_watch.py tests/test_harness_cli.py tests/test_harness_controller.py -q`
+- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+
 # Goal Publication / Planner Correction Plan
 
 Goal:
