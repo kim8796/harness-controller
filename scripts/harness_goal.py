@@ -949,17 +949,36 @@ def build_roadmap_model(
     attachment_count = len(attachments) if isinstance(attachments, list) else 0
     spec_context = f" 상세 명세: {context_summary}" if context_summary else ""
     tasks: list[dict[str, object]] = []
-    specs = [
-        ("core", "핵심 동작 구현", f"제품의 핵심 동작이 목표를 만족하도록 구현한다: {title}.{spec_context}"),
-        ("ui", "사용자 경험 반영", f"사용자 화면과 조작 흐름에서 목표가 자연스럽게 동작하도록 반영한다: {title}.{spec_context}"),
-        ("test", "검증과 회귀 방지", f"목표와 관련된 자동 검증과 회귀 방지 테스트를 추가한다: {title}.{spec_context}"),
+    specs: list[tuple[str, str, str, list[str] | None]] = [
+        ("core", "핵심 동작 구현", f"제품의 핵심 동작이 목표를 만족하도록 구현한다: {title}.{spec_context}", None),
+        ("ui", "사용자 경험 반영", f"사용자 화면과 조작 흐름에서 목표가 자연스럽게 동작하도록 반영한다: {title}.{spec_context}", None),
+        ("test", "검증과 회귀 방지", f"목표와 관련된 자동 검증과 회귀 방지 테스트를 추가한다: {title}.{spec_context}", None),
     ]
     if not profile.get("has_client") and not profile.get("has_server"):
-        specs = [("docs", "목표 문서화", f"README에 목표와 사용 흐름을 명확히 반영한다: {title}.{spec_context}")]
+        specs = [
+            (
+                "scaffold",
+                "제품 기본 구조 생성",
+                f"빈 저장소에 실행 가능한 제품 기본 구조를 만든다: {title}.{spec_context}",
+                ["README.md", "package.json", "src/**", "public/**"],
+            ),
+            (
+                "ui",
+                "핵심 화면과 사용자 흐름 구현",
+                f"목표 명세와 첨부 이미지를 바탕으로 주요 화면과 조작 흐름을 구현한다: {title}.{spec_context}",
+                ["src/**", "public/**", "README.md"],
+            ),
+            (
+                "test",
+                "실행 검증과 회귀 방지",
+                f"생성된 제품을 실행/검증할 수 있는 스크립트와 테스트를 추가한다: {title}.{spec_context}",
+                ["package.json", "src/**", "tests/**", "README.md"],
+            ),
+        ]
     success_criteria = [str(item) for item in goal_payload.get("success_criteria") or () if str(item)]
     task_acceptance = success_criteria[:8]
-    for index, (kind, task_title, summary) in enumerate(specs, start=1):
-        scope = _scope_for_profile(profile, kind)
+    for index, (kind, task_title, summary, scope_override) in enumerate(specs, start=1):
+        scope = scope_override or _scope_for_profile(profile, kind)
         tasks.append(
             {
                 "task_key": f"task-{index:02d}-{kind}",
@@ -1136,12 +1155,48 @@ def _queue_task(
     return item
 
 
+def _goal_publication_success_backlog_ids(*, state_root: Path, target_id: str, goal_id: str) -> set[str]:
+    success: set[str] = set()
+    candidates: list[Path] = []
+    runs_root = state_root / "runs" / "harness"
+    if runs_root.exists() and not runs_root.is_symlink():
+        candidates.extend(path for path in runs_root.glob("external-*-backlog-pr-*/generated-evidence.json") if path.is_file())
+        candidates.extend(path for path in runs_root.glob("external-*-backlog-pr-merge-*/generated-evidence.json") if path.is_file())
+    publication_root = state_root / "state" / "publication"
+    if publication_root.exists() and not publication_root.is_symlink():
+        candidates.extend(path for path in publication_root.glob("*.json") if path.is_file())
+    for path in candidates:
+        if path.is_symlink():
+            continue
+        try:
+            payload = _read_json(path)
+        except GoalError:
+            continue
+        if str(payload.get("target_id") or "") != target_id:
+            continue
+        payload_goal_id = str(payload.get("goal_id") or "")
+        if payload_goal_id and payload_goal_id != goal_id:
+            continue
+        backlog_id = str(payload.get("backlog_id") or payload.get("task_id") or "")
+        if not backlog_id:
+            continue
+        operation = str(payload.get("operation") or "")
+        status = str(payload.get("status") or payload.get("publication_state") or "")
+        applied = payload.get("applied") is True
+        if operation == "backlog-product-pr-merge" and applied and status == "merged":
+            success.add(backlog_id)
+        if operation == "backlog-product-pr" and applied and status in {"created", "updated", "published", "already-in-base"}:
+            success.add(backlog_id)
+    return success
+
+
 def refresh_progress(*, state_root: Path, goal: GoalRecord) -> dict[str, object]:
     progress = _read_json(goal.progress_json)
     items = harness_loop.discover_backlog_items(state_root)
     statuses = {item.item_id: item.status for item in items if item.goal == goal.goal_id}
     tasks: list[dict[str, object]] = []
     completed = 0
+    completed_backlog_ids: list[str] = []
     for raw in progress.get("tasks") or []:
         if not isinstance(raw, Mapping):
             continue
@@ -1151,6 +1206,7 @@ def refresh_progress(*, state_root: Path, goal: GoalRecord) -> dict[str, object]
             task["backlog_status"] = statuses[backlog_id]
             if statuses[backlog_id] == "completed":
                 completed += 1
+                completed_backlog_ids.append(backlog_id)
         tasks.append(task)
     progress["tasks"] = tasks
     progress["completed_count"] = completed
@@ -1159,7 +1215,23 @@ def refresh_progress(*, state_root: Path, goal: GoalRecord) -> dict[str, object]
     goal_payload = _read_json(goal.goal_json)
     linked = [str(task.get("backlog_id")) for task in tasks if str(task.get("backlog_id") or "")]
     goal_payload["linked_backlog_ids"] = linked
-    if linked and completed >= len(linked):
+    published = _goal_publication_success_backlog_ids(
+        state_root=state_root,
+        target_id=goal.target_id,
+        goal_id=goal.goal_id,
+    )
+    publication_blocked = [backlog_id for backlog_id in completed_backlog_ids if backlog_id not in published]
+    if publication_blocked:
+        goal_payload["publication_blocked_backlog_ids"] = publication_blocked
+        if goal_payload.get("status") == "completed":
+            goal_payload["status"] = "active"
+            _write_json(
+                _active_path(state_root),
+                {"schema_version": GOAL_SCHEMA_VERSION, "goal_id": goal.goal_id, "target_id": goal.target_id},
+            )
+    else:
+        goal_payload.pop("publication_blocked_backlog_ids", None)
+    if linked and completed >= len(linked) and not publication_blocked:
         goal_payload["status"] = "completed"
         _clear_active_pointer_if_matches(state_root, goal.goal_id)
     goal_payload["updated_at"] = utc_timestamp()
@@ -1217,6 +1289,19 @@ def refill_goal_tasks(
         )
     existing_tasks = [item for item in progress.get("tasks") or [] if isinstance(item, Mapping)]
     if existing_tasks:
+        goal_payload = _read_json(active.goal_json)
+        if goal_payload.get("publication_blocked_backlog_ids"):
+            return GoalRefillResult(
+                goal_id=active.goal_id,
+                plan_id=str(goal_payload.get("active_plan_id") or ""),
+                created=0,
+                queued=0,
+                manual_review=0,
+                completed=False,
+                queue_report_path=active.goal_dir / "queue-report.json",
+                generated_backlog_ids=tuple(str(item.get("backlog_id")) for item in existing_tasks if str(item.get("backlog_id") or "")),
+                message="goal waiting on publication",
+            )
         executable = _goal_executable_progress_tasks(state_root, existing_tasks)
         if not executable and not any(str(item.get("fallback_created_at") or "") for item in existing_tasks):
             roadmap = build_roadmap(state_root=state_root, target_id=target_id, target_repo=target_repo, goal=active)

@@ -356,6 +356,26 @@ def test_pending_backlog_product_pushes_accepts_state_publication_receipt(tmp_pa
     assert credential_pending[0]["status"] == "credential-blocked"
     credential_receipt.unlink()
 
+    setup_receipt = publication_dir / "BL-demo-setup.json"
+    setup_receipt.write_text(
+        json.dumps(
+            {
+                "operation": "backlog-product-pr",
+                "status": "setup-blocked",
+                "applied": False,
+                "target_id": "demo",
+                "run_id": "run-1",
+                "message": "Git remote `origin` is not configured.",
+            }
+        ),
+        encoding="utf-8",
+    )
+    setup_pending = module.pending_backlog_product_pushes(controller_root=controller, record=record)
+    assert setup_pending
+    assert setup_pending[0]["status"] == "setup-blocked"
+    assert "origin" in setup_pending[0]["message"]
+    setup_receipt.unlink()
+
     (publication_dir / "BL-demo.json").write_text(
         json.dumps(
             {

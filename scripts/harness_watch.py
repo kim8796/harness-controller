@@ -63,6 +63,7 @@ class WatchRuntime:
     discover_errors: tuple[type[BaseException], ...]
     transaction_errors: tuple[type[BaseException], ...]
     auto_merge_pending_publications: Callable[..., Sequence[Mapping[str, object]]] | None = None
+    retry_pending_publication: Callable[..., Mapping[str, object]] | None = None
 
 
 def github_credentials_ready(*, cwd: Path | None = None, root: Path | None = None) -> bool:
@@ -364,8 +365,16 @@ def _publication_credential_operator_wait(
 ) -> Mapping[str, object]:
     backlog_id = str(blocker.get("backlog_id") or "")
     run_id = str(blocker.get("run_id") or "")
+    status = str(blocker.get("status") or "")
+    is_setup_blocked = status == "setup-blocked"
     reason = str(blocker.get("message") or "GitHub credential/gh CLI is required for PR publication")
     wait_id = _operator_wait_id(wait_class="setup-wait", backlog_id=backlog_id, run_id=run_id)
+    next_action = (
+        "Create or connect the GitHub repo, add a valid `origin` remote, push the base branch, "
+        "then rerun `./harness watch`."
+        if is_setup_blocked
+        else "Run `gh auth status`; if needed run `gh auth login`, then rerun `./harness watch`."
+    )
     return _create_or_update_operator_wait(
         record,
         wait_id=wait_id,
@@ -374,12 +383,17 @@ def _publication_credential_operator_wait(
         run_id=run_id,
         reason=reason,
         risk_summary=(
-            "PR publication is blocked until the local GitHub CLI credential is ready. "
+            "PR publication is blocked until the product repo has a valid GitHub `origin` remote. "
             "Do not paste tokens or secrets into operator replies."
+            if is_setup_blocked
+            else (
+                "PR publication is blocked until the local GitHub CLI credential is ready. "
+                "Do not paste tokens or secrets into operator replies."
+            )
         ),
-        next_action="Run `gh auth status`; if needed run `gh auth login`, then rerun `./harness watch`.",
+        next_action=next_action,
         allowed_replies=("resolved", "stop"),
-        resume_check="gh auth status",
+        resume_check="git remote get-url origin" if is_setup_blocked else "gh auth status",
         resume_policy="watch-polls-until-ready-or-timeout",
         timeout_seconds=OPERATOR_WAIT_DEFAULT_SECONDS if timeout_seconds is None else timeout_seconds,
     )
@@ -512,10 +526,15 @@ def _handle_publication_credential_wait(
     idle_count: int,
 ) -> bool:
     wait = _publication_credential_operator_wait(record, blocker)
-    print("publication operator-wait: GitHub credential/gh CLI가 필요합니다.")
+    is_setup_blocked = str(blocker.get("status") or "") == "setup-blocked"
+    if is_setup_blocked:
+        print("publication operator-wait: GitHub repo/origin 설정이 필요합니다.")
+    else:
+        print("publication operator-wait: GitHub credential/gh CLI가 필요합니다.")
     print(f"- 구현 기록: `{blocker.get('run_id')}`")
     print(f"- 작업 항목: `{blocker.get('backlog_id')}`")
     print(f"- operator-wait: `{wait.get('id')}` deadline=`{wait.get('deadline_at')}`")
+    next_action = str(wait.get("next_action") or "rerun `./harness watch` after resolving the setup blocker")
     _write_publication_operator_wait_status(
         runtime,
         record,
@@ -525,9 +544,12 @@ def _handle_publication_credential_wait(
         wait=wait,
         processed_count=processed_count,
         idle_count=idle_count,
-        pending_reason="GitHub credential/gh CLI is required for PR publication",
-        next_action="run `gh auth status`; authenticate with `gh auth login` if needed",
+        pending_reason=str(blocker.get("message") or "PR publication requires operator setup"),
+        next_action=next_action,
     )
+    if is_setup_blocked:
+        print(f"- 다음 조치: {next_action}")
+        return False
     if _should_poll_publication_operator_wait(args):
         return _poll_publication_credentials_until_ready(
             runtime,
@@ -1278,17 +1300,54 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                 record=record,
             )
             if pending_pushes:
-                credential_blocker = next(
-                    (item for item in pending_pushes if str(item.get("status") or "") == "credential-blocked"),
+                if runtime.retry_pending_publication:
+                    retry_target = pending_pushes[-1]
+                    retry_result = runtime.retry_pending_publication(
+                        record=record,
+                        pending=retry_target,
+                        auto_merge=bool(getattr(args, "auto_merge", False)),
+                    )
+                    print(
+                        "- pending publication retry: "
+                        f"{retry_result.get('status')} `{retry_result.get('backlog_id')}`"
+                    )
+                    pending_pushes = runtime.pending_backlog_product_pushes(
+                        controller_root=runtime.repo_root(),
+                        record=record,
+                    )
+                    if not pending_pushes:
+                        if args.watch:
+                            runtime.write_watch_status(
+                                record,
+                                phase=str(retry_result.get("status") or "publication-retried"),
+                                status="running",
+                                selected_backlog_id=str(retry_result.get("backlog_id") or ""),
+                                run_id=str(retry_result.get("run_id") or ""),
+                                transaction_status=str(retry_result.get("status") or ""),
+                                commit_sha=str(retry_result.get("commit_sha") or ""),
+                                publication_branch=str(retry_result.get("branch") or ""),
+                                pr_url=str(retry_result.get("pr_url") or ""),
+                                merge_commit_sha=str(retry_result.get("merge_commit_sha") or ""),
+                                pending_reason=str(retry_result.get("message") or ""),
+                                processed_count=processed,
+                                idle_count=idle_count,
+                                next_action="continue watch after retrying pending publication",
+                            )
+                        continue
+                operator_blocker = next(
+                    (item for item in pending_pushes if str(item.get("status") or "") in {"credential-blocked", "setup-blocked"}),
                     None,
                 )
-                if credential_blocker is not None and not runtime.github_credentials_ready(cwd=record.repo):
+                if operator_blocker is not None and (
+                    str(operator_blocker.get("status") or "") == "setup-blocked"
+                    or not runtime.github_credentials_ready(cwd=record.repo)
+                ):
                     diagnosis = runtime.record_autopilot_doctor_diagnosis(
                         record=record,
                         stage="publication-credential-blocked",
                         error="previous task branch PR publication is credential-blocked",
-                        backlog_id=str(credential_blocker["backlog_id"]),
-                        run_id=str(credential_blocker["run_id"]),
+                        backlog_id=str(operator_blocker["backlog_id"]),
+                        run_id=str(operator_blocker["run_id"]),
                     )
                     runtime.append_autopilot_memory(record, "doctor-diagnosis", diagnosis)
                     print(f"- doctor diagnosis: `{diagnosis['path']}`")
@@ -1296,12 +1355,12 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                         runtime,
                         record,
                         args,
-                        blocker=credential_blocker,
+                        blocker=operator_blocker,
                         processed_count=processed,
                         idle_count=idle_count,
                     ):
                         return 2
-                if credential_blocker is not None:
+                if operator_blocker is not None:
                     print("publication 재시도 가능: GitHub credential이 준비되어 이전 credential blocker를 pending retry로 처리합니다.")
                 latest = pending_pushes[-1]
                 print("publication 보류: 이전 transaction의 product publication이 아직 닫히지 않았습니다.")
@@ -1566,6 +1625,7 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
             "push-blocked",
             "publication-blocked",
             "credential-blocked",
+            "setup-blocked",
             "merge-pending",
             "merge-blocked",
             "merge-credential-blocked",
@@ -1582,7 +1642,7 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                 record,
                 (
                     "publication-credential-blocked"
-                    if outcome.status in {"credential-blocked", "merge-credential-blocked"}
+                    if outcome.status in {"credential-blocked", "merge-credential-blocked", "setup-blocked"}
                     else "publication-blocked"
                     if not outcome.status.startswith("merge-")
                     else outcome.status
@@ -1606,7 +1666,7 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
             )
             runtime.append_autopilot_memory(record, "doctor-diagnosis", diagnosis)
             print(f"- doctor diagnosis: `{diagnosis['path']}`")
-            if outcome.status in {"credential-blocked", "merge-credential-blocked"}:
+            if outcome.status in {"credential-blocked", "merge-credential-blocked", "setup-blocked"}:
                 credential_blocker = {
                     "backlog_id": outcome.backlog_id,
                     "run_id": outcome.run_id,
