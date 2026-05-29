@@ -54,6 +54,254 @@ def _write_successful_publication(state_root: Path, *, target_id: str, goal_id: 
     )
 
 
+def test_goal_service_level_production_generates_production_roadmap(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="배포 가능한 production 실시간 AI 채팅 서비스: Vercel, Supabase DB, 인증, OpenAI 답변까지 완료",
+    )
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    roadmap = json.loads(goal.roadmap_json.read_text(encoding="utf-8"))
+
+    assert payload["service_level"] == "production"
+    gate_ids = [gate["id"] for gate in payload["completion_gates"]]
+    assert gate_ids == [
+        "deployed_url",
+        "database_persistence",
+        "auth_flow",
+        "realtime_two_user_chat",
+        "ai_reply",
+        "image_upload",
+        "report_block",
+        "production_e2e_smoke",
+    ]
+    task_keys = [task["task_key"] for task in roadmap["tasks"]]
+    assert len(task_keys) >= 10
+    assert task_keys[:10] == [
+        "task-01-architecture",
+        "task-02-auth",
+        "task-03-database",
+        "task-04-realtime",
+        "task-05-ai",
+        "task-06-media",
+        "task-07-moderation",
+        "task-08-deploy",
+        "task-09-e2e",
+        "task-10-docs",
+    ]
+    assert roadmap["tasks"][1]["depends_on"] == ["task-01-architecture"]
+
+
+def test_goal_service_level_prototype_requires_explicit_local_or_mvp_language(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="demo",
+        text="로컬 목업 MVP로 친구 목록만 빠르게 확인한다",
+    )
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+
+    assert payload["service_level"] == "prototype"
+    assert payload["completion_gates"] == []
+
+
+def test_goal_service_level_explicit_prototype_overrides_production_keywords(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="demo",
+        text="Vercel AI prototype 목업으로 화면 방향만 확인한다",
+    )
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+
+    assert payload["service_level"] == "prototype"
+    assert payload["completion_gates"] == []
+
+
+def test_new_production_goal_markdown_shows_gates_pending(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="배포 가능한 production 실시간 AI 채팅 서비스",
+    )
+
+    body = (goal.goal_dir / "goal.md").read_text(encoding="utf-8")
+    assert "`deployed_url`: pending" in body
+    assert "`production_e2e_smoke`: pending" in body
+    assert "`deployed_url`: passed" not in body
+
+
+def test_production_goal_stays_active_until_completion_gates_have_evidence(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="배포 가능한 실시간 AI 채팅 서비스 production Vercel Supabase DB 인증 OpenAI",
+    )
+    progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    progress["tasks"] = [
+        {"task_key": "task-01-architecture", "backlog_id": "BL-architecture"},
+        {"task_key": "task-02-auth", "backlog_id": "BL-auth"},
+    ]
+    goal.progress_json.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
+    completed = state_root / "backlog" / "completed"
+    completed.mkdir(parents=True)
+    for backlog_id in ("BL-architecture", "BL-auth"):
+        (completed / f"{backlog_id}.md").write_text(
+            "\n".join(["ID: " + backlog_id, "Status: completed", f"Goal: {goal.goal_id}", ""]),
+            encoding="utf-8",
+        )
+        _write_successful_publication(state_root, target_id="chatapp", goal_id=goal.goal_id, backlog_id=backlog_id)
+
+    module.refresh_progress(state_root=state_root, goal=goal)
+
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    active_payload = json.loads((state_root / "goals" / "active-goal.json").read_text(encoding="utf-8"))
+    assert payload["status"] == "active"
+    assert active_payload["goal_id"] == goal.goal_id
+    assert payload["completion_gate_status"]["status"] == "pending"
+    assert "production_e2e_smoke" in payload["completion_gate_status"]["pending_gate_ids"]
+
+
+def test_production_gate_status_requires_concrete_evidence(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="배포 가능한 실시간 AI 채팅 서비스 production Vercel Supabase DB 인증 OpenAI",
+    )
+    progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    progress["tasks"] = [{"task_key": "task-01", "backlog_id": "BL-01"}]
+    goal.progress_json.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
+    completed = state_root / "backlog" / "completed"
+    completed.mkdir(parents=True)
+    (completed / "BL-01.md").write_text(
+        "\n".join(["ID: BL-01", "Status: completed", f"Goal: {goal.goal_id}", ""]),
+        encoding="utf-8",
+    )
+    _write_successful_publication(state_root, target_id="chatapp", goal_id=goal.goal_id, backlog_id="BL-01")
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    payload["completion_gate_evidence"] = {
+        gate["id"]: {"status": "passed", "source": "manual"} for gate in payload["completion_gates"]
+    }
+    goal.goal_json.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    module.refresh_progress(state_root=state_root, goal=goal)
+
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    assert payload["status"] == "active"
+    assert payload["completion_gate_status"]["status"] == "pending"
+    assert payload["completion_gate_evidence"] == {}
+
+
+def test_refresh_backfills_production_gates_for_existing_active_goal(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="배포 가능한 실시간 AI 채팅 서비스 production Vercel Supabase",
+    )
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    payload.pop("service_level", None)
+    payload.pop("completion_gates", None)
+    payload.pop("completion_gate_evidence", None)
+    goal.goal_json.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    module.refresh_progress(state_root=state_root, goal=goal)
+
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    assert payload["service_level"] == "production"
+    assert [gate["id"] for gate in payload["completion_gates"]]
+    assert payload["completion_gate_status"]["status"] == "pending"
+    assert module.load_active_goal(state_root).goal_id == goal.goal_id
+
+
+def test_status_payload_redacts_secretish_completion_gate_evidence(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="배포 가능한 실시간 AI 채팅 서비스 production Vercel Supabase",
+    )
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    payload["completion_gate_evidence"] = {
+        "deployed_url": {
+            "status": "passed",
+            "evidence": "OPENAI_API_KEY=sk-secret-secret-secret",
+        }
+    }
+    goal.goal_json.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    status = module.status_payload(state_root=state_root)
+
+    assert "sk-secret-secret-secret" not in json.dumps(status, ensure_ascii=False)
+    assert status["goal"]["completion_gate_evidence"] == {}
+
+
+def test_production_goal_completes_after_gate_evidence_and_publication(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="배포 가능한 실시간 AI 채팅 서비스 production Vercel Supabase DB 인증 OpenAI",
+    )
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    gate_ids = [gate["id"] for gate in payload["completion_gates"]]
+    progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    progress["tasks"] = [{"task_key": f"task-{index:02d}", "backlog_id": f"BL-{index:02d}"} for index in range(1, 3)]
+    goal.progress_json.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
+    completed = state_root / "backlog" / "completed"
+    completed.mkdir(parents=True)
+    for index in range(1, 3):
+        backlog_id = f"BL-{index:02d}"
+        (completed / f"{backlog_id}.md").write_text(
+            "\n".join(["ID: " + backlog_id, "Status: completed", f"Goal: {goal.goal_id}", ""]),
+            encoding="utf-8",
+        )
+        _write_successful_publication(state_root, target_id="chatapp", goal_id=goal.goal_id, backlog_id=backlog_id)
+    evidence_dir = state_root / "runs" / "harness" / "external-production-smoke"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "operation": "goal-completion-gates",
+                "applied": True,
+                "target_id": "chatapp",
+                "goal_id": goal.goal_id,
+                "completion_gates": [
+                    {"id": gate_id, "status": "passed", "evidence": f"receipt://{gate_id}"}
+                    for gate_id in gate_ids
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    module.refresh_progress(state_root=state_root, goal=goal)
+
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    assert payload["status"] == "completed"
+    assert payload["completion_gate_status"]["status"] == "passed"
+    assert payload["completion_gate_status"]["pending_gate_ids"] == []
+    assert not (state_root / "goals" / "active-goal.json").exists()
+
+
 def test_goal_spec_draft_uses_operator_language(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_module()
     state_root = tmp_path / "targets" / "game"
@@ -448,7 +696,7 @@ def test_goal_refill_scaffolds_empty_product_instead_of_docs_only(tmp_path: Path
     subprocess.run(["git", "add", "README.md"], cwd=product, check=True)
     subprocess.run(["git", "commit", "-m", "initial"], cwd=product, check=True, stdout=subprocess.PIPE)
 
-    goal = module.create_goal(state_root=state_root, target_id="chatapp", text="채팅앱 만들기")
+    goal = module.create_goal(state_root=state_root, target_id="chatapp", text="로컬 목업 채팅앱 만들기")
     result = module.refill_goal_tasks(state_root=state_root, target_id="chatapp", target_repo=product, goal=goal)
     roadmap = json.loads(goal.roadmap_json.read_text(encoding="utf-8"))
 
@@ -487,7 +735,7 @@ def test_goal_refill_nonempty_client_repo_uses_product_scope_not_readme_only(tmp
     subprocess.run(["git", "add", "."], cwd=product, check=True)
     subprocess.run(["git", "commit", "-m", "initial"], cwd=product, check=True, stdout=subprocess.PIPE)
 
-    goal = module.create_goal(state_root=state_root, target_id="chatapp", text="채팅앱 만들기")
+    goal = module.create_goal(state_root=state_root, target_id="chatapp", text="로컬 목업 채팅앱 만들기")
     result = module.refill_goal_tasks(state_root=state_root, target_id="chatapp", target_repo=product, goal=goal)
     roadmap = json.loads(goal.roadmap_json.read_text(encoding="utf-8"))
 

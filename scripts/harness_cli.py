@@ -197,7 +197,7 @@ BEGINNER_HELP_TEXT = """하네스 시작
 
 5분 경로:
 1. ./harness install /path/to/product
-2. ./harness goal "이 프로젝트를 완성도 있는 MVP로 만든다"
+2. ./harness goal "이 프로젝트를 배포 가능한 완성도 있는 제품으로 만든다"
 3. ./harness watch
 
 상세 목표를 문서로 줄 때:

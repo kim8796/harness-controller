@@ -8,7 +8,7 @@
 ```bash
 ./harness
 ./harness install /path/to/product-repo --id my-app --default
-./harness goal "이 프로젝트를 완성도 있는 MVP로 만든다"
+./harness goal "이 프로젝트를 배포 가능한 완성도 있는 제품으로 만든다"
 ./harness watch
 ```
 

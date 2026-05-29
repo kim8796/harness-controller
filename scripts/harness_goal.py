@@ -21,6 +21,42 @@ GOAL_SCHEMA_VERSION = 1
 GOALS_DIR = Path("goals")
 ACTIVE_GOAL_FILE = GOALS_DIR / "active-goal.json"
 GOAL_DRAFTS_DIR = GOALS_DIR / "drafts"
+PRODUCTION_COMPLETION_GATES: tuple[dict[str, str], ...] = (
+    {"id": "deployed_url", "label": "Vercel production URL"},
+    {"id": "database_persistence", "label": "Supabase DB persistence"},
+    {"id": "auth_flow", "label": "Production auth flow"},
+    {"id": "realtime_two_user_chat", "label": "Realtime two-user chat"},
+    {"id": "ai_reply", "label": "AI reply for AI-only users"},
+    {"id": "image_upload", "label": "Image upload and original view"},
+    {"id": "report_block", "label": "Report and block persistence"},
+    {"id": "production_e2e_smoke", "label": "Production E2E smoke"},
+)
+PRODUCTION_GOAL_KEYWORDS = (
+    "배포",
+    "상용",
+    "서비스",
+    "실사용자",
+    "실제 서비스",
+    "production",
+    "prod",
+    "vercel",
+    "supabase",
+    "db",
+    "database",
+    "인증",
+    "auth",
+    "openai",
+    "ai",
+)
+PROTOTYPE_GOAL_KEYWORDS = (
+    "mvp",
+    "목업",
+    "프로토타입",
+    "로컬만",
+    "local-only",
+    "prototype",
+    "mock",
+)
 MAX_GOAL_SPEC_BYTES = 512_000
 MAX_GOAL_ATTACHMENT_BYTES = 10_000_000
 MAX_GOAL_ATTACHMENTS = 50
@@ -241,6 +277,10 @@ def _reject_secretish_text(text: str) -> None:
             raise GoalError("goal spec appears to contain a secret; remove it before importing")
 
 
+def _is_secretish_text(text: str) -> bool:
+    return any(pattern.search(text) for pattern in SECRET_TEXT_PATTERNS)
+
+
 def _validate_input_file(path: Path, *, max_bytes: int) -> Path:
     expanded = path.expanduser()
     if expanded.is_symlink():
@@ -404,6 +444,162 @@ def _success_criteria_from_spec(text: str, *, fallback_title: str) -> list[str]:
     return criteria[:12] or _default_success_criteria(fallback_title)
 
 
+def _classify_service_level(*texts: str) -> str:
+    haystack = " ".join(text for text in texts if text).casefold()
+    if any(keyword.casefold() in haystack for keyword in PROTOTYPE_GOAL_KEYWORDS):
+        return "prototype"
+    if any(keyword.casefold() in haystack for keyword in PRODUCTION_GOAL_KEYWORDS):
+        return "production"
+    return "production"
+
+
+def _completion_gates_for_service_level(service_level: str) -> list[dict[str, str]]:
+    if service_level == "production":
+        return [dict(gate) for gate in PRODUCTION_COMPLETION_GATES]
+    return []
+
+
+def _completion_gate_status(payload: Mapping[str, object]) -> dict[str, object]:
+    gates = payload.get("completion_gates")
+    if not isinstance(gates, list) or not gates:
+        return {"status": "not-required", "pending_gate_ids": [], "passed_gate_ids": []}
+    raw_evidence = payload.get("completion_gate_evidence")
+    evidence = raw_evidence if isinstance(raw_evidence, Mapping) else {}
+    passed: list[str] = []
+    pending: list[str] = []
+    for raw_gate in gates:
+        if not isinstance(raw_gate, Mapping):
+            continue
+        gate_id = str(raw_gate.get("id") or "").strip()
+        if not gate_id:
+            continue
+        gate_evidence = evidence.get(gate_id) if isinstance(evidence, Mapping) else None
+        has_concrete_evidence = bool(str((gate_evidence or {}).get("evidence") or "").strip()) if isinstance(gate_evidence, Mapping) else False
+        if (
+            isinstance(gate_evidence, Mapping)
+            and str(gate_evidence.get("status") or "").strip().lower() in {"passed", "done", "ok"}
+            and has_concrete_evidence
+        ):
+            passed.append(gate_id)
+        else:
+            pending.append(gate_id)
+    return {
+        "status": "passed" if not pending else "pending",
+        "pending_gate_ids": pending,
+        "passed_gate_ids": passed,
+    }
+
+
+def _normalize_gate_evidence_entry(
+    *,
+    gate_id: str,
+    status: object,
+    source_path: str,
+    evidence: object = "",
+) -> dict[str, object] | None:
+    normalized_status = str(status or "").strip().lower()
+    if normalized_status not in {"passed", "done", "ok"}:
+        return None
+    if not gate_id.strip():
+        return None
+    entry: dict[str, object] = {"status": normalized_status, "source": source_path}
+    evidence_text = str(evidence or "").strip()
+    if not evidence_text or _is_secretish_text(evidence_text):
+        return None
+    entry["evidence"] = evidence_text[:300]
+    return entry
+
+
+def _sanitize_completion_gate_evidence(
+    raw_evidence: object,
+    *,
+    allowed_gate_ids: set[str],
+) -> dict[str, object]:
+    if not isinstance(raw_evidence, Mapping):
+        return {}
+    sanitized: dict[str, object] = {}
+    for gate_id, raw_entry in raw_evidence.items():
+        normalized_gate_id = str(gate_id or "").strip()
+        if normalized_gate_id not in allowed_gate_ids or not isinstance(raw_entry, Mapping):
+            continue
+        source = str(raw_entry.get("source") or "goal.json").strip()
+        evidence = raw_entry.get("evidence") or raw_entry.get("url") or raw_entry.get("receipt")
+        normalized = _normalize_gate_evidence_entry(
+            gate_id=normalized_gate_id,
+            status=raw_entry.get("status"),
+            source_path=source,
+            evidence=evidence,
+        )
+        if normalized is not None:
+            sanitized[normalized_gate_id] = normalized
+    return sanitized
+
+
+def _collect_completion_gate_evidence(
+    *,
+    state_root: Path,
+    target_id: str,
+    goal_id: str,
+    allowed_gate_ids: set[str],
+) -> dict[str, object]:
+    runs_root = state_root / "runs" / "harness"
+    if not runs_root.exists() or runs_root.is_symlink() or not allowed_gate_ids:
+        return {}
+    collected: dict[str, object] = {}
+    for evidence_path in sorted(runs_root.rglob("generated-evidence.json")):
+        if evidence_path.is_symlink():
+            continue
+        try:
+            payload = _read_json(evidence_path)
+        except (OSError, GoalError, json.JSONDecodeError):
+            continue
+        if str(payload.get("target_id") or "") not in {"", target_id}:
+            continue
+        if str(payload.get("goal_id") or "") != goal_id:
+            continue
+        if payload.get("applied") is False:
+            continue
+        source_path = _sidecar_relative(state_root, evidence_path)
+        raw_gates = payload.get("completion_gates") or payload.get("completion_gate_evidence")
+        entries: list[tuple[str, object, object]] = []
+        if isinstance(raw_gates, Mapping):
+            for gate_id, raw_entry in raw_gates.items():
+                if isinstance(raw_entry, Mapping):
+                    entries.append(
+                        (
+                            str(gate_id),
+                            raw_entry.get("status"),
+                            raw_entry.get("evidence") or raw_entry.get("url") or raw_entry.get("receipt"),
+                        )
+                    )
+                else:
+                    entries.append((str(gate_id), raw_entry, ""))
+        elif isinstance(raw_gates, list):
+            for raw_entry in raw_gates:
+                if not isinstance(raw_entry, Mapping):
+                    continue
+                entries.append(
+                    (
+                        str(raw_entry.get("id") or raw_entry.get("gate_id") or ""),
+                        raw_entry.get("status"),
+                        raw_entry.get("evidence") or raw_entry.get("url") or raw_entry.get("receipt"),
+                    )
+                )
+        for gate_id, status, evidence in entries:
+            normalized_gate_id = gate_id.strip()
+            if normalized_gate_id not in allowed_gate_ids:
+                continue
+            normalized_entry = _normalize_gate_evidence_entry(
+                gate_id=normalized_gate_id,
+                status=status,
+                source_path=source_path,
+                evidence=evidence,
+            )
+            if normalized_entry is not None:
+                collected[normalized_gate_id] = normalized_entry
+    return collected
+
+
 def _context_summary_from_spec(text: str) -> str:
     lines = [_clean_bullet(line) for line in _section_lines(text, ("Background", "Summary", "Context", "Requirements", "배경", "요약", "요구사항"))]
     summary = " ".join(line for line in lines if line)
@@ -518,6 +714,7 @@ def create_goal(
     timestamp = now or utc_timestamp()
     if active is not None and replace:
         archive_goal(state_root=state_root, goal_id=active.goal_id, status="archived", reason="replaced by new goal")
+    service_level = _classify_service_level(title)
     goal_id = _safe_goal_id(title)
     goal_dir = _goals_root(state_root) / goal_id
     if goal_dir.exists():
@@ -532,6 +729,9 @@ def create_goal(
         "created_at": timestamp,
         "updated_at": timestamp,
         "success_criteria": _default_success_criteria(title),
+        "service_level": service_level,
+        "completion_gates": _completion_gates_for_service_level(service_level),
+        "completion_gate_evidence": {},
         "active_plan_id": "",
         "linked_backlog_ids": [],
         "publication": {},
@@ -558,6 +758,7 @@ def create_goal(
             profile=_empty_product_profile(),
             plan_id="plan-initial",
             created_at=timestamp,
+            goal_payload=payload,
         ),
     )
     _write_goal_markdown(goal_dir / "goal.md", payload, queued=0, completed=0)
@@ -613,6 +814,7 @@ def create_goal_from_spec(
             "sha256_prefix": hashlib.sha256(spec_text.encode("utf-8")).hexdigest()[:16],
         }
         context_summary = _context_summary_from_spec(spec_text)
+        service_level = _classify_service_level(resolved_title, spec_text)
         payload = {
             "schema_version": GOAL_SCHEMA_VERSION,
             "goal_id": goal_id,
@@ -622,6 +824,9 @@ def create_goal_from_spec(
             "created_at": timestamp,
             "updated_at": timestamp,
             "success_criteria": _success_criteria_from_spec(spec_text, fallback_title=resolved_title),
+            "service_level": service_level,
+            "completion_gates": _completion_gates_for_service_level(service_level),
+            "completion_gate_evidence": {},
             "active_plan_id": "",
             "linked_backlog_ids": [],
             "publication": {},
@@ -740,6 +945,7 @@ def _write_goal_markdown(path: Path, payload: Mapping[str, object], *, queued: i
         f"- Target: `{payload.get('target_id')}`",
         f"- Status: `{payload.get('status')}`",
         f"- Source: `{payload.get('source') or 'inline'}`",
+        f"- Service level: `{payload.get('service_level') or 'prototype'}`",
         f"- Queued linked tasks: {queued}",
         f"- Completed linked tasks: {completed}",
         "",
@@ -748,6 +954,27 @@ def _write_goal_markdown(path: Path, payload: Mapping[str, object], *, queued: i
     ]
     for item in payload.get("success_criteria") or []:
         lines.append(f"- {item}")
+    gate_status = payload.get("completion_gate_status") if isinstance(payload.get("completion_gate_status"), Mapping) else {}
+    gates = payload.get("completion_gates")
+    if isinstance(gates, list) and gates:
+        lines.extend(["", "## Completion Gates", ""])
+        gate_ids = [
+            str(gate.get("id") or "").strip()
+            for gate in gates
+            if isinstance(gate, Mapping) and str(gate.get("id") or "").strip()
+        ]
+        if isinstance(gate_status, Mapping) and gate_status.get("status") == "passed":
+            pending = set(gate_status.get("pending_gate_ids") or [])
+        else:
+            pending = set(gate_status.get("pending_gate_ids") or gate_ids) if isinstance(gate_status, Mapping) else set(gate_ids)
+        for gate in gates:
+            if not isinstance(gate, Mapping):
+                continue
+            gate_id = str(gate.get("id") or "").strip()
+            if not gate_id:
+                continue
+            marker = "pending" if gate_id in pending else "passed"
+            lines.append(f"- `{gate_id}`: {marker} - {gate.get('label') or gate_id}")
     if payload.get("spec_path"):
         lines.extend(["", "## Goal Spec", "", f"- `{payload.get('spec_path')}`"])
     attachments = payload.get("attachments")
@@ -955,6 +1182,134 @@ def _empty_repo_task_validation(kind: str) -> list[str]:
     return ["`git diff -- README.md package.json src/** public/**`"]
 
 
+def _production_goal_specs(title: str, spec_context: str) -> list[tuple[str, str, str, list[str]]]:
+    return [
+        (
+            "architecture",
+            "Production architecture baseline",
+            f"Next.js/Vercel, Supabase, OpenAI 기반 production 서비스 구조를 고정한다: {title}.{spec_context}",
+            ["README.md", "package.json", "src/**", "supabase/**", "docs/**"],
+        ),
+        (
+            "auth",
+            "Production auth and profile",
+            f"Supabase Auth 기반 가입/로그인/프로필 흐름을 구현한다: {title}.{spec_context}",
+            ["src/**", "supabase/**", "package.json"],
+        ),
+        (
+            "database",
+            "Supabase database schema",
+            f"프로필, 대화, 메시지, 신고, 차단, 미디어, AI 사용량 schema를 만든다: {title}.{spec_context}",
+            ["supabase/**", "tests/**", "package.json"],
+        ),
+        (
+            "realtime",
+            "Realtime chat persistence",
+            f"두 사용자 간 메시지가 DB에 저장되고 realtime으로 반영되게 한다: {title}.{spec_context}",
+            ["src/**", "supabase/**", "tests/**", "package.json"],
+        ),
+        (
+            "ai",
+            "AI-only user replies",
+            f"AI 사용자에게만 OpenAI 응답을 생성하고 실제 사용자 간 채팅은 LLM을 거치지 않게 한다: {title}.{spec_context}",
+            ["src/**", "tests/**", "package.json"],
+        ),
+        (
+            "media",
+            "Production media storage",
+            f"이미지 원본/썸네일을 Supabase Storage에 저장하고 UI에서 확인하게 한다: {title}.{spec_context}",
+            ["src/**", "supabase/**", "tests/**", "package.json"],
+        ),
+        (
+            "moderation",
+            "Reporting and blocking",
+            f"신고, 차단, 금칙어 필터와 관리자 검토 표면을 구현한다: {title}.{spec_context}",
+            ["src/**", "supabase/**", "tests/**", "package.json"],
+        ),
+        (
+            "deploy",
+            "Production deploy readiness",
+            f"Vercel/Supabase/OpenAI env readiness와 배포 smoke를 연결한다: {title}.{spec_context}",
+            ["README.md", "package.json", "src/**", "docs/**", "tests/**"],
+        ),
+        (
+            "e2e",
+            "Production E2E smoke",
+            f"production URL에서 가입, 프로필, 채팅, AI 응답, 이미지, 신고/차단 smoke를 검증한다: {title}.{spec_context}",
+            ["tests/**", "package.json", "README.md"],
+        ),
+        (
+            "docs",
+            "Policy and operator docs",
+            f"개인정보, 약관, 커뮤니티 가이드, 비랜덤채팅 포지셔닝 문서를 정리한다: {title}.{spec_context}",
+            ["README.md", "docs/**", "src/**"],
+        ),
+    ]
+
+
+def _production_task_acceptance(kind: str) -> list[str]:
+    acceptances: dict[str, list[str]] = {
+        "architecture": [
+            "정적 localStorage 앱이 아닌 Next.js/Vercel production app 구조가 된다.",
+            "Supabase와 OpenAI 연동 지점은 server-side boundary를 가진다.",
+            "환경변수 누락 시 명확한 setup-wait/readiness 메시지를 낸다.",
+        ],
+        "auth": [
+            "사용자는 Supabase Auth 기반 소셜 로그인 또는 configured phone OTP로 가입할 수 있다.",
+            "프로필은 DB에 저장되고 재로그인 후 유지된다.",
+            "서비스 role key는 client bundle에 노출되지 않는다.",
+        ],
+        "database": [
+            "profiles, conversations, participants, messages, reports, blocks, media_assets, ai_usage_limits schema가 있다.",
+            "대표 관계와 RLS/policy 의도가 migration 또는 schema docs에 반영된다.",
+            "schema 검증 테스트가 DB 핵심 테이블을 확인한다.",
+        ],
+        "realtime": [
+            "두 계정의 메시지가 DB에 저장된다.",
+            "대화방 구독은 새 메시지를 즉시 UI에 반영한다.",
+            "실제 사용자 간 메시지는 OpenAI를 호출하지 않는다.",
+        ],
+        "ai": [
+            "AI 사용자 프로필은 `is_ai=true`로 구분된다.",
+            "AI 사용자에게 보낸 메시지는 서버 route에서 OpenAI 답변을 생성해 DB에 저장한다.",
+            "OpenAI 키 누락 또는 rate limit 초과는 안전한 에러로 닫힌다.",
+        ],
+        "media": [
+            "이미지 업로드는 Supabase Storage에 저장된다.",
+            "썸네일과 원본 보기 메타데이터가 분리된다.",
+            "허용 타입과 크기 제한이 있다.",
+        ],
+        "moderation": [
+            "신고와 차단이 DB에 저장되고 UI에 반영된다.",
+            "차단된 사용자는 새 메시지/대화 생성이 제한된다.",
+            "관리자 검토용 신고 조회 표면이 있다.",
+        ],
+        "deploy": [
+            "Vercel production URL과 Supabase env readiness를 확인한다.",
+            "필수 env 누락은 goal 완료가 아니라 operator-wait로 남는다.",
+            "배포 산출물은 secret 값을 출력하지 않는다.",
+        ],
+        "e2e": [
+            "production URL에서 auth, profile, realtime chat, AI reply, image upload, report/block smoke가 통과한다.",
+            "E2E 실패는 goal을 active로 유지하고 correction task 입력이 된다.",
+        ],
+        "docs": [
+            "개인정보 처리방침, 이용약관, 커뮤니티 가이드 초안이 있다.",
+            "GPS/랜덤매칭/성인전용/실제결제 제외 범위가 명시된다.",
+            "운영자가 env와 deploy 상태를 점검하는 방법이 문서화된다.",
+        ],
+    }
+    return acceptances[kind]
+
+
+def _production_task_validation(kind: str) -> list[str]:
+    if kind in {"database", "ai", "e2e"}:
+        return ["`npm test`", "`npm run build`"]
+    if kind == "deploy":
+        return ["`npm run production:readiness`", "`npm run build`"]
+    return ["`npm run validate`"]
+
+
 def build_roadmap(
     *,
     state_root: Path,
@@ -998,6 +1353,52 @@ def build_roadmap_model(
     attachment_count = len(attachments) if isinstance(attachments, list) else 0
     spec_context = f" 상세 명세: {context_summary}" if context_summary else ""
     tasks: list[dict[str, object]] = []
+    service_level = str(goal_payload.get("service_level") or _classify_service_level(title, context_summary))
+    if service_level == "production":
+        specs = _production_goal_specs(title, spec_context)
+        for index, (kind, task_title, summary, scope) in enumerate(specs, start=1):
+            previous = [] if index == 1 else [f"task-{index - 1:02d}-{specs[index - 2][0]}"]
+            tasks.append(
+                {
+                    "task_key": f"task-{index:02d}-{kind}",
+                    "title": task_title,
+                    "summary": summary,
+                    "acceptance": _production_task_acceptance(kind),
+                    "file_scope": scope,
+                    "forbidden_scope": [],
+                    "validation": _production_task_validation(kind),
+                    "manual_checks": [f"Goal spec `{spec_path}` 참고"] if spec_path else [],
+                    "priority": "P1" if index <= 3 else "P2",
+                    "labels": ["product", "goal-driven", "production", kind],
+                    "goal_id": goal_id,
+                    "milestone_id": f"m{index}",
+                    "depends_on": previous,
+                    "goal_spec_path": spec_path,
+                    "attachment_count": attachment_count,
+                    "service_level": service_level,
+                }
+            )
+        return {
+            "schema_version": GOAL_SCHEMA_VERSION,
+            "target_id": target_id,
+            "goal_id": goal_id,
+            "plan_id": plan_id,
+            "created_at": created_at,
+            "updated_at": created_at,
+            "service_level": service_level,
+            "completion_gates": _completion_gates_for_service_level(service_level),
+            "milestones": [
+                {
+                    "id": f"m{index}",
+                    "title": str(task["title"]),
+                    "objective": str(task["summary"]),
+                    "depends_on": list(task.get("depends_on") or []),
+                }
+                for index, task in enumerate(tasks, start=1)
+            ],
+            "tasks": tasks,
+            "profile": profile,
+        }
     specs: list[tuple[str, str, str, list[str] | None]] = [
         ("core", "핵심 동작 구현", f"제품의 핵심 동작이 목표를 만족하도록 구현한다: {title}.{spec_context}", None),
         ("ui", "사용자 경험 반영", f"사용자 화면과 조작 흐름에서 목표가 자연스럽게 동작하도록 반영한다: {title}.{spec_context}", None),
@@ -1141,6 +1542,9 @@ def _goal_task_notes(goal: GoalRecord, plan_id: str, task: Mapping[str, object])
         goal_payload = _read_json(goal.goal_json)
     except GoalError:
         return tuple(notes)
+    service_level = str(goal_payload.get("service_level") or "").strip()
+    if service_level:
+        notes.append(f"Goal-Service-Level: {service_level}")
     spec_path = str(goal_payload.get("spec_path") or "").strip()
     if spec_path:
         notes.append("Goal-Spec-Summary: incorporated into this backlog; do not open the full spec during implementation.")
@@ -1299,7 +1703,42 @@ def refresh_progress(*, state_root: Path, goal: GoalRecord) -> dict[str, object]
             )
     else:
         goal_payload.pop("publication_blocked_backlog_ids", None)
-    if required_tasks and not unresolved_required and not publication_blocked:
+    service_level = str(goal_payload.get("service_level") or "").strip()
+    if not service_level:
+        service_level = _classify_service_level(
+            str(goal_payload.get("title") or goal.title),
+            str(goal_payload.get("context_summary") or ""),
+        )
+        goal_payload["service_level"] = service_level
+    if not isinstance(goal_payload.get("completion_gates"), list):
+        goal_payload["completion_gates"] = _completion_gates_for_service_level(service_level)
+    if service_level != "production":
+        goal_payload["completion_gates"] = []
+    completion_gates = goal_payload.get("completion_gates")
+    allowed_gate_ids = (
+        {
+            str(gate.get("id") or "").strip()
+            for gate in completion_gates
+            if isinstance(gate, Mapping) and str(gate.get("id") or "").strip()
+        }
+        if isinstance(completion_gates, list)
+        else set()
+    )
+    gate_evidence = goal_payload.get("completion_gate_evidence")
+    merged_gate_evidence = _sanitize_completion_gate_evidence(gate_evidence, allowed_gate_ids=allowed_gate_ids)
+    merged_gate_evidence.update(
+        _collect_completion_gate_evidence(
+            state_root=state_root,
+            target_id=goal.target_id,
+            goal_id=goal.goal_id,
+            allowed_gate_ids=allowed_gate_ids,
+        )
+    )
+    goal_payload["completion_gate_evidence"] = merged_gate_evidence
+    gate_status = _completion_gate_status(goal_payload)
+    goal_payload["completion_gate_status"] = gate_status
+    gates_blocked = gate_status.get("status") == "pending"
+    if required_tasks and not unresolved_required and not publication_blocked and not gates_blocked:
         goal_payload["status"] = "completed"
         _clear_active_pointer_if_matches(state_root, goal.goal_id)
     elif goal_payload.get("status") == "completed":

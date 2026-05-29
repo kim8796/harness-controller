@@ -477,7 +477,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     )
     assert no_arg_help.stdout == explicit_help.stdout
     assert "하네스 시작" in no_arg_help.stdout
-    assert './harness goal "이 프로젝트를 완성도 있는 MVP로 만든다"' in no_arg_help.stdout
+    assert './harness goal "이 프로젝트를 배포 가능한 완성도 있는 제품으로 만든다"' in no_arg_help.stdout
     assert "./harness watch" in no_arg_help.stdout
     assert "./harness controller audit-size" in no_arg_help.stdout
     assert "./harness target archive plan my-app" not in no_arg_help.stdout
@@ -494,7 +494,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "private controller repo release 전용 검증" in readme
     assert "./harness install /path/to/product-repo" in readme
     assert "./harness install /path/to/product-repo --id" not in readme
-    assert './harness goal "이 프로젝트를 완성도 있는 MVP로 만든다"' in readme
+    assert './harness goal "이 프로젝트를 배포 가능한 완성도 있는 제품으로 만든다"' in readme
     assert "./harness watch" in readme
     assert "./harness controller audit-size" in readme
     assert '`./harness do "요청"` 은 한 작업을 바로 처리하고 싶을 때' in readme
