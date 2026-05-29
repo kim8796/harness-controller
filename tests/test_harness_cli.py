@@ -18,6 +18,50 @@ def _load_module():
     return load_script_module("harness_cli", "scripts/harness_cli.py")
 
 
+def test_controller_release_check_and_ci_cover_goal_gate_surfaces() -> None:
+    module = _load_module()
+    expected_ruff_paths = {
+        "scripts/harness_controller_sanitization.py",
+        "scripts/harness_fleet.py",
+        "scripts/harness_goal.py",
+        "scripts/harness_goal_contract.py",
+        "scripts/harness_goal_gates.py",
+        "scripts/harness_guard.py",
+        "scripts/harness_product_audit.py",
+        "scripts/harness_product_audit_support.py",
+        "scripts/harness_release.py",
+        "tests/test_harness_controller_sanitization.py",
+        "tests/test_harness_fleet.py",
+        "tests/test_harness_goal.py",
+        "tests/test_harness_goal_contract.py",
+        "tests/test_harness_goal_gates.py",
+        "tests/test_harness_guard.py",
+        "tests/test_harness_product_audit.py",
+        "tests/test_harness_product_maintainability.py",
+        "tests/test_harness_release.py",
+    }
+    expected_pytest_paths = {
+        "tests/test_harness_controller_sanitization.py",
+        "tests/test_harness_fleet.py",
+        "tests/test_harness_goal.py",
+        "tests/test_harness_goal_contract.py",
+        "tests/test_harness_goal_gates.py",
+        "tests/test_harness_guard.py",
+        "tests/test_harness_product_audit.py",
+        "tests/test_harness_product_maintainability.py",
+        "tests/test_harness_release.py",
+    }
+
+    assert expected_ruff_paths.issubset(set(module.CONTROLLER_RELEASE_CHECK_RUFF_PATHS))
+    assert expected_pytest_paths.issubset(set(module.CONTROLLER_RELEASE_CHECK_PYTEST_PATHS))
+
+    workflow = (
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "harness-controller-ci.yml"
+    ).read_text(encoding="utf-8")
+    for path in sorted(expected_ruff_paths | expected_pytest_paths):
+        assert path in workflow
+
+
 def test_beginner_help_home_no_args_and_help_are_static(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_module()
 
@@ -750,7 +794,7 @@ def test_watch_existing_non_executable_goal_tasks_are_explicit(monkeypatch, tmp_
     monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.27")
 
     assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
-    assert module.main(["goal", "existing generated manual-review smoke"]) == 0
+    assert module.main(["goal", "로컬 프로토타입만 existing generated manual-review smoke"]) == 0
     monkeypatch.setattr(module.time, "sleep", lambda _seconds: pytest.fail("stop-on-idle must not sleep"))
     record = module.harness_controller.default_target(controller)
     goal = module.harness_goal.load_active_goal(record.state_root)

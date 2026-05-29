@@ -25,6 +25,28 @@ from harness_autonomy.control import sanitize_for_outbox
 ERROR_CLASS: type[RuntimeError] = RuntimeError
 OPERATOR_WAIT_DEFAULT_SECONDS = 15 * 60
 OPERATOR_WAIT_POLL_SECONDS = 15
+WATCH_STATUS_GATE_LIMIT = 8
+
+_TRANSACTION_SETUP_WAIT_TEXT = re.compile(
+    r"(?i)("
+    r"credentials?|tokens?|secret|api[_ -]?key|auth(?:entication|orization)?|unauthori[sz]ed|"
+    r"permissions?(?:\s+denied)?|missing\s+(?:required\s+)?(?:env|environment|variable)|"
+    r"required\s+(?:env|environment|variable)|env(?:ironment)?\s+variable|\.env|"
+    r"vercel[_ -]?(?:project|token|org|env)|supabase[_ -]?(?:url|key|project)|database[_ -]?url|"
+    r"service[_ -]?role|app\s+store\s+connect|play\s+console|"
+    r"store\s+(?:release|submission|credential|account)|signing|provisioning|team[_ -]?id|"
+    r"(?:vercel|supabase|database|app\s+store|play\s+console|store|signing|provisioning|team).{0,60}"
+    r"(?:not\s+configured|configuration\s+required|required)"
+    r")"
+)
+_TRANSACTION_EXTERNAL_WAIT_TEXT = re.compile(
+    r"(?i)("
+    r"service\s+unavailable|temporarily\s+unavailable|timeout|timed\s+out|\b429\b|\b503\b|"
+    r"rate[_ -]?limit(?:ed)?|too\s+many\s+requests|quota|"
+    r"(?:provider|openai|anthropic|model\s+provider).{0,80}"
+    r"(?:unavailable|timeout|timed\s+out|\b429\b|\b503\b|rate[_ -]?limit(?:ed)?|too\s+many\s+requests|quota)"
+    r")"
+)
 
 
 def _error(message: str) -> RuntimeError:
@@ -594,6 +616,29 @@ def _transaction_operator_wait_action(wait_class: str) -> tuple[tuple[str, ...],
     )
 
 
+def _transaction_wait_class_from_blocker_text(
+    incident_record: Mapping[str, object],
+    error: BaseException,
+) -> str:
+    wait_class = str(incident_record.get("wait_class") or "").strip()
+    if wait_class:
+        return wait_class
+    text = " ".join(
+        str(value or "")
+        for value in (
+            incident_record.get("kind"),
+            incident_record.get("reason"),
+            incident_record.get("error"),
+            error,
+        )
+    )
+    if _TRANSACTION_SETUP_WAIT_TEXT.search(text):
+        return "setup-wait"
+    if _TRANSACTION_EXTERNAL_WAIT_TEXT.search(text):
+        return "external-wait"
+    return ""
+
+
 def _handle_transaction_operator_wait(
     runtime: WatchRuntime,
     record: harness_controller.TargetRecord,
@@ -604,8 +649,8 @@ def _handle_transaction_operator_wait(
     processed_count: int,
     idle_count: int,
 ) -> Mapping[str, object] | None:
-    wait_class = str(incident_record.get("wait_class") or "")
-    if not bool(incident_record.get("operator_actionable")) or not wait_class:
+    wait_class = _transaction_wait_class_from_blocker_text(incident_record, error)
+    if not wait_class:
         return None
     allowed_replies, risk_summary, next_action, resume_check = _transaction_operator_wait_action(wait_class)
     signature = str(incident_record.get("signature") or "transaction")
@@ -656,6 +701,52 @@ def watch_active_goal_id(record: harness_controller.TargetRecord) -> str:
     if active is None or active.status != "active":
         return ""
     return active.goal_id
+
+
+def watch_active_goal_gate_summary(record: harness_controller.TargetRecord) -> Mapping[str, object]:
+    try:
+        active = harness_goal.load_active_goal(record.state_root)
+    except harness_goal.GoalError:
+        return {}
+    if active is None or active.status != "active":
+        return {}
+    try:
+        harness_goal.refresh_progress(state_root=record.state_root, goal=active)
+        payload = json.loads(active.goal_json.read_text(encoding="utf-8"))
+    except (harness_goal.GoalError, OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, Mapping):
+        return {}
+    gate_status = payload.get("completion_gate_status") if isinstance(payload.get("completion_gate_status"), Mapping) else {}
+    gates = payload.get("completion_gates") if isinstance(payload.get("completion_gates"), list) else []
+    pending = gate_status.get("pending_gate_ids") if isinstance(gate_status, Mapping) else []
+    passed = gate_status.get("passed_gate_ids") if isinstance(gate_status, Mapping) else []
+    return {
+        "status": str(gate_status.get("status") or "not-required") if isinstance(gate_status, Mapping) else "not-required",
+        "required_count": len(gates),
+        "pending_count": len(pending) if isinstance(pending, list) else 0,
+        "passed_count": len(passed) if isinstance(passed, list) else 0,
+        "pending_gate_ids": [str(item) for item in pending] if isinstance(pending, list) else [],
+        "product_standard": str(
+            (payload.get("goal_contract") or {}).get("product_standard")
+            if isinstance(payload.get("goal_contract"), Mapping)
+            else payload.get("service_level") or ""
+        ),
+    }
+
+
+def _goal_gate_next_action(gate_summary: Mapping[str, object]) -> str:
+    if str(gate_summary.get("status") or "") != "pending":
+        return ""
+    raw_pending = gate_summary.get("pending_gate_ids")
+    pending_ids = [str(item) for item in raw_pending] if isinstance(raw_pending, list) else []
+    pending_count = int(gate_summary.get("pending_count") or len(pending_ids))
+    if pending_ids:
+        shown = pending_ids[:WATCH_STATUS_GATE_LIMIT]
+        suffix = f" (+{pending_count - len(shown)} more)" if pending_count > len(shown) else ""
+        missing = ", ".join(shown) + suffix
+        return f"keep active goal open; queue/refill correction work for missing completion gates: {missing}"
+    return "keep active goal open; queue/refill correction work until completion gates have trusted evidence"
 
 
 def refresh_active_goal_progress(record: harness_controller.TargetRecord) -> Mapping[str, object] | None:
@@ -833,6 +924,12 @@ def write_watch_status(
         "json_path": watch_sidecar_relative(record, json_path),
         "markdown_path": watch_sidecar_relative(record, md_path),
     }
+    gate_summary = watch_active_goal_gate_summary(record)
+    if gate_summary:
+        payload["goal_gate_status"] = gate_summary
+        gate_next_action = _goal_gate_next_action(gate_summary)
+        if gate_next_action:
+            payload["goal_gate_next_action"] = gate_next_action
     if wait_payload:
         payload["operator_wait"] = wait_payload
         payload["operator_wait_id"] = str(wait_payload.get("id") or "")
@@ -909,6 +1006,24 @@ def render_watch_status_markdown(payload: Mapping[str, object]) -> str:
                 f"- Reason: {wait_value('reason', 'none')}",
                 f"- Deadline: `{wait_value('deadline_at', 'unknown')}`",
                 f"- Next action: {wait_value('next_action', 'none')}",
+                "",
+            ]
+        )
+    gate_status = payload.get("goal_gate_status")
+    if isinstance(gate_status, Mapping) and int(gate_status.get("required_count") or 0):
+        pending_ids = gate_status.get("pending_gate_ids")
+        pending_text = ", ".join(str(item) for item in pending_ids[:8]) if isinstance(pending_ids, list) else ""
+        gate_next_action = value("goal_gate_next_action", "")
+        lines.extend(
+            [
+                "## Goal Gates",
+                "",
+                f"- Status: `{gate_status.get('status') or 'unknown'}`",
+                f"- Required: {gate_status.get('required_count') or 0}",
+                f"- Passed: {gate_status.get('passed_count') or 0}",
+                f"- Pending: {gate_status.get('pending_count') or 0}",
+                f"- Pending gates: {pending_text or 'none'}",
+                f"- Next action: {gate_next_action}" if gate_next_action else "",
                 "",
             ]
         )
@@ -997,6 +1112,19 @@ def print_watch_status(record: harness_controller.TargetRecord) -> int:
     print(f"- publication branch: `{payload.get('publication_branch') or 'none'}`")
     print(f"- PR: `{payload.get('pr_url') or 'none'}`")
     print(f"- merge commit: `{payload.get('merge_commit_sha') or 'none'}`")
+    gate_status = payload.get("goal_gate_status")
+    if isinstance(gate_status, Mapping) and int(gate_status.get("required_count") or 0):
+        pending_ids = gate_status.get("pending_gate_ids")
+        pending_text = ", ".join(str(item) for item in pending_ids[:8]) if isinstance(pending_ids, list) else "none"
+        print("- goal gates:")
+        print(f"  - status: `{gate_status.get('status') or 'unknown'}`")
+        print(f"  - required: {gate_status.get('required_count') or 0}")
+        print(f"  - passed: {gate_status.get('passed_count') or 0}")
+        print(f"  - pending: {gate_status.get('pending_count') or 0}")
+        print(f"  - pending gates: {pending_text or 'none'}")
+        gate_next_action = str(payload.get("goal_gate_next_action") or "")
+        if gate_next_action:
+            print(f"  - next: {gate_next_action}")
     operator_wait = payload.get("operator_wait")
     wait_payload = operator_wait if isinstance(operator_wait, Mapping) else {}
     wait_id = str(wait_payload.get("id") or payload.get("operator_wait_id") or "")

@@ -173,6 +173,33 @@ def test_fleet_has_explicit_related_tests() -> None:
     assert Path("tests/test_harness_export.py") in related
 
 
+def test_goal_gate_and_product_audit_modules_have_explicit_related_tests() -> None:
+    module = _load_module()
+    root = Path(__file__).resolve().parents[1]
+
+    goal_contract_related = module._guess_related_tests(Path("scripts/harness_goal_contract.py"), root)
+    goal_gates_related = module._guess_related_tests(Path("scripts/harness_goal_gates.py"), root)
+    product_audit_related = module._guess_related_tests(Path("scripts/harness_product_audit.py"), root)
+    product_audit_support_related = module._guess_related_tests(Path("scripts/harness_product_audit_support.py"), root)
+    release_related = module._guess_related_tests(Path("scripts/harness_release.py"), root)
+
+    assert Path("tests/test_harness_goal.py") in goal_contract_related
+    assert Path("tests/test_harness_export.py") in goal_contract_related
+    assert Path("tests/test_harness_goal.py") in goal_gates_related
+    assert Path("tests/test_harness_export.py") in goal_gates_related
+    assert Path("tests/test_harness_product_audit.py") in product_audit_related
+    assert Path("tests/test_harness_product_maintainability.py") in product_audit_related
+    assert Path("tests/test_harness_fleet.py") in product_audit_related
+    assert Path("tests/test_harness_export.py") in product_audit_related
+    assert Path("tests/test_harness_product_audit.py") in product_audit_support_related
+    assert Path("tests/test_harness_product_maintainability.py") in product_audit_support_related
+    assert Path("tests/test_harness_export.py") in product_audit_support_related
+    assert Path("tests/test_harness_release.py") in release_related
+    assert Path("tests/test_harness_fleet.py") in release_related
+    assert Path("tests/test_harness_publication.py") in release_related
+    assert Path("tests/test_harness_export.py") in release_related
+
+
 def test_new_oversized_python_file_blocks(tmp_path: Path) -> None:
     module = _load_module()
     _init_repo(tmp_path)
@@ -291,7 +318,7 @@ def test_root_plan_diet_exception_is_used(tmp_path: Path) -> None:
     assert module._read_diet_exception(tmp_path, None) == "target remove module tests require temporary guard growth"
 
 
-def test_valid_diet_exception_converts_oversized_growth_to_allowed_exception(tmp_path: Path) -> None:
+def test_valid_diet_exception_converts_existing_oversized_growth_to_warning(tmp_path: Path) -> None:
     module = _load_module()
     _init_repo(tmp_path)
     path = Path("scripts/large.py")
@@ -312,6 +339,77 @@ def test_valid_diet_exception_converts_oversized_growth_to_allowed_exception(tmp
 
     assert report.diet_exception == "target archive guard module tests require temporary growth"
     assert report.oversized_file_blockers == ()
+
+
+def test_valid_diet_exception_does_not_bypass_new_oversized_file(tmp_path: Path) -> None:
+    module = _load_module()
+    _init_repo(tmp_path)
+    _commit_all(tmp_path)
+    path = Path("scripts/new_large.py")
+    _write_lines(tmp_path / path, 4)
+    (tmp_path / "plan.md").write_text(
+        "Diet-Exception: target archive guard module tests require temporary growth\n",
+        encoding="utf-8",
+    )
+
+    report = module.build_report(
+        (path, Path("plan.md")),
+        root=tmp_path,
+        max_file_lines=3,
+        mode="pre-commit",
+    )
+
+    assert report.diet_exception == "target archive guard module tests require temporary growth"
+    assert report.oversized_file_blockers
+    assert "new oversized Python file" in report.oversized_file_blockers[0]
+
+
+def test_valid_diet_exception_does_not_bypass_file_crossing_size_budget(tmp_path: Path) -> None:
+    module = _load_module()
+    _init_repo(tmp_path)
+    path = Path("scripts/crossed.py")
+    _write_lines(tmp_path / path, 3)
+    _commit_all(tmp_path)
+    _write_lines(tmp_path / path, 4)
+    (tmp_path / "plan.md").write_text(
+        "Diet-Exception: target archive guard module tests require temporary growth\n",
+        encoding="utf-8",
+    )
+
+    report = module.build_report(
+        (path, Path("plan.md")),
+        root=tmp_path,
+        max_file_lines=3,
+        mode="pre-commit",
+    )
+
+    assert report.oversized_file_blockers
+    assert "Python file crossed size budget" in report.oversized_file_blockers[0]
+
+
+def test_default_file_line_cap_is_practical_for_owner_modules() -> None:
+    module = _load_module()
+
+    assert module.DEFAULT_MAX_FILE_LINES == 1200
+    assert module.DEFAULT_MAX_TEST_FILE_LINES == 2000
+
+
+def test_default_test_file_line_cap_is_higher_than_runtime_cap(tmp_path: Path) -> None:
+    module = _load_module()
+    _init_repo(tmp_path)
+    path = Path("tests/test_large.py")
+    _write_lines(tmp_path / path, module.DEFAULT_MAX_FILE_LINES + 1)
+    _commit_all(tmp_path)
+
+    blockers = module._collect_oversized_file_blockers(
+        tmp_path,
+        (path,),
+        max_file_lines=module.DEFAULT_MAX_FILE_LINES,
+        mode="pre-commit",
+        staged_only=False,
+    )
+
+    assert blockers == ()
 
 
 def test_workflow_tab_violations_are_reported(tmp_path: Path) -> None:

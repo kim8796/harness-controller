@@ -32,6 +32,21 @@ VERIFIED_NOOP_COMPLETION_MODE = "verified-noop"
 DISCOVERY_NOOP_COMPLETION_MODE = "discovery-noop"
 VERIFIED_NOOP_PROPOSAL_FILENAMES = _cycle.NO_DIFF_CONTROL_ARTIFACT_FILENAMES
 EMPTY_BACKLOG_NO_DIFF_RUNTIME_PATHS = _cycle.EMPTY_BACKLOG_NO_DIFF_RUNTIME_PATHS
+PRODUCTION_GOAL_HINT_RE = re.compile(
+    r"(?i)(배포|상용|실서비스|실사용자|production|vercel|supabase|database|\bdb\b|인증|auth|"
+    r"ios|android|native|앱스토어|app\s+store|play\s+store)"
+)
+PROTOTYPE_ONLY_HINT_RE = re.compile(
+    r"(?i)(로컬\s*(?:목업|데모|프로토타입)|로컬\s*만|(?:목업|프로토타입|데모)\s*만|"
+    r"local[- ]?only|demo\s+only|prototype\s+only|mock\s+only|no\s+backend)"
+)
+
+
+def _goal_program_requires_product_gate_evidence(program: _cycle.GoalProgramSummary | None) -> bool:
+    if program is None:
+        return False
+    text = "\n".join([program.name, *program.success_signals])
+    return not bool(PROTOTYPE_ONLY_HINT_RE.search(text))
 
 
 def _selection_allows_discovery_noop(selection_contract: _cycle.CycleContractSummary, source: str) -> bool:
@@ -1070,6 +1085,11 @@ def _validate_goal_complete_goal_state_proposal(
         failures.append("goal-complete goal state proposal base_state.status must be `active`")
     if target_status != "completed":
         failures.append("goal-complete goal state proposal target_state.status must be `completed`")
+    if _goal_program_requires_product_gate_evidence(program):
+        failures.append(
+            "goal-complete proposal cannot close production/native goals; "
+            "goal-gate-verification receipts and product audit must pass first"
+        )
 
     summary = _goal_complete_progress_summary(repo_root, contract)
     if summary is None:

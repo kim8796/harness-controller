@@ -148,6 +148,43 @@ def test_build_fleet_status_reports_targets_without_mutating_product(tmp_path: P
     assert not (product / "targets").exists()
 
 
+def test_fleet_status_surfaces_goal_gate_debt_and_product_audit(tmp_path: Path) -> None:
+    module = _load_module()
+    goal_module = load_script_module("harness_goal_for_fleet_gate", "scripts/harness_goal.py")
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    (product / "src").mkdir()
+    (product / "src" / "app.js").write_text(
+        "import { seedState } from './seed.js';\nlocalStorage.setItem('chat', JSON.stringify(seedState));\n",
+        encoding="utf-8",
+    )
+    (product / "src" / "seed.js").write_text("export const seedState = {};\n", encoding="utf-8")
+    (product / "README.md").write_text("# Product\n\nOut of Scope: app-store/iOS native release\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: fake success app"], cwd=product, check=True, env=_git_env())
+    record = _add_target(controller, product)
+    _controller_module().set_default_target(controller, "demo")
+    goal_module.create_goal(
+        state_root=record.state_root,
+        target_id="demo",
+        text="배포 가능한 iOS Android 채팅 서비스 Vercel Supabase 인증 DB 앱스토어 출시",
+    )
+
+    payload = module.build_fleet_status(controller_root=controller)
+
+    target = payload["targets"][0]
+    assert target["active_goal"]["status"] == "active"
+    assert target["active_goal"]["gate_status"] == "pending"
+    assert "database_persistence" in target["active_goal"]["pending_gate_ids"]
+    assert "store_release_readiness" in target["active_goal"]["pending_gate_ids"]
+    assert target["active_goal"]["product_audit"]["status"] == "failed"
+    assert payload["ok"] is False
+    assert payload["status"] == "attention"
+    assert "active-goal-product-audit-failed" in target["readiness"]["blockers"]
+
+
 def test_build_fleet_status_no_targets_is_readable(tmp_path: Path) -> None:
     module = _load_module()
     controller = tmp_path / "controller"

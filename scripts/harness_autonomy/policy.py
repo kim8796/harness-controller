@@ -62,6 +62,14 @@ STATE_PROPOSAL_AUTO_APPLY_MUTATION_KINDS = frozenset(
 )
 STATE_PROPOSAL_APPROVAL_CLASSES = frozenset({"auto-veto", "manual-only"})
 BACKLOG_STATUS_DIRECTORY_STATES = frozenset({"queued", "active", "blocked", "completed"})
+PRODUCTION_GOAL_HINT_RE = re.compile(
+    r"(?i)(배포|상용|실서비스|실사용자|production|vercel|supabase|database|\bdb\b|인증|auth|"
+    r"ios|android|native|앱스토어|app\s+store|play\s+store)"
+)
+PROTOTYPE_ONLY_HINT_RE = re.compile(
+    r"(?i)(로컬\s*(?:목업|데모|프로토타입)|로컬\s*만|(?:목업|프로토타입|데모)\s*만|"
+    r"local[- ]?only|demo\s+only|prototype\s+only|mock\s+only|no\s+backend)"
+)
 
 _JSON_FENCE_PATTERN = re.compile(
     r"```json\s+(?P<label>[^\n]+)\n(?P<body>.*?)\n```",
@@ -815,6 +823,24 @@ def _state_proposal_has_goal_complete_closeout_shape(payload: Mapping[str, Any])
     except (TypeError, ValueError):
         return False
     return completed_candidates > 0 and completed_candidates == total_candidates == len(candidate_links)
+
+
+def _state_proposal_is_goal_completed_transition(payload: Mapping[str, Any]) -> bool:
+    if _normalize_state_enum(payload.get("entity_type")) != "goal":
+        return False
+    if _normalize_state_enum(payload.get("mutation_kind")) != "goal-status-change":
+        return False
+    base_state = _normalize_state_mapping(payload.get("base_state"))
+    target_state = _normalize_state_mapping(payload.get("target_state"))
+    return (
+        _normalize_state_enum(base_state.get("status")) == "active"
+        and _normalize_state_enum(target_state.get("status")) == "completed"
+    )
+
+
+def _goal_entry_requires_product_gate_evidence(entry: goal_state_support.GoalDocumentEntry) -> bool:
+    text = "\n".join([entry.name, *entry.success_signals])
+    return not bool(PROTOTYPE_ONLY_HINT_RE.search(text))
 
 
 def _normalized_state_proposal_approval_class(payload: Mapping[str, Any]) -> str:
@@ -1839,7 +1865,7 @@ def _validate_goal_complete_closeout_apply_state(
     workspace_root: Path,
     proposal: Mapping[str, Any],
 ) -> None:
-    if not _state_proposal_has_goal_complete_closeout_shape(proposal):
+    if not _state_proposal_is_goal_completed_transition(proposal):
         return
     entity_id = str(proposal.get("entity_id", "")).strip()
     entry = goal_state_support.goal_entry_by_id(workspace_root, entity_id)
@@ -1849,6 +1875,12 @@ def _validate_goal_complete_closeout_apply_state(
         raise PolicyError(f"goal-complete proposal target goal `{entity_id}` is missing `goal_state`")
     if _normalize_state_enum(entry.goal_state.status) != "active":
         raise PolicyError(f"goal-complete proposal target goal `{entity_id}` is no longer active")
+    if _goal_entry_requires_product_gate_evidence(entry):
+        raise PolicyError(
+            "goal-complete proposal cannot close production/native goals without goal-gate-verification evidence"
+        )
+    if not _state_proposal_has_goal_complete_closeout_shape(proposal):
+        raise PolicyError("goal-complete proposal is missing completion_evidence")
 
     evidence = proposal.get("completion_evidence")
     if not isinstance(evidence, Mapping):
@@ -2475,6 +2507,13 @@ def finalize_state_proposal_apply(
         raise PolicyError(
             f"state proposal `{proposal_id}` final repository state drifted before apply confirmation"
         )
+    if _state_proposal_is_goal_completed_transition(proposal):
+        entity_id = str(proposal.get("entity_id", "")).strip()
+        entry = goal_state_support.goal_entry_by_id(resolved_workspace_root, entity_id)
+        if entry is not None and _goal_entry_requires_product_gate_evidence(entry):
+            raise PolicyError(
+                "goal-complete proposal cannot finalize production/native goals without goal-gate-verification evidence"
+            )
     final_payload = dict(pending_payload)
     final_payload["state_after"] = final_state
     final_payload["finalized_at"] = datetime.now().isoformat(timespec="seconds")

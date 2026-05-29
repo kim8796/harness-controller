@@ -14,7 +14,9 @@
 
 `goal`은 제품 완성 목표를 controller sidecar에 등록한다. `watch`는 Telegram relay, active goal, queued backlog를 계속 감시하는 기본 운영 명령이다. `do`는 한 작업을 즉시 처리하고 싶을 때 쓰는 보조 명령이다.
 
-배포 가능한 서비스 목표는 production goal로 처리된다. 이 경우 하네스는 기본 3개 task로 축소하지 않고 인증, DB, realtime, AI, media, moderation, deploy, E2E smoke까지 분해한다. goal 완료는 backlog 완료 개수가 아니라 completion gate evidence 기준이다. provider env나 credential이 없으면 goal을 날리지 않고 operator-wait/readiness 상태로 남긴다.
+배포 가능한 서비스 목표는 production goal로 처리된다. 이 경우 하네스는 기본 3개 task로 축소하지 않고 인증, DB, realtime, AI, media, moderation, deploy, E2E smoke, maintainability handoff까지 분해한다. goal 완료는 backlog 완료 개수가 아니라 completion gate evidence 기준이다. localStorage나 seed 데이터만 통과한 화면, mock-only API, README-only checklist, placeholder docs, 깨진 CODEMAP, PR merge receipt는 가짜 성공(fake success)으로 보고 production gate evidence로 인정하지 않는다. provider env나 credential이 없으면 goal을 날리지 않고 operator-wait/readiness 상태로 남긴다.
+
+production product는 계속 사람이 운영하거나 AI가 유지보수할 수 있어야 한다. 최소 handoff는 `README.md`, `docs/ARCHITECTURE.md`, `docs/CODEMAP.md`, `docs/OPERATIONS.md`, `docs/TESTING.md`, `.env.example`, `docs/DECISIONS.md` 또는 `docs/ADR.md`다. controller 자체의 책임 경계와 다이어트 기준은 [MODULE_MAP.md](MODULE_MAP.md)를 기준으로 본다.
 
 상세한 제품 명세, 화면 이미지, 참고 자료가 있으면 한 줄 goal 대신 문서 기반 goal을 쓴다.
 

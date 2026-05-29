@@ -9,6 +9,7 @@ from typing import Mapping, Sequence
 
 import harness_controller
 import harness_goal
+import harness_product_audit
 
 
 SCHEMA_VERSION = 1
@@ -331,7 +332,55 @@ def _active_goal(record: harness_controller.TargetRecord) -> dict[str, object]:
         return {"status": "error", "error": redact_text(exc)}
     if goal is None:
         return {"status": "none"}
-    return {"status": "active", "goal_id": goal.goal_id, "title": goal.title}
+    try:
+        harness_goal.refresh_progress(state_root=record.state_root, goal=goal)
+        payload = _read_json(goal.goal_json)
+    except (FleetError, harness_goal.GoalError):
+        payload = {}
+    gate_status = payload.get("completion_gate_status") if isinstance(payload.get("completion_gate_status"), Mapping) else {}
+    gates = payload.get("completion_gates") if isinstance(payload.get("completion_gates"), list) else []
+    pending = gate_status.get("pending_gate_ids") if isinstance(gate_status, Mapping) else []
+    passed = gate_status.get("passed_gate_ids") if isinstance(gate_status, Mapping) else []
+    summary: dict[str, object] = {
+        "status": "active",
+        "goal_id": goal.goal_id,
+        "title": goal.title,
+        "product_standard": safe_value(
+            (payload.get("goal_contract") or {}).get("product_standard")
+            if isinstance(payload.get("goal_contract"), Mapping)
+            else payload.get("service_level") or ""
+        ),
+        "gate_status": str(gate_status.get("status") or "not-required") if isinstance(gate_status, Mapping) else "not-required",
+        "required_gate_count": len(gates),
+        "pending_gate_count": len(pending) if isinstance(pending, list) else 0,
+        "passed_gate_count": len(passed) if isinstance(passed, list) else 0,
+        "pending_gate_ids": [safe_value(item) for item in pending] if isinstance(pending, list) else [],
+    }
+    if payload and len(gates):
+        audit = harness_product_audit.audit_product_for_goal(target_repo=record.repo, goal_payload=payload)
+        if audit.get("status") == "failed":
+            failed_gate_ids = {str(item) for item in audit.get("failed_gate_ids", []) if str(item)}
+            summary["product_audit"] = safe_value(audit)
+            summary["pending_gate_ids"] = sorted(
+                {
+                    str(item)
+                    for item in summary.get("pending_gate_ids", [])
+                    if str(item)
+                }
+                | failed_gate_ids
+            )
+            if summary["pending_gate_ids"]:
+                summary["gate_status"] = "pending"
+            if isinstance(summary.get("passed_gate_count"), int):
+                passed_values = passed if isinstance(passed, list) else []
+                passed_after_audit = [
+                    str(item)
+                    for item in passed_values
+                    if str(item) not in failed_gate_ids
+                ]
+                summary["passed_gate_count"] = len(passed_after_audit)
+            summary["pending_gate_count"] = len(summary["pending_gate_ids"])
+    return summary
 
 
 def _backlog_counts(record: harness_controller.TargetRecord) -> dict[str, int]:
@@ -420,6 +469,9 @@ def _target_summary(
     active_goal = _active_goal(record)
     if active_goal.get("status") == "error":
         errors.append(f"{record.target_id}: active goal read failed")
+    active_goal_audit = active_goal.get("product_audit") if isinstance(active_goal.get("product_audit"), Mapping) else {}
+    if active_goal_audit.get("status") == "failed":
+        errors.append(f"{record.target_id}: active goal product audit failed")
     try:
         watch = _watch_status(record)
     except FleetError as exc:
@@ -431,7 +483,11 @@ def _target_summary(
         operator_wait = {"count": 0, "active": False, "error": redact_text(exc)}
         errors.append(f"{record.target_id}: operator wait read failed")
     target_memory_count = _line_count(record.state_root / TARGET_MEMORY_FILE)
-    status = "ready" if bool(verification.get("ok")) else "needs attention"
+    readiness_ok = bool(verification.get("ok")) and active_goal_audit.get("status") != "failed"
+    readiness_blockers = list(blockers or ())
+    if active_goal_audit.get("status") == "failed":
+        readiness_blockers.append("active-goal-product-audit-failed")
+    status = "ready" if readiness_ok else "needs attention"
     if bool(operator_wait.get("active")):
         status = "operator-wait"
     elif active_goal.get("status") == "active" or backlog["queued"] or backlog["active"]:
@@ -444,9 +500,9 @@ def _target_summary(
         "repo_name": record.repo.name,
         "branch": verification.get("branch") if isinstance(verification, Mapping) else {"expected": record.branch},
         "readiness": {
-            "ok": bool(verification.get("ok")),
-            "status": "ready" if bool(verification.get("ok")) else "needs attention",
-            "blockers": list(blockers or ()),
+            "ok": readiness_ok,
+            "status": "ready" if readiness_ok else "needs attention",
+            "blockers": readiness_blockers,
         },
         "status": status,
         "active_goal": active_goal,

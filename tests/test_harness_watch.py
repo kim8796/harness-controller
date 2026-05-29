@@ -88,6 +88,70 @@ def test_watch_status_preserves_last_transaction_after_idle_write(tmp_path, caps
     assert "https://github.com/acme/demo/pull/7" in output
 
 
+def test_watch_status_surfaces_active_goal_gate_debt(tmp_path, capsys) -> None:
+    module = _load_module()
+    module.ERROR_CLASS = RuntimeError
+    record = SimpleNamespace(target_id="demo", state_root=tmp_path / "targets" / "demo")
+    record.state_root.mkdir(parents=True)
+    goal_id = "goal-demo"
+    goal_dir = record.state_root / "goals" / goal_id
+    goal_dir.mkdir(parents=True)
+    (record.state_root / "goals" / "active-goal.json").write_text(
+        json.dumps({"schema_version": 2, "target_id": "demo", "goal_id": goal_id}),
+        encoding="utf-8",
+    )
+    (goal_dir / "progress.json").write_text(
+        json.dumps({"schema_version": 2, "target_id": "demo", "goal_id": goal_id, "tasks": []}),
+        encoding="utf-8",
+    )
+    (goal_dir / "goal.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "target_id": "demo",
+                "goal_id": goal_id,
+                "title": "production chat service",
+                "status": "active",
+                "service_level": "production",
+                "goal_contract": {"product_standard": "production_web"},
+                "completion_gates": [
+                    {"id": "database_persistence", "label": "Remote DB persistence"},
+                    {"id": "production_e2e_smoke", "label": "Production E2E smoke"},
+                ],
+                "completion_gate_evidence": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    module.write_watch_status(
+        record,
+        phase="transaction-published",
+        status="running",
+        selected_backlog_id="BL-demo",
+        transaction_status="merged",
+        next_action="continue watch",
+    )
+
+    payload = json.loads((record.state_root / "watch" / "latest.json").read_text(encoding="utf-8"))
+    markdown = (record.state_root / "watch" / "latest.md").read_text(encoding="utf-8")
+
+    assert payload["active_goal_id"] == goal_id
+    assert payload["goal_gate_status"]["status"] == "pending"
+    assert payload["goal_gate_status"]["pending_count"] > 0
+    assert payload["goal_gate_next_action"].startswith("keep active goal open")
+    assert "database_persistence" in payload["goal_gate_next_action"]
+    assert "## Goal Gates" in markdown
+    assert "database_persistence" in markdown
+    assert "keep active goal open" in markdown
+
+    assert module.print_watch_status(record) == 0
+    output = capsys.readouterr().out
+    assert "- goal gates:" in output
+    assert "database_persistence" in output
+    assert "keep active goal open" in output
+
+
 def test_watch_status_prints_operator_wait_plus_last_transaction(tmp_path, capsys) -> None:
     module = _load_module()
     module.ERROR_CLASS = RuntimeError
@@ -359,6 +423,53 @@ def test_command_run_operator_wait_prevents_repeated_dirty_quarantine(tmp_path, 
     status = json.loads((state_root / "watch" / "latest.json").read_text(encoding="utf-8"))
     assert status["phase"] == "operator-wait"
     assert status["operator_wait_class"] == "dirty-repo-wait"
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_wait_class"),
+    [
+        ("Missing required env VERCEL_PROJECT_ID before production deploy", "setup-wait"),
+        ("OpenAI provider returned 503 temporarily unavailable", "external-wait"),
+        ("App Store Connect team is not configured for store release", "setup-wait"),
+    ],
+)
+def test_transaction_blocker_text_without_incident_wait_class_becomes_operator_wait(
+    tmp_path,
+    message: str,
+    expected_wait_class: str,
+) -> None:
+    module = _load_module()
+    module.ERROR_CLASS = RuntimeError
+    state_root = tmp_path / "targets" / "demo"
+    product = tmp_path / "product"
+    state_root.mkdir(parents=True)
+    product.mkdir()
+    record = SimpleNamespace(target_id="demo", repo=product, branch="main", state_root=state_root)
+    runtime = SimpleNamespace(write_watch_status=module.write_watch_status)
+
+    wait = module._handle_transaction_operator_wait(
+        runtime,
+        record,
+        incident_record={
+            "operator_actionable": False,
+            "wait_class": None,
+            "kind": "product-implementation",
+            "reason": "implementation failure should create correction work",
+            "signature": "sig-blocker",
+        },
+        backlog_id="BL-blocked",
+        error=RuntimeError(message),
+        processed_count=0,
+        idle_count=0,
+    )
+
+    assert wait is not None
+    assert wait["wait_class"] == expected_wait_class
+    status = json.loads((state_root / "watch" / "latest.json").read_text(encoding="utf-8"))
+    assert status["phase"] == "operator-wait"
+    assert status["status"] == "operator-wait"
+    assert status["operator_wait_class"] == expected_wait_class
+    assert status["transaction_status"] != "completed"
 
 
 def test_command_run_bounded_watch_stops_after_failed_attempt(tmp_path, capsys) -> None:

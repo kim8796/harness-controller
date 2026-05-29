@@ -79,7 +79,7 @@ def _rev_parse(tmp_path: Path, ref: str = "HEAD") -> str:
     return _git_run(["git", "rev-parse", ref], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
 
 
-def test_external_product_prompt_includes_attachment_budget(tmp_path: Path) -> None:
+def test_external_product_prompt_allows_goal_spec_and_visual_evidence(tmp_path: Path) -> None:
     module = _load_module()
     context = module.AutonomyRootContext(
         mode="external",
@@ -101,18 +101,17 @@ def test_external_product_prompt_includes_attachment_budget(tmp_path: Path) -> N
         backlog_text="\n".join(
             [
                 "## Notes",
-                "- Goal-Attachment: goals/goal-1/attachments/image-01.png (image/png)",
-                "- Goal-Attachment: goals/goal-1/attachments/image-02.png (image/png)",
-                "- Goal-Attachment: goals/goal-1/attachments/image-03.png (image/png)",
-                "- Goal-Attachment-Omitted: 9 more attachments; use backlog Summary/Acceptance and listed captions only.",
+                "- Goal-Spec-Path: goals/goal-1/inputs/goal-spec.md",
+                "- Goal-Attachment-Manifest: goals/goal-1/attachments/attachment-manifest.json",
             ]
         ),
     )
 
-    assert "Do not open full goal spec files during implementation" in prompt
-    assert "Do not call `view_image`, screenshot, or other image-opening tools during implementation runs" in prompt
-    assert "Use listed captions and attachment filenames as visual direction" in prompt
-    assert "inspect at most 3 representative attachments with default/resized detail" in prompt
+    assert "Do not open full goal spec files during implementation" not in prompt
+    assert "Do not call `view_image`, screenshot, or other image-opening tools during implementation runs" not in prompt
+    assert "goals/goal-1/inputs/goal-spec.md" in prompt
+    assert "goals/goal-1/attachments/attachment-manifest.json" in prompt
+    assert "Inspect the full goal spec and attachment manifest when the backlog references them" in prompt
 
 
 def test_external_rootcontext_run_once_writes_sidecar_only(tmp_path: Path, capsys) -> None:
@@ -1591,12 +1590,54 @@ def _write_paused_goal_state_doc(
     )
 
 
-def _write_active_complete_goal_state_doc(root: Path) -> None:
+def _write_active_complete_goal_state_doc(root: Path, *, prototype_only: bool = False) -> None:
+    title = "로컬 프로토타입만 Mini App" if prototype_only else "Mini App"
+    _write_goals_doc(
+        root,
+        f"""# Harness Goals
+
+## Goal: {title}
+
+- Goal ID: MINIAPP1
+- Status: active
+- Priority: P0
+
+```json goal_state
+{{
+  "status": "active",
+  "last_state_change": "2026-04-21T00:00:00"
+}}
+```
+
+### Success Signals
+
+- {"로컬 프로토타입만 완료한다." if prototype_only else "Candidate backlog is complete."}
+
+### Candidate Backlog Links
+
+- `backlog/completed/goal-item.md`
+""",
+    )
+    _write_backlog_item(
+        root,
+        "backlog/completed/goal-item.md",
+        ID="BL-GOAL-001",
+        Title="Goal item",
+        Status="completed",
+        Priority="P0",
+        Goal="MINIAPP1",
+        Created="2026-04-21",
+        Updated="2026-04-21",
+        **{"Autonomy-Execute": "auto"},
+    )
+
+
+def _write_active_complete_production_goal_state_doc(root: Path) -> None:
     _write_goals_doc(
         root,
         """# Harness Goals
 
-## Goal: Mini App
+## Goal: 배포 가능한 production chat service
 
 - Goal ID: MINIAPP1
 - Status: active
@@ -1608,6 +1649,10 @@ def _write_active_complete_goal_state_doc(root: Path) -> None:
   "last_state_change": "2026-04-21T00:00:00"
 }
 ```
+
+### Success Signals
+
+- Vercel production URL works with Supabase DB persistence and auth.
 
 ### Candidate Backlog Links
 
@@ -10475,7 +10520,7 @@ def test_apply_state_proposal_updates_goal_and_writes_receipt(tmp_path: Path) ->
 def test_apply_state_proposal_completes_goal_with_closeout_evidence(tmp_path: Path) -> None:
     module = _load_module()
     _write_policy_doc(tmp_path)
-    _write_active_complete_goal_state_doc(tmp_path)
+    _write_active_complete_goal_state_doc(tmp_path, prototype_only=True)
     summary = module.discover_goal_progress_summaries_for_root(tmp_path)[0]
 
     run_dir, _proposal_uid = _completed_state_proposal_run(
@@ -10520,10 +10565,136 @@ def test_apply_state_proposal_completes_goal_with_closeout_evidence(tmp_path: Pa
     assert '"status": "completed"' in goals_text
 
 
+def test_apply_state_proposal_rejects_production_goal_complete_without_gate_evidence(tmp_path: Path) -> None:
+    module = _load_module()
+    _write_policy_doc(tmp_path)
+    _write_active_complete_production_goal_state_doc(tmp_path)
+    summary = module.discover_goal_progress_summaries_for_root(tmp_path)[0]
+
+    run_dir, _proposal_uid = _completed_state_proposal_run(
+        module,
+        tmp_path,
+        "20260422-production-goal-complete-apply",
+        proposal_id=module.goal_complete_proposal_id(summary),
+        base_state={"status": "active"},
+        target_state={"status": "completed"},
+        completion_evidence=module.goal_complete_completion_evidence(summary),
+        goal_closeout_key=module.goal_complete_closeout_key(summary),
+        incident_refs=["goal-complete:MINIAPP1"],
+        rationale="All linked candidate backlog items are completed.",
+        rollback_condition="Reopen only through a new state proposal or a new goal/follow-up backlog.",
+    )
+
+    with pytest.raises(module.policy.PolicyError, match="goal-gate-verification"):
+        module.policy.apply_state_proposal(
+            tmp_path,
+            proposal_id=module.goal_complete_proposal_id(summary),
+            task_id=run_dir.name,
+            run_dir=run_dir,
+            workspace_root=tmp_path,
+        )
+
+
+def test_finalize_state_proposal_rejects_legacy_pending_production_goal_complete(tmp_path: Path) -> None:
+    module = _load_module()
+    _write_policy_doc(tmp_path)
+    _write_active_complete_production_goal_state_doc(tmp_path)
+    summary = module.discover_goal_progress_summaries_for_root(tmp_path)[0]
+    run_dir, proposal_uid = _completed_state_proposal_run(
+        module,
+        tmp_path,
+        "20260422-production-goal-complete-finalize",
+        proposal_id=module.goal_complete_proposal_id(summary),
+        base_state={"status": "active"},
+        target_state={"status": "completed"},
+        completion_evidence=module.goal_complete_completion_evidence(summary),
+        goal_closeout_key=module.goal_complete_closeout_key(summary),
+        incident_refs=["goal-complete:MINIAPP1"],
+        rationale="All linked candidate backlog items are completed.",
+        rollback_condition="Reopen only through a new state proposal or a new goal/follow-up backlog.",
+    )
+    module.write_json(
+        run_dir / "state-apply-receipt.pending.json",
+        {
+            "proposal_uid": proposal_uid,
+            "proposal_id": module.goal_complete_proposal_id(summary),
+            "task_id": run_dir.name,
+            "workspace_key": "repo-root",
+            "workspace_root": str(tmp_path),
+            "entity_type": "goal",
+            "entity_id": "MINIAPP1",
+            "mutation_kind": "goal-status-change",
+            "approval_class": "auto-veto",
+            "target_state_expected": {"status": "active"},
+            "state_after_apply": {"status": "active"},
+            "target_paths": ["docs/harness/GOALS.md"],
+            "latest_state_change": "goal-status-change:goal:MINIAPP1",
+        },
+    )
+
+    with pytest.raises(module.policy.PolicyError, match="goal-gate-verification"):
+        module.policy.finalize_state_proposal_apply(
+            tmp_path,
+            proposal_id=module.goal_complete_proposal_id(summary),
+            task_id=run_dir.name,
+            run_dir=run_dir,
+            workspace_root=tmp_path,
+        )
+
+
+def test_finalize_state_proposal_rejects_shapeless_legacy_production_goal_complete(tmp_path: Path) -> None:
+    module = _load_module()
+    _write_policy_doc(tmp_path)
+    _write_active_complete_production_goal_state_doc(tmp_path)
+    run_dir, proposal_uid = _completed_state_proposal_run(
+        module,
+        tmp_path,
+        "20260422-production-shapeless-goal-complete-finalize",
+        proposal_id="legacy-shapeless-goal-complete",
+        base_state={"status": "active"},
+        target_state={"status": "completed"},
+        incident_refs=["goal-complete:MINIAPP1"],
+        rationale="Legacy closeout without completion evidence.",
+        rollback_condition="No-op.",
+    )
+    goals_text = (tmp_path / "docs" / "harness" / "GOALS.md").read_text(encoding="utf-8")
+    (tmp_path / "docs" / "harness" / "GOALS.md").write_text(
+        goals_text.replace("- Status: active", "- Status: completed").replace('"status": "active"', '"status": "completed"'),
+        encoding="utf-8",
+    )
+    module.write_json(
+        run_dir / "state-apply-receipt.pending.json",
+        {
+            "proposal_uid": proposal_uid,
+            "proposal_id": "legacy-shapeless-goal-complete",
+            "task_id": run_dir.name,
+            "workspace_key": "repo-root",
+            "workspace_root": str(tmp_path),
+            "entity_type": "goal",
+            "entity_id": "MINIAPP1",
+            "mutation_kind": "goal-status-change",
+            "approval_class": "auto-veto",
+            "target_state_expected": {"status": "completed"},
+            "state_after_apply": {"status": "completed"},
+            "target_paths": ["docs/harness/GOALS.md"],
+            "latest_state_change": "goal-status-change:goal:MINIAPP1",
+        },
+    )
+
+    with pytest.raises(module.policy.PolicyError, match="goal-gate-verification"):
+        module.policy.finalize_state_proposal_apply(
+            tmp_path,
+            proposal_id="legacy-shapeless-goal-complete",
+            task_id=run_dir.name,
+            run_dir=run_dir,
+            workspace_root=tmp_path,
+        )
+
+
 def test_apply_state_proposal_rejects_stale_goal_complete_evidence(tmp_path: Path) -> None:
     module = _load_module()
     _write_policy_doc(tmp_path)
-    _write_active_complete_goal_state_doc(tmp_path)
+    _write_active_complete_goal_state_doc(tmp_path, prototype_only=True)
     summary = module.discover_goal_progress_summaries_for_root(tmp_path)[0]
 
     run_dir, _proposal_uid = _completed_state_proposal_run(
@@ -10558,7 +10729,7 @@ def test_apply_state_proposal_rejects_stale_goal_complete_evidence(tmp_path: Pat
 def test_apply_state_proposal_rejects_unlisted_open_goal_backlog(tmp_path: Path) -> None:
     module = _load_module()
     _write_policy_doc(tmp_path)
-    _write_active_complete_goal_state_doc(tmp_path)
+    _write_active_complete_goal_state_doc(tmp_path, prototype_only=True)
     summary = module.discover_goal_progress_summaries_for_root(tmp_path)[0]
 
     run_dir, _proposal_uid = _completed_state_proposal_run(
