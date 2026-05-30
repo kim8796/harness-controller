@@ -689,6 +689,8 @@ def _collect_completion_gate_evidence(
             continue
         if str(payload.get("operation") or "") != harness_goal_gates.REQUIRED_GATE_OPERATION:
             continue
+        if str(payload.get("receipt_schema_version") or "") != str(harness_goal_gates.GOAL_GATE_RECEIPT_SCHEMA_VERSION):
+            continue
         if str(payload.get("target_id") or "") != target_id:
             continue
         if str(payload.get("goal_id") or "") != goal_id:
@@ -1663,6 +1665,7 @@ def _expected_evidence_for_gate_ids(
             "gate_id": normalized_gate_id,
             "label": str(gate.get("label") or normalized_gate_id),
             "operation": harness_goal_gates.REQUIRED_GATE_OPERATION,
+            "receipt_schema_version": harness_goal_gates.GOAL_GATE_RECEIPT_SCHEMA_VERSION,
             "source": "runs/harness/**/generated-evidence.json",
         }
         for key in ("environment", "evidence_kind", "validator"):
@@ -2279,7 +2282,9 @@ def refill_goal_tasks(
                 "acceptance": [
                     "각 pending gate는 실제 production/remote/provider/native/store 경로로 검증된다.",
                     *[f"Product audit blocker를 해결한다: {summary}" for summary in audit_summaries],
-                    f"`operation={harness_goal_gates.REQUIRED_GATE_OPERATION}` generated-evidence.json이 생성된다.",
+                    f"`operation={harness_goal_gates.REQUIRED_GATE_OPERATION}` 및 "
+                    f"`receipt_schema_version={harness_goal_gates.GOAL_GATE_RECEIPT_SCHEMA_VERSION}` "
+                    "generated-evidence.json이 생성된다.",
                     "localStorage, seed, mock, README-only, screenshot-only 증거는 사용하지 않는다.",
                     "credential/env/provider/store 권한이 없으면 completed가 아니라 operator-wait 또는 blocker evidence로 남긴다.",
                 ],

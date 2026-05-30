@@ -239,7 +239,9 @@ def test_production_roadmap_tasks_are_gate_derived_and_traceable(tmp_path: Path)
         assert "gate_ids" in task
         assert "expected_evidence" in task
         for gate_id in task["gate_ids"]:
-            assert any(item["gate_id"] == gate_id for item in task["expected_evidence"])
+            expected = next(item for item in task["expected_evidence"] if item["gate_id"] == gate_id)
+            assert expected["operation"] == "goal-gate-verification"
+            assert expected["receipt_schema_version"] == 2
 
 
 def test_goal_service_level_prototype_requires_explicit_local_or_mvp_language(tmp_path: Path) -> None:
@@ -475,6 +477,7 @@ def test_production_goal_completes_after_gate_evidence_and_publication(tmp_path:
         json.dumps(
             {
                 "operation": "goal-gate-verification",
+                "receipt_schema_version": 2,
                 "applied": True,
                 "target_id": "chatapp",
                 "goal_id": goal.goal_id,
@@ -494,6 +497,10 @@ def test_production_goal_completes_after_gate_evidence_and_publication(tmp_path:
     assert payload["status"] == "completed"
     assert payload["completion_gate_status"]["status"] == "passed"
     assert payload["completion_gate_status"]["pending_gate_ids"] == []
+    assert {
+        (entry.get("receipt_schema_version"), entry.get("operation"))
+        for entry in payload["completion_gate_evidence"].values()
+    } == {(2, "goal-gate-verification")}
     assert not (state_root / "goals" / "active-goal.json").exists()
 
 
@@ -523,6 +530,7 @@ def test_production_goal_stays_active_without_registered_product_repo_for_audit(
         json.dumps(
             {
                 "operation": "goal-gate-verification",
+                "receipt_schema_version": 2,
                 "applied": True,
                 "target_id": "chatapp",
                 "goal_id": goal.goal_id,
@@ -588,6 +596,7 @@ def test_stale_gate_receipts_do_not_complete_after_product_head_changes(tmp_path
         json.dumps(
             {
                 "operation": "goal-gate-verification",
+                "receipt_schema_version": 2,
                 "applied": True,
                 "target_id": "chatapp",
                 "goal_id": goal.goal_id,
@@ -646,6 +655,7 @@ def test_product_audit_failed_gates_keep_production_goal_active(tmp_path: Path) 
         json.dumps(
             {
                 "operation": "goal-gate-verification",
+                "receipt_schema_version": 2,
                 "applied": True,
                 "target_id": "chatapp",
                 "goal_id": goal.goal_id,
@@ -736,6 +746,209 @@ def test_old_gate_operation_does_not_complete_production_goal(tmp_path: Path) ->
     refreshed = json.loads(goal.goal_json.read_text(encoding="utf-8"))
     assert refreshed["status"] == "active"
     assert refreshed["completion_gate_status"]["status"] == "pending"
+
+
+def test_pr_publication_and_merge_receipts_do_not_count_as_goal_gate_evidence(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="배포 가능한 실시간 AI 채팅 서비스 production Vercel Supabase DB 인증 OpenAI",
+    )
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    progress["tasks"] = [{"task_key": "task-01", "backlog_id": "BL-01"}]
+    goal.progress_json.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
+    completed = state_root / "backlog" / "completed"
+    completed.mkdir(parents=True)
+    (completed / "BL-01.md").write_text(
+        "\n".join(["ID: BL-01", "Status: completed", f"Goal: {goal.goal_id}", ""]),
+        encoding="utf-8",
+    )
+    for run_id, operation, status in (
+        ("external-pr", "backlog-product-pr", "created"),
+        ("external-pr-merge", "backlog-product-pr-merge", "merged"),
+    ):
+        receipt_dir = state_root / "runs" / "harness" / run_id
+        receipt_dir.mkdir(parents=True)
+        (receipt_dir / "generated-evidence.json").write_text(
+            json.dumps(
+                {
+                    "operation": operation,
+                    "applied": True,
+                    "target_id": "chatapp",
+                    "goal_id": goal.goal_id,
+                    "status": status,
+                    "completion_gates": [_gate_evidence_entry(gate["id"]) for gate in payload["completion_gates"]],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+    allowed_gate_ids = {gate["id"] for gate in payload["completion_gates"]}
+    assert module._collect_completion_gate_evidence(  # noqa: SLF001
+        state_root=state_root,
+        target_id="chatapp",
+        goal_id=goal.goal_id,
+        allowed_gate_ids=allowed_gate_ids,
+    ) == {}
+
+    module.refresh_progress(state_root=state_root, goal=goal)
+
+    refreshed = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    assert refreshed["status"] == "active"
+    assert refreshed["completion_gate_evidence"] == {}
+
+
+def test_missing_or_wrong_schema_goal_gate_receipts_are_ignored(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="배포 가능한 실시간 AI 채팅 서비스 production Vercel Supabase DB 인증 OpenAI",
+    )
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    for run_id, schema_version in (("missing-schema", None), ("wrong-schema", 1)):
+        evidence_dir = state_root / "runs" / "harness" / run_id
+        evidence_dir.mkdir(parents=True)
+        receipt = {
+            "operation": "goal-gate-verification",
+            "applied": True,
+            "target_id": "chatapp",
+            "goal_id": goal.goal_id,
+            "product_commit_sha": "abc1234",
+            "environment": "production",
+            "checked_at": "2026-05-29T00:00:00Z",
+            "completion_gates": [_gate_evidence_entry(gate["id"]) for gate in payload["completion_gates"]],
+        }
+        if schema_version is not None:
+            receipt["receipt_schema_version"] = schema_version
+        (evidence_dir / "generated-evidence.json").write_text(json.dumps(receipt, ensure_ascii=False), encoding="utf-8")
+
+    allowed_gate_ids = {gate["id"] for gate in payload["completion_gates"]}
+    assert module._collect_completion_gate_evidence(  # noqa: SLF001
+        state_root=state_root,
+        target_id="chatapp",
+        goal_id=goal.goal_id,
+        allowed_gate_ids=allowed_gate_ids,
+    ) == {}
+
+
+def test_wrong_target_or_goal_gate_receipts_are_ignored(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="배포 가능한 실시간 AI 채팅 서비스 production Vercel Supabase DB 인증 OpenAI",
+    )
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    completed = state_root / "backlog" / "completed"
+    completed.mkdir(parents=True)
+    progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    progress["tasks"] = [{"task_key": "task-01", "backlog_id": "BL-01"}]
+    goal.progress_json.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
+    (completed / "BL-01.md").write_text(
+        "\n".join(["ID: BL-01", "Status: completed", f"Goal: {goal.goal_id}", ""]),
+        encoding="utf-8",
+    )
+    for run_id, target_id, goal_id in (
+        ("wrong-target", "other-target", goal.goal_id),
+        ("wrong-goal", "chatapp", "goal-other"),
+    ):
+        evidence_dir = state_root / "runs" / "harness" / run_id
+        evidence_dir.mkdir(parents=True)
+        (evidence_dir / "generated-evidence.json").write_text(
+            json.dumps(
+                {
+                    "operation": "goal-gate-verification",
+                    "receipt_schema_version": 2,
+                    "applied": True,
+                    "target_id": target_id,
+                    "goal_id": goal_id,
+                    "product_commit_sha": "abc1234",
+                    "environment": "production",
+                    "checked_at": "2026-05-29T00:00:00Z",
+                    "completion_gates": [_gate_evidence_entry(gate["id"]) for gate in payload["completion_gates"]],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+    allowed_gate_ids = {gate["id"] for gate in payload["completion_gates"]}
+    assert module._collect_completion_gate_evidence(  # noqa: SLF001
+        state_root=state_root,
+        target_id="chatapp",
+        goal_id=goal.goal_id,
+        allowed_gate_ids=allowed_gate_ids,
+    ) == {}
+
+    module.refresh_progress(state_root=state_root, goal=goal)
+
+    refreshed = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    assert refreshed["status"] == "active"
+    assert refreshed["completion_gate_evidence"] == {}
+
+
+def test_blocked_and_failed_gate_receipts_do_not_complete_production_goal(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="배포 가능한 실시간 AI 채팅 서비스 production Vercel Supabase DB 인증 OpenAI",
+    )
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    completed = state_root / "backlog" / "completed"
+    completed.mkdir(parents=True)
+    progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    progress["tasks"] = [{"task_key": "task-01", "backlog_id": "BL-01"}]
+    goal.progress_json.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
+    (completed / "BL-01.md").write_text(
+        "\n".join(["ID: BL-01", "Status: completed", f"Goal: {goal.goal_id}", ""]),
+        encoding="utf-8",
+    )
+    evidence_dir = state_root / "runs" / "harness" / "external-blocked-gates"
+    evidence_dir.mkdir(parents=True)
+    gates = [
+        dict(_gate_evidence_entry(gate["id"]), status="blocked" if index % 2 else "failed")
+        for index, gate in enumerate(payload["completion_gates"], start=1)
+    ]
+    (evidence_dir / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "operation": "goal-gate-verification",
+                "receipt_schema_version": 2,
+                "applied": True,
+                "target_id": "chatapp",
+                "goal_id": goal.goal_id,
+                "product_commit_sha": "abc1234",
+                "environment": "production",
+                "checked_at": "2026-05-29T00:00:00Z",
+                "completion_gates": gates,
+            },
+            ensure_ascii=False,
+        ),
+            encoding="utf-8",
+        )
+
+    allowed_gate_ids = {gate["id"] for gate in payload["completion_gates"]}
+    assert module._collect_completion_gate_evidence(  # noqa: SLF001
+        state_root=state_root,
+        target_id="chatapp",
+        goal_id=goal.goal_id,
+        allowed_gate_ids=allowed_gate_ids,
+    ) == {}
+
+    module.refresh_progress(state_root=state_root, goal=goal)
+
+    refreshed = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    assert refreshed["status"] == "active"
+    assert refreshed["completion_gate_evidence"] == {}
 
 
 def test_goal_spec_draft_uses_operator_language(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1370,6 +1583,7 @@ def test_goal_refill_creates_gate_verification_task_when_production_gates_remain
     assert queued
     body = queued[0].read_text(encoding="utf-8")
     assert "Goal-Gate-Evidence-Operation: goal-gate-verification" in body
+    assert "receipt_schema_version=2" in body
 
 
 def test_goal_refresh_progress_removes_active_pointer_when_completed(tmp_path: Path) -> None:
