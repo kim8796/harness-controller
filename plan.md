@@ -1,36 +1,30 @@
-# Goal From Relative Paths Correction Plan
+# Capability Provider Registry Introduction Plan
 
-Diet-Exception: scripts/harness_cli.py goal-from resolver and tests/test_harness_cli.py regression coverage require temporary growth before planned CLI test diet split.
+Diet-Exception: scripts/harness_capability_registry.py and registry tests add focused capability/provider metadata before later setup-pack migration.
 
 Goal:
-- Make `./harness goal from goal-spec.md screenshots/` work without absolute paths when a target is installed.
-- Keep the change scoped to PR 1 of the provider/goal UX roadmap.
+- Introduce a controller-owned capability/provider registry without changing existing goal, gate, or setup readiness behavior.
+- Keep this scoped to PR 2 of the provider/goal UX roadmap.
 
 Behavior:
-- Absolute paths and `~` paths keep their existing direct resolution.
-- Relative paths are resolved by checking, in order:
-  1. current working directory
-  2. selected target product repo root
-  3. selected target sidecar root
-  4. controller root
-- `--target <id>` uses that target's product/state roots.
-- Missing paths fail with an error listing the checked base directories.
-- Resolved inputs are still copied into the controller sidecar goal folder.
-- Product repos are never modified.
+- Add stable capability ids for deployment, auth, db persistence, realtime, storage, AI, moderation, native, store release, and maintainability handoff.
+- Add provider pack metadata for Vercel, Supabase, OpenAI, Apple, Google Play, and Store.
+- Existing `harness_goal_contract`, `harness_goal_gates`, and `harness_product_setup_readiness` outputs must remain compatible.
+- Registry output must be secret-free and deterministic.
 
 Implementation:
-- Add target-aware path resolution helpers in `scripts/harness_cli.py`.
-- Resolve `goal from` source and image/attachment paths after target selection.
-- Keep `harness_goal.py` validation unchanged for symlink, image, directory, size, and caption rules.
-- Update beginner/help examples only where needed for the shorter relative-path workflow.
+- Add `scripts/harness_capability_registry.py`.
+- Add tests in `tests/test_harness_capability_registry.py`.
+- Include the new module/test in export and controller release-check lists.
+- Do not migrate setup readiness yet; this PR only creates the source of truth and parity tests.
 
 Tests:
-- Add CLI tests for target-repo-relative spec and image directory lookup from controller cwd.
-- Add CLI tests for selected `--target` lookup.
-- Add CLI test for missing relative path error with checked base directories.
-- Keep existing goal attachment and safety tests passing.
+- Registry exposes the expected capability and provider ids.
+- Existing production/native gate ids are mapped by at least one capability.
+- Existing setup readiness providers are present in provider packs.
+- Metadata contains no secret-like values.
+- Controller export includes the new module and tests.
 
 Verification:
-- `python3 -m pytest tests/test_harness_cli.py::test_goal_from_cli_resolves_relative_paths_from_default_target_repo tests/test_harness_cli.py::test_goal_from_cli_resolves_relative_paths_from_selected_target tests/test_harness_cli.py::test_goal_from_cli_missing_relative_path_reports_search_bases tests/test_harness_cli.py::test_goal_from_cli_accepts_positional_files_and_directories tests/test_harness_cli.py::test_goal_from_cli_accepts_multi_value_image_option -q`
-- `python3 -m pytest tests/test_harness_cli.py tests/test_harness_goal.py tests/test_harness_export.py -q`
+- `python3 -m pytest tests/test_harness_capability_registry.py tests/test_harness_goal_contract.py tests/test_harness_goal_gates.py tests/test_harness_product_setup_readiness.py tests/test_harness_export.py tests/test_harness_cli.py -q`
 - `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`

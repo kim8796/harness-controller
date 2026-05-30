@@ -22,6 +22,7 @@ def _load_module():
 def test_controller_release_check_and_ci_cover_goal_gate_surfaces() -> None:
     module = _load_module()
     expected_ruff_paths = {
+        "scripts/harness_capability_registry.py",
         "scripts/harness_controller_sanitization.py",
         "scripts/harness_fleet.py",
         "scripts/harness_goal.py",
@@ -32,6 +33,7 @@ def test_controller_release_check_and_ci_cover_goal_gate_surfaces() -> None:
         "scripts/harness_product_audit_support.py",
         "scripts/harness_product_setup_readiness.py",
         "scripts/harness_release.py",
+        "tests/test_harness_capability_registry.py",
         "tests/test_harness_controller_sanitization.py",
         "tests/test_harness_fleet.py",
         "tests/test_harness_goal.py",
@@ -44,6 +46,7 @@ def test_controller_release_check_and_ci_cover_goal_gate_surfaces() -> None:
         "tests/test_harness_release.py",
     }
     expected_pytest_paths = {
+        "tests/test_harness_capability_registry.py",
         "tests/test_harness_controller_sanitization.py",
         "tests/test_harness_fleet.py",
         "tests/test_harness_goal.py",
