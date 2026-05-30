@@ -71,6 +71,7 @@ RUN_BLOCKER_EXPLANATIONS_KO = {
 CONTROLLER_RELEASE_CHECK_RUFF_PATHS = (
     "scripts/harness_autonomy.py",
     "scripts/harness_autonomy/core.py",
+    "scripts/harness_capability_registry.py",
     "scripts/harness_cli.py",
     "scripts/harness_controller.py",
     "scripts/harness_controller_sanitization.py",
@@ -100,6 +101,7 @@ CONTROLLER_RELEASE_CHECK_RUFF_PATHS = (
     "scripts/harness_watch.py",
     "scripts/harness_autonomy/relay.py",
     "tests/test_harness_autonomy.py",
+    "tests/test_harness_capability_registry.py",
     "tests/test_harness_cli.py",
     "tests/test_harness_controller.py",
     "tests/test_harness_controller_sanitization.py",
@@ -130,6 +132,7 @@ CONTROLLER_RELEASE_CHECK_RUFF_PATHS = (
 )
 CONTROLLER_RELEASE_CHECK_PYTEST_PATHS = (
     "tests/test_harness_autonomy.py",
+    "tests/test_harness_capability_registry.py",
     "tests/test_harness_cli.py",
     "tests/test_harness_controller.py",
     "tests/test_harness_controller_sanitization.py",

@@ -125,6 +125,9 @@ def test_export_bundle_copies_sources_and_writes_readme(tmp_path: Path) -> None:
         "scripts/harness_cleanup.py\n"
     )
     assert (bundle_dir / "scripts" / "harness_cli.py").read_text(encoding="utf-8") == "scripts/harness_cli.py\n"
+    assert (bundle_dir / "scripts" / "harness_capability_registry.py").read_text(encoding="utf-8") == (
+        "scripts/harness_capability_registry.py\n"
+    )
     assert (bundle_dir / "scripts" / "harness_fleet.py").read_text(encoding="utf-8") == (
         "scripts/harness_fleet.py\n"
     )
@@ -150,6 +153,9 @@ def test_export_bundle_copies_sources_and_writes_readme(tmp_path: Path) -> None:
         "docs/harness/MODULE_MAP.md\n"
     )
     assert Path("docs/harness/MODULE_MAP.md") in module.STARTER_SURFACE_SANITIZED_FILES
+    assert (bundle_dir / "tests" / "test_harness_capability_registry.py").read_text(encoding="utf-8") == (
+        "tests/test_harness_capability_registry.py\n"
+    )
     assert (bundle_dir / "tests" / "test_harness_goal_contract.py").read_text(encoding="utf-8") == (
         "tests/test_harness_goal_contract.py\n"
     )
@@ -492,6 +498,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "scripts" / "harness_task_intake.py").exists()
     assert (bundle / "scripts" / "harness_goal.py").exists()
     assert (bundle / "scripts" / "harness_goal_contract.py").exists()
+    assert (bundle / "scripts" / "harness_capability_registry.py").exists()
     assert (bundle / "scripts" / "harness_goal_gates.py").exists()
     assert (bundle / "scripts" / "harness_fleet.py").exists()
     assert (bundle / "scripts" / "harness_product_audit.py").exists()
@@ -503,6 +510,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "scripts" / "harness_incident.py").exists()
     assert (bundle / "tests" / "test_harness_task_intake.py").exists()
     assert (bundle / "tests" / "test_harness_goal.py").exists()
+    assert (bundle / "tests" / "test_harness_capability_registry.py").exists()
     assert (bundle / "tests" / "test_harness_goal_contract.py").exists()
     assert (bundle / "tests" / "test_harness_goal_gates.py").exists()
     assert (bundle / "tests" / "test_harness_fleet.py").exists()
