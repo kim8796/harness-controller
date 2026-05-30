@@ -24,6 +24,7 @@ NATIVE_PRODUCTION_GATES: tuple[dict[str, str], ...] = (
 )
 
 REQUIRED_GATE_OPERATION = "goal-gate-verification"
+GOAL_GATE_RECEIPT_SCHEMA_VERSION = 2
 REJECTED_EVIDENCE_HINTS = re.compile(
     r"(?i)(localhost|127\.0\.0\.1|\[::1\]|file://|local\s*storage|localStorage|"
     r"\blocal\b|local[-\s]*(?:browser|proof|smoke|evidence|run|test)|"
@@ -168,6 +169,8 @@ def normalize_gate_evidence_entry(
     if not evidence_has_gate_specific_signal(normalized_gate_id, joined_text):
         return None
     return {
+        "receipt_schema_version": GOAL_GATE_RECEIPT_SCHEMA_VERSION,
+        "operation": REQUIRED_GATE_OPERATION,
         "status": "passed",
         "source": source_path,
         "evidence": evidence_text[:300],

@@ -1,44 +1,44 @@
-# Provider-Neutral Goal Contract Plan
+# Goal Gate Receipt v2 Implementation Plan
 
-Diet-Exception: provider decision metadata adds focused tests and schema fields before gate verifier/watch refill migration.
+Diet-Exception: goal gate receipt v2 adds focused schema/test coverage before production verifier runner split.
+
+> For agentic workers: Use superpowers:subagent-driven-development or superpowers:executing-plans. Keep this PR small and test-first.
 
 Goal:
-- Make GoalContract v2 record provider decisions without forcing Vercel/Supabase/OpenAI when the spec names another stack.
-- If the goal spec names a stack/provider, record that source as `spec`.
-- If the spec is silent, use registry defaults as recommendations and mark the source as `recommended`.
-- Do not add a new user command or wizard in this PR.
+- Make goal completion evidence explicitly v2 and keep PR merge evidence separate from goal completion evidence.
 
-Behavior:
-- Existing `service_level`, `product_standard`, `required_capabilities`, and `completion_gates` behavior stays compatible.
-- `goal_contract` adds provider-neutral fields:
-  - `provider_decisions`
-  - `provider_decision_source`
-  - `setup_status`
-  - `setup_suggestions`
-- Provider priority for this PR:
-  1. provider explicitly named in goal text/spec/criteria
-  2. registry default recommendation
-- Explicit examples:
-  - `Next.js + Supabase + OpenAI` records Supabase/OpenAI from `spec`.
-  - `AWS Amplify`, `Firebase`, or `Expo` are recorded from `spec` and do not get overwritten by defaults for matching capabilities.
-  - stack-less production goals still get default recommendations: Vercel, Supabase, OpenAI, Apple/Google Play/store as applicable.
-- Provider metadata must be secret-free.
+Architecture:
+- Existing `harness_goal_gates.normalize_gate_evidence_entry()` already rejects local/mock/README/screenshot evidence and requires product commit, environment, validator, observed result, and checked time.
+- This PR adds explicit receipt schema metadata and tightens tests around status and source behavior.
+- It does not add a production gate runner yet.
 
 Implementation:
-- Extend `scripts/harness_capability_registry.py` with provider aliases/keywords and provider detection helpers.
-- Extend `scripts/harness_goal_contract.py` to resolve providers for required capabilities.
-- Keep schema add-only and preserve existing gate/classification behavior.
-- Add focused tests in `tests/test_harness_goal_contract.py` and `tests/test_harness_capability_registry.py`.
+- Modify `scripts/harness_goal_gates.py`.
+  - Add a public `GOAL_GATE_RECEIPT_SCHEMA_VERSION = 2`.
+  - Accepted normalized entries include `receipt_schema_version: 2` and `operation: goal-gate-verification`.
+  - `blocked` and `failed` remain non-passing and cannot complete a goal.
+- Modify `scripts/harness_goal.py` only if needed to preserve collected normalized fields.
+- Add tests in `tests/test_harness_goal_gates.py`.
+  - accepted evidence exposes schema version and operation
+  - blocked/failed receipts are rejected
+- Add tests in `tests/test_harness_goal.py`.
+  - wrong target/goal receipts are ignored
+  - PR publication/merge receipts do not count as goal completion
+  - failed/blocked goal-gate receipts do not complete a production goal
+- Keep product repo untouched.
 
 Verification:
-- `python3 -m pytest tests/test_harness_goal_contract.py tests/test_harness_capability_registry.py tests/test_harness_goal.py tests/test_harness_export.py -q`
+- `python3 -m pytest tests/test_harness_goal_gates.py tests/test_harness_goal.py tests/test_harness_export.py -q`
 - `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
 
 Correction 1:
-- Provider detection must not treat broad product words like `store` or
-  `app store` as an explicit provider override.
-- `setup_suggestions` must be actionable. If a selected provider has no setup
-  pack metadata yet, record a provider setup note without claiming existing
-  Vercel/Supabase pack requirements.
-- Product setup readiness must respect `goal_contract.provider_decisions` so
-  explicit Firebase/Expo goals are not reported as missing Vercel/Supabase env.
+- Raw goal-gate receipts must declare `receipt_schema_version: 2`; old or
+  unversioned receipts stay pending.
+- Add direct collector coverage for wrong target/goal, PR publication/merge
+  operations, and blocked/failed gate receipts.
+
+Correction 2:
+- Gate verification task prompts must instruct workers to emit
+  `receipt_schema_version: 2`, otherwise the collector's v2 requirement creates
+  a completion gap.
+- PR publication/merge receipt tests should use realistic publication statuses.

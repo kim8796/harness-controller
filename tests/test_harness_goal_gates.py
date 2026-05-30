@@ -37,6 +37,8 @@ def test_typed_goal_gate_evidence_is_accepted() -> None:
 
     assert entry is not None
     assert entry["status"] == "passed"
+    assert entry["receipt_schema_version"] == 2
+    assert entry["operation"] == "goal-gate-verification"
     assert entry["product_commit_sha"] == "abc1234"
     assert entry["environment"] == "production"
 
@@ -45,6 +47,13 @@ def test_missing_product_commit_is_rejected() -> None:
     module = _load_module()
 
     assert _valid_entry(module, product_commit_sha="") is None
+
+
+def test_blocked_and_failed_gate_receipts_are_not_passing_evidence() -> None:
+    module = _load_module()
+
+    assert _valid_entry(module, status="blocked") is None
+    assert _valid_entry(module, status="failed") is None
 
 
 def test_all_receipt_metadata_fields_are_required() -> None:
