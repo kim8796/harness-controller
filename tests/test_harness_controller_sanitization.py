@@ -61,6 +61,7 @@ def test_controller_sanitization_self_test_covers_goal_gate_product_audit_tests(
         "tests/test_harness_product_audit.py",
         "tests/test_harness_product_maintainability.py",
         "tests/test_harness_product_setup_readiness.py",
+        "tests/test_harness_production_gate_verifier.py",
         "tests/test_harness_release.py",
         "tests/test_harness_watch.py",
     }.issubset(set(module.CONTROLLER_SANITIZATION_SELF_TEST_TARGETS))

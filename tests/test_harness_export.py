@@ -146,6 +146,9 @@ def test_export_bundle_copies_sources_and_writes_readme(tmp_path: Path) -> None:
     assert (bundle_dir / "scripts" / "harness_product_setup_readiness.py").read_text(encoding="utf-8") == (
         "scripts/harness_product_setup_readiness.py\n"
     )
+    assert (bundle_dir / "scripts" / "harness_production_gate_verifier.py").read_text(encoding="utf-8") == (
+        "scripts/harness_production_gate_verifier.py\n"
+    )
     assert (bundle_dir / "scripts" / "harness_release.py").read_text(encoding="utf-8") == (
         "scripts/harness_release.py\n"
     )
@@ -170,6 +173,9 @@ def test_export_bundle_copies_sources_and_writes_readme(tmp_path: Path) -> None:
     )
     assert (bundle_dir / "tests" / "test_harness_product_setup_readiness.py").read_text(encoding="utf-8") == (
         "tests/test_harness_product_setup_readiness.py\n"
+    )
+    assert (bundle_dir / "tests" / "test_harness_production_gate_verifier.py").read_text(encoding="utf-8") == (
+        "tests/test_harness_production_gate_verifier.py\n"
     )
     assert (bundle_dir / "tests" / "test_harness_release.py").read_text(encoding="utf-8") == (
         "tests/test_harness_release.py\n"
@@ -299,6 +305,7 @@ def test_starter_bundle_excludes_live_state_and_can_create_project(tmp_path: Pat
     assert (bundle / "scripts" / "harness_task_cli.py").exists()
     assert (bundle / "scripts" / "harness_watch.py").exists()
     assert (bundle / "scripts" / "harness_operator_wait.py").exists()
+    assert (bundle / "scripts" / "harness_production_gate_verifier.py").exists()
     assert (bundle / "scripts" / "harness_controller.py").exists()
     assert (bundle / "scripts" / "harness_profiles.py").exists()
     assert not (bundle / "requirements.txt").exists()
@@ -380,6 +387,7 @@ def test_starter_bundle_excludes_live_state_and_can_create_project(tmp_path: Pat
     assert (created / "scripts" / "harness_cli.py").exists()
     assert (created / "scripts" / "harness_task_cli.py").exists()
     assert (created / "scripts" / "harness_watch.py").exists()
+    assert (created / "scripts" / "harness_production_gate_verifier.py").exists()
     assert (created / "scripts" / "harness_operator_wait.py").exists()
     assert not (created / ".github" / "workflows" / "harness-controller-ci.yml").exists()
     assert (created / "scripts" / "harness_autonomy" / "relay.py").exists()
@@ -438,6 +446,7 @@ def test_starter_bundle_excludes_live_state_and_can_create_project(tmp_path: Pat
     assert (second_bundle / "scripts" / "harness_task_cli.py").exists()
     assert (second_bundle / "scripts" / "harness_watch.py").exists()
     assert (second_bundle / "scripts" / "harness_operator_wait.py").exists()
+    assert (second_bundle / "scripts" / "harness_production_gate_verifier.py").exists()
     assert (second_bundle / "scripts" / "harness_profiles.py").exists()
 
 
@@ -504,6 +513,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "scripts" / "harness_product_audit.py").exists()
     assert (bundle / "scripts" / "harness_product_audit_support.py").exists()
     assert (bundle / "scripts" / "harness_product_setup_readiness.py").exists()
+    assert (bundle / "scripts" / "harness_production_gate_verifier.py").exists()
     assert (bundle / "scripts" / "harness_publication.py").exists()
     assert (bundle / "scripts" / "harness_release.py").exists()
     assert (bundle / "scripts" / "harness_target_remove.py").exists()
@@ -517,6 +527,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "tests" / "test_harness_product_audit.py").exists()
     assert (bundle / "tests" / "test_harness_product_maintainability.py").exists()
     assert (bundle / "tests" / "test_harness_product_setup_readiness.py").exists()
+    assert (bundle / "tests" / "test_harness_production_gate_verifier.py").exists()
     assert (bundle / "tests" / "test_harness_publication.py").exists()
     assert (bundle / "tests" / "test_harness_release.py").exists()
     assert (bundle / "tests" / "test_harness_target_archive.py").exists()
