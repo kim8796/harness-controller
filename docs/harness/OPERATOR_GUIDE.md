@@ -5,16 +5,16 @@
 ## 기본 흐름
 
 ```bash
-./harness install /path/to/my-app --id my-app --branch main --default
+./harness install /path/to/my-app
 ./harness goal "이 프로젝트를 배포 가능한 완성도 있는 제품으로 만든다"
 ./harness watch
 ```
 
-`install`은 global wrapper 설치가 아니라 product repo를 controller target으로 등록하는 명령이다. global convenience wrapper는 `./harness self install`이다.
+`install`은 global wrapper 설치가 아니라 product repo를 controller target으로 등록하는 명령이다. 첫 유효 target은 자동으로 default가 된다. `--id`, `--branch`, `--default`는 이름이나 branch를 직접 고정해야 할 때만 쓰는 고급 override다. global convenience wrapper는 `./harness self install`이다.
 
 `goal`은 제품 완성 목표를 controller sidecar에 등록한다. `watch`는 Telegram relay, active goal, queued backlog를 계속 감시하는 기본 운영 명령이다. `do`는 한 작업을 즉시 처리하고 싶을 때 쓰는 보조 명령이다.
 
-배포 가능한 서비스 목표는 production goal로 처리된다. 이 경우 하네스는 기본 3개 task로 축소하지 않고 인증, DB, realtime, AI, media, moderation, deploy, E2E smoke, maintainability handoff까지 분해한다. goal 완료는 backlog 완료 개수가 아니라 completion gate evidence 기준이다. localStorage나 seed 데이터만 통과한 화면, mock-only API, README-only checklist, placeholder docs, 깨진 CODEMAP, PR merge receipt는 가짜 성공(fake success)으로 보고 production gate evidence로 인정하지 않는다. provider env나 credential이 없으면 goal을 날리지 않고 operator-wait/readiness 상태로 남긴다.
+배포 가능한 서비스 목표는 production goal로 처리된다. 이 경우 하네스는 기본 3개 task로 축소하지 않고 인증, DB, realtime, AI, media, moderation, deploy, E2E smoke, maintainability handoff까지 분해한다. goal 완료는 backlog 완료 개수가 아니라 completion gate evidence 기준이다. localStorage나 seed 데이터만 통과한 화면, mock-only API, README-only checklist, placeholder docs, 깨진 CODEMAP, PR merge receipt는 가짜 성공(fake success)으로 보고 production gate evidence로 인정하지 않는다. provider env나 credential이 없으면 goal을 날리지 않고 operator-wait/readiness 상태로 남긴다. goal spec에 stack/provider가 있으면 그 선택을 우선하고, 비어 있거나 추천을 요청한 경우에만 기본 provider를 제안한다.
 
 production product는 계속 사람이 운영하거나 AI가 유지보수할 수 있어야 한다. 최소 handoff는 `README.md`, `docs/ARCHITECTURE.md`, `docs/CODEMAP.md`, `docs/OPERATIONS.md`, `docs/TESTING.md`, `.env.example`, `docs/DECISIONS.md` 또는 `docs/ADR.md`다. controller 자체의 책임 경계와 다이어트 기준은 [MODULE_MAP.md](MODULE_MAP.md)를 기준으로 본다.
 
@@ -22,10 +22,10 @@ production product는 계속 사람이 운영하거나 AI가 유지보수할 수
 
 ```bash
 ./harness goal draft "목표 제목"
-./harness goal from <goal-spec.md> screenshots/ --caption "설명"
+./harness goal from goal-spec.md screenshots/
 ```
 
-`goal draft`는 operator 언어 설정이 한국어면 한국어 템플릿, 영어면 영어 템플릿을 만든다. `goal from`은 markdown H1에서 제목을 가져오며, 이미지 파일이나 디렉토리를 뒤에 나열하면 참고 이미지를 controller sidecar에 붙인다. `--caption`은 1개면 모든 이미지에 공통 적용되고, 여러 개면 이미지 순서대로 적용된다. 기존 `--image <file>`도 호환된다. 이미 active goal이 있으면 `--replace`를 붙여 기존 goal을 archive한다.
+`goal draft`는 operator 언어 설정이 한국어면 한국어 템플릿, 영어면 영어 템플릿을 만든다. `goal from`은 markdown H1에서 제목을 가져오며, 이미지 파일이나 디렉토리를 뒤에 나열하면 참고 이미지를 controller sidecar에 붙인다. 상대경로는 현재 위치, 선택된 target product repo, target sidecar, controller root 순서로 찾는다. `--caption`은 필요한 경우에만 쓰며, 1개면 모든 이미지에 공통 적용되고 여러 개면 이미지 순서대로 적용된다. 기존 `--image <file>`도 호환된다. 이미 active goal이 있으면 `--replace`를 붙여 기존 goal을 archive한다.
 
 ## 상태 확인
 
@@ -44,7 +44,7 @@ production product는 계속 사람이 운영하거나 AI가 유지보수할 수
 
 ## Product setup, version, release
 
-production goal이 Vercel, Supabase, OpenAI, native store 같은 provider를 요구하면 하네스는 active goal gate에서 필요한 setup readiness를 계산한다. 이 검사는 product `.env`, shell env, `.env.example`의 key 존재 여부만 보고 값은 출력하지 않는다. 빠진 값은 `watch --status`, `fleet status`, operator-wait, release state에 blocker와 next action으로 표시된다.
+production goal이 Vercel, Supabase, OpenAI, native store 같은 provider를 요구하면 하네스는 active goal gate에서 필요한 setup readiness를 계산한다. goal spec에 stack/provider가 명시되어 있으면 그 provider를 우선하고, 비어 있으면 하네스가 추천 provider를 붙인다. 이 검사는 product `.env`, shell env, `.env.example`의 key 존재 여부만 보고 값은 출력하지 않는다. 빠진 값은 `watch --status`, `fleet status`, operator-wait, release state에 blocker와 next action으로 표시된다.
 
 target의 현재 버전/릴리스 상태는 read-only로 본다.
 
@@ -59,7 +59,7 @@ target의 현재 버전/릴리스 상태는 read-only로 본다.
 ./harness target release my-app --promote
 ```
 
-`--candidate`는 blocker가 없을 때 현재 product commit을 release candidate receipt로 남긴다. `--promote`는 같은 commit의 candidate가 먼저 있어야 production release receipt를 남긴다. pending goal gate, 빠진 provider setup, dirty product repo 같은 blocker가 있으면 둘 다 멈춘다. 둘 다 product repo 파일이나 provider secret을 수정하지 않는다. secret 값은 product `.env`, shell env, Vercel/Supabase/OpenAI 같은 provider secret UI에만 둔다.
+candidate는 blocker가 있어도 중간 기록으로 남길 수 있다. `--candidate` receipt에는 현재 product commit, version, blocker, next action이 같이 기록된다. `--promote`는 같은 commit의 candidate가 먼저 있어야 하며, pending goal gate, 빠진 provider setup, dirty product repo 같은 blocker가 있으면 production release로 승격하지 않는다. 둘 다 product repo 파일이나 provider secret을 수정하지 않는다. secret 값은 product `.env`, shell env, Vercel/Supabase/OpenAI 같은 provider secret UI에만 둔다.
 
 ## 실행
 

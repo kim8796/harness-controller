@@ -23,13 +23,15 @@
 ./harness watch
 ```
 
-짧은 한 줄 목표로 부족하면 먼저 `./harness goal draft "목표 제목"`으로 한국어/영어 locale에 맞는 `goal-spec.md` 템플릿을 만들고, 문서와 이미지를 정리한 뒤 `./harness goal from <goal-spec.md> screenshots/ --caption "설명"`으로 등록한다.
+짧은 한 줄 목표로 부족하면 먼저 `./harness goal draft "목표 제목"`으로 한국어/영어 locale에 맞는 `goal-spec.md` 템플릿을 만들고, 문서와 이미지를 정리한 뒤 `./harness goal from goal-spec.md screenshots/`로 등록한다.
 
-배포/production/DB/인증/AI/실사용자 목표는 production goal로 분류되어 deploy, DB, auth, realtime, AI, media, moderation, E2E smoke evidence가 있어야 완료된다. 명시적으로 목업/프로토타입/로컬만/MVP라고 쓴 경우에만 prototype goal로 처리한다.
+배포/production/DB/인증/AI/실사용자 목표는 production goal로 분류되어 deploy, DB, auth, realtime, AI, media, moderation, E2E smoke evidence가 있어야 완료된다. `MVP`라는 단어만으로 prototype으로 낮추지 않으며, 명시적으로 목업/프로토타입/로컬만이라고 쓴 경우에만 prototype goal로 처리한다.
+
+goal spec에 stack/provider가 있으면 그 선택을 우선한다. 비어 있거나 “추천해줘”처럼 열어 둔 경우에만 하네스가 기본 provider를 추천한다.
 
 한 번만 검증하려면 `./harness watch --max-cycles 1 --no-telegram-drain` 을 쓰고, 상태는 `./harness watch --status` 로 본다.
 
-`watch`는 하네스가 만든 task PR이 준비되면 기본적으로 merge commit 방식으로 자동 머지하고 product repo의 base branch를 fast-forward로 맞춘다. 고급 복구에서 PR 생성까지만 멈추고 싶을 때만 `./harness watch --no-auto-merge`를 쓴다.
+`watch`는 하네스가 만든 task PR이 준비되면 기본적으로 merge commit 방식으로 자동 머지하고 product repo의 base branch를 fast-forward로 맞춘다. PR merge는 진행 증거이며, production goal 완료는 required gate evidence가 있어야 한다. 고급 복구에서 PR 생성까지만 멈추고 싶을 때만 `./harness watch --no-auto-merge`를 쓴다.
 
 `watch`가 사용자가 풀 수 있는 외부 blocker를 만나면 새 명령을 요구하지 않고 controller sidecar의 operator-wait 상태로 표시한다. Secret은 chat에 붙이지 말고 `.env` 또는 provider secret UI에서만 고친 뒤 기존 `watch` 흐름을 재개한다.
 

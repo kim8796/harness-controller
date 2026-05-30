@@ -72,6 +72,8 @@ Telegram/Redis relay를 새 컴퓨터에서 붙일 때는 controller local runti
 
 목표에 배포, production, Vercel, DB, 인증, AI, 실사용자 같은 표현이 들어가면 하네스는 production goal로 분류한다. production goal은 3개 작업으로 끝내지 않고 architecture, auth, database, realtime, AI, media, moderation, deploy, E2E, maintainability handoff 작업을 만들며, PR merge만으로 완료 처리하지 않는다. Vercel URL, DB persistence, auth flow, realtime chat, AI reply, image upload, report/block, production smoke, 유지보수 인수인계 evidence가 모두 있어야 active goal이 completed가 된다. localStorage나 seed 데이터만 통과한 화면, mock-only API, README-only checklist, placeholder 문서, 깨진 CODEMAP은 가짜 성공(fake success)으로 보고 production gate evidence로 인정하지 않는다. `MVP`나 `smoke`라는 단어만으로 prototype으로 낮추지 않으며, 명시적으로 `목업만`, `로컬 데모만`, `프로토타입만`, `local-only`, `no backend`처럼 전체 목표 축소를 요청한 경우에만 prototype goal로 처리한다.
 
+goal spec에 stack/provider가 있으면 그 선택을 우선한다. 예를 들어 Next.js, Supabase, OpenAI, Expo, Capacitor 같은 기술 선택이 명시되어 있으면 wizard가 다시 묻지 않는다. stack이 비어 있거나 추천을 요청한 경우에만 하네스가 기본 provider를 제안한다.
+
 production 목표로 만든 product repo는 사람이든 AI든 이어받아 운영할 수 있어야 한다. 그래서 `README.md`, `docs/ARCHITECTURE.md`, `docs/CODEMAP.md`, `docs/OPERATIONS.md`, `docs/TESTING.md`, `.env.example`, `docs/DECISIONS.md` 또는 `docs/ADR.md`가 필요하다. 어떤 controller 파일이 어떤 책임을 가지는지는 [MODULE_MAP.md](MODULE_MAP.md)에 정리돼 있다.
 
 짧은 goal 문장으로 부족하면 문서 기반 입력을 쓴다.
@@ -79,10 +81,10 @@ production 목표로 만든 product repo는 사람이든 AI든 이어받아 운�
 ```bash
 ./harness goal draft "제품 목표 상세 명세"
 # 생성된 goal-spec.md를 편집한다.
-./harness goal from <goal-spec.md> screenshots/ --caption "설명"
+./harness goal from goal-spec.md screenshots/
 ```
 
-`goal draft` 템플릿은 `HARNESS_LANGUAGE`, `LC_MESSAGES`, `LC_ALL`, `LANG` 값이 `ko*`이면 한국어, `en*`이면 영어로 만들어진다. `goal from`은 markdown H1을 제목으로 쓰고, 명세와 이미지 첨부를 product repo가 아니라 controller sidecar에 복사한다. 이미지 파일이나 이미지가 들어 있는 디렉토리를 뒤에 나열하면 되고, 디렉토리는 바로 아래 이미지 파일만 정렬해서 읽는다. `--caption`은 1개면 모든 이미지에 공통 적용되고, 여러 개면 이미지 순서대로 적용된다. 기존 `--image <file>`도 호환된다. 이미 active goal이 있으면 기존 목표를 archive해야 하므로 `--replace`를 명시한다.
+`goal draft` 템플릿은 `HARNESS_LANGUAGE`, `LC_MESSAGES`, `LC_ALL`, `LANG` 값이 `ko*`이면 한국어, `en*`이면 영어로 만들어진다. `goal from`은 markdown H1을 제목으로 쓰고, 명세와 이미지 첨부를 product repo가 아니라 controller sidecar에 복사한다. 상대경로는 현재 위치, 선택된 target product repo, target sidecar, controller root 순서로 찾는다. 이미지 파일이나 이미지가 들어 있는 디렉토리를 뒤에 나열하면 되고, 디렉토리는 바로 아래 이미지 파일만 정렬해서 읽는다. `--caption`은 필요한 경우에만 쓰며, 1개면 모든 이미지에 공통 적용되고 여러 개면 이미지 순서대로 적용된다. 기존 `--image <file>`도 호환된다. 이미 active goal이 있으면 기존 목표를 archive해야 하므로 `--replace`를 명시한다.
 
 4. 계속 감시하는 loop를 켠다.
 
@@ -90,7 +92,7 @@ production 목표로 만든 product repo는 사람이든 AI든 이어받아 운�
 ./harness watch
 ```
 
-`watch`는 Telegram relay, `/harness task` inbox, active goal, queued auto backlog를 계속 감시한다. backlog가 비면 goal planner가 다시 task를 만들고, 실패한 task는 격리하거나 repair/correction 입력으로 남긴 뒤 가능한 다음 작업을 계속 찾는다. 성공하면 complete, product commit, task branch push, PR publication receipt, 준비된 PR 자동 머지, product base branch fast-forward sync까지 진행한다.
+`watch`는 Telegram relay, `/harness task` inbox, active goal, queued auto backlog를 계속 감시한다. backlog가 비면 goal planner가 다시 task를 만들고, 실패한 task는 격리하거나 repair/correction 입력으로 남긴 뒤 가능한 다음 작업을 계속 찾는다. 성공하면 complete, product commit, task branch push, PR publication receipt, 준비된 PR 자동 머지, product base branch fast-forward sync까지 진행한다. PR merge는 진행 증거이며 production goal 완료는 gate verification receipt가 있어야 한다.
 
 실제 프로젝트에서 한 번만 안전하게 검증하려면 아래처럼 bounded smoke로 시작한다.
 

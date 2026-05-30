@@ -555,8 +555,13 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert no_arg_help.stdout == explicit_help.stdout
     assert "하네스 시작" in no_arg_help.stdout
     assert './harness goal "이 프로젝트를 배포 가능한 완성도 있는 제품으로 만든다"' in no_arg_help.stdout
+    assert "./harness goal from <goal-spec.md> screenshots/" in no_arg_help.stdout
     assert "./harness watch" in no_arg_help.stdout
-    assert "./harness controller audit-size" in no_arg_help.stdout
+    assert "./harness fleet status" in no_arg_help.stdout
+    assert "./harness target remove my-app" in no_arg_help.stdout
+    assert "PR merge만으로 완료하지 않습니다" in no_arg_help.stdout
+    assert "완성도 있는 MVP" not in no_arg_help.stdout
+    assert "./harness controller audit-size" not in no_arg_help.stdout
     assert "./harness target archive plan my-app" not in no_arg_help.stdout
     assert not (bundle / "targets").exists()
     readme = (bundle / "README.md").read_text(encoding="utf-8")
@@ -572,6 +577,9 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "./harness install /path/to/product-repo" in readme
     assert "./harness install /path/to/product-repo --id" not in readme
     assert './harness goal "이 프로젝트를 배포 가능한 완성도 있는 제품으로 만든다"' in readme
+    assert './harness goal "이 프로젝트를 완성도 있는 MVP로 만든다"' not in readme
+    assert "goal spec에 stack/provider가 있으면 그 선택을 우선합니다" in readme
+    assert "PR merge는 진행 증거" in readme
     assert "./harness watch" in readme
     assert "./harness controller audit-size" in readme
     assert '`./harness do "요청"` 은 한 작업을 바로 처리하고 싶을 때' in readme
@@ -616,6 +624,11 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "it is not deployment" in readme
     assert "does not perform automatic remote rollback" in readme
     assert "Harness Controller Adapter" in (bundle / "AGENTS.md").read_text(encoding="utf-8")
+    source_readme = (source / "README.md").read_text(encoding="utf-8")
+    assert './harness goal "이 프로젝트를 배포 가능한 완성도 있는 제품으로 만든다"' in source_readme
+    assert './harness goal "이 프로젝트를 완성도 있는 MVP로 만든다"' not in source_readme
+    assert "goal spec에 stack/provider가 있으면 그 선택을 우선합니다" in source_readme
+    assert "PR merge는 진행 증거" in source_readme
     task_intake_doc = (bundle / "docs" / "harness" / "TASK_INTAKE.md").read_text(encoding="utf-8")
     start_here_doc = (bundle / "docs" / "harness" / "START_HERE.md").read_text(encoding="utf-8")
     operator_doc = (bundle / "docs" / "harness" / "OPERATOR_GUIDE.md").read_text(encoding="utf-8")
@@ -623,7 +636,16 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert "queue --auto`와 `./harness run`은 자연어를 다시 파싱하지 않고" in task_intake_doc
     assert "--ai-response <json>" in task_intake_doc
     assert "./harness watch" in start_here_doc
+    assert "./harness goal from goal-spec.md screenshots/" in start_here_doc
+    assert "goal spec에 stack/provider가 있으면" in start_here_doc
+    assert "PR merge는 진행 증거" in start_here_doc
+    assert "완성도 있는 MVP" not in start_here_doc
     assert "./harness target archive apply my-app --plan <plan.json>" in operator_doc
+    assert "./harness fleet status" in operator_doc
+    assert "./harness target remove my-app" in operator_doc
+    assert "./harness target version my-app" in operator_doc
+    assert "./harness target release my-app --candidate" in operator_doc
+    assert "candidate는 blocker가 있어도 중간 기록으로 남길 수 있다" in operator_doc
     assert "product repo 파일, `.env`, target registry" in operator_doc
     release_1824 = (bundle / "docs" / "harness" / "releases" / "v1.8.24.md").read_text(encoding="utf-8")
     version_doc = (bundle / "docs" / "harness" / "VERSION.md").read_text(encoding="utf-8")
