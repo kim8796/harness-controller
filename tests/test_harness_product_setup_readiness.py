@@ -49,6 +49,11 @@ def test_missing_production_chat_setup_reports_gate_specific_next_actions(tmp_pa
     assert any("Supabase" in action for action in report["next_actions"])
     assert any("OpenAI" in action for action in report["next_actions"])
     assert report["values_redacted"] is True
+    openai_entry = next(entry for entry in report["entries"] if entry["id"] == "openai_runtime")
+    assert openai_entry["provider"] == "openai"
+    assert openai_entry["provider_id"] == "openai"
+    assert openai_entry["capability_id"] == "ai"
+    assert openai_entry["setup_pack_id"] == "openai_runtime"
 
 
 def test_product_env_presence_satisfies_required_provider_groups(tmp_path: Path) -> None:
@@ -97,3 +102,48 @@ def test_env_values_from_process_are_secret_safe_in_report(tmp_path: Path) -> No
     assert report["ok"] is True
     assert "sk-live-secret-value" not in text
     assert "OPENAI_API_KEY" in text
+
+
+def test_duplicate_setup_pack_uses_capability_ids_without_misleading_singular(tmp_path: Path) -> None:
+    module = _load_module()
+    product = tmp_path / "product"
+    product.mkdir()
+
+    report = module.build_setup_readiness_report(
+        product_root=product,
+        goal_payload={"completion_gates": [{"id": "auth_flow"}, {"id": "database_persistence"}]},
+        environ={},
+    )
+
+    entry = next(item for item in report["entries"] if item["id"] == "supabase_browser_client")
+    assert entry["provider_id"] == "supabase"
+    assert entry["setup_pack_id"] == "supabase_browser_client"
+    assert entry["capability_id"] == ""
+    assert entry["capability_ids"] == ["auth", "db_persistence"]
+
+
+def test_native_store_setup_entries_include_pack_metadata(tmp_path: Path) -> None:
+    module = _load_module()
+    product = tmp_path / "product"
+    product.mkdir()
+
+    report = module.build_setup_readiness_report(
+        product_root=product,
+        goal_payload={
+            "completion_gates": [
+                {"id": "ios_native_build"},
+                {"id": "android_native_build"},
+                {"id": "store_release_readiness"},
+            ]
+        },
+        environ={},
+    )
+
+    entries = {entry["id"]: entry for entry in report["entries"]}
+    assert entries["apple_developer"]["provider_id"] == "apple"
+    assert entries["apple_developer"]["capability_id"] == "ios_native"
+    assert entries["google_play_console"]["provider_id"] == "google-play"
+    assert entries["google_play_console"]["capability_id"] == "android_native"
+    assert entries["store_release_metadata"]["provider_id"] == "store"
+    assert entries["store_release_metadata"]["capability_id"] == "store_release"
+    assert entries["store_release_metadata"]["setup_pack_id"] == "store_release_metadata"
