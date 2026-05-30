@@ -1,68 +1,77 @@
-# Production Gate Verifier Runner Implementation Plan
+# Gate-Driven Planner Watch Refill Implementation Plan
 
-Diet-Exception: PR 7 adds one cohesive verifier module plus focused tests because gate verification needs a bounded owner instead of more logic in `harness_goal.py`.
+Diet-Exception: PR 8 wires existing gate-driven planner/watch logic to the new production verifier with focused tests; the change is intentionally narrow.
 
-> For agentic workers: Use superpowers:subagent-driven-development or superpowers:executing-plans. Keep this PR focused on receipt generation and setup-blocked behavior.
+> For agentic workers: Use superpowers:subagent-driven-development or superpowers:executing-plans. Keep this PR focused on pending gate refill and verifier/operator-wait integration.
 
 Goal:
-- Add a production gate verifier runner that creates secret-free `goal-gate-verification` evidence for prepared gates and blocked receipts/operator waits when provider setup is missing.
+- Make `watch` goal-first: when an active production goal has pending completion gates and no executable backlog, the controller must not idle as "done"; it should run gate verification, surface setup blockers, and/or create the next executable gate task.
 
-Architecture:
-- New module: `scripts/harness_production_gate_verifier.py`.
-  - Inputs: product repo, target sidecar state root, target id, goal id, goal payload, env mapping, optional probe runner.
-  - Output: `runs/harness/production-gate-verifier-*/generated-evidence.json`.
-  - It never writes to product repo.
-- `harness_product_setup_readiness` remains the source of setup requirements.
-- `harness_goal_gates` remains the validator for passable evidence. The verifier must emit schema v2 and operation `goal-gate-verification`.
-- Missing setup produces `blocked` gate entries and optional `setup-wait` records, not `failed` and never `passed`.
-- Passing requires an explicit probe result with production-safe evidence; default behavior does not invent success for DB/auth/realtime/storage/AI/native/store gates.
+Existing baseline:
+- Roadmaps already include production gate ids and traceability metadata.
+- `refill_goal_tasks()` already creates a `task-verify-gates` backlog when all ordinary tasks are done but gates remain.
+- PR 7 added `harness_production_gate_verifier.py`, but watch does not yet invoke it.
 
 Implementation:
-- Create `scripts/harness_production_gate_verifier.py`.
-  - Collect gate ids from `goal_payload["completion_gates"]`.
-  - Read product git HEAD for `product_commit_sha`; if unavailable, mark gates blocked.
-  - Build setup readiness with supplied environ.
-  - For each gate:
-    - if setup missing: status `blocked`, reason from readiness, no pass evidence.
-    - if probe runner returns a safe passed result: normalize through `harness_goal_gates.normalize_gate_evidence_entry`.
-    - if no probe is available or result is unsafe: status `blocked`.
-  - Write combined `generated-evidence.json` with `completion_gates` list.
-  - Write setup operator waits under `operator-waits/` for blocked setup gates when requested.
-- Update export/guard allowlists for the new module/test.
-- Add `tests/test_harness_production_gate_verifier.py`.
-  - Missing Vercel URL blocks deployment gates and writes setup-wait.
-  - Missing Supabase env blocks DB/realtime/storage gates.
-  - Missing OpenAI key blocks AI gate.
-  - Prepared injected probe creates a valid passed receipt accepted by `harness_goal_gates`.
-  - Unsafe/local/mock probe evidence is blocked.
-  - Product repo is not mutated and output is secret-safe.
-- Keep CLI/user-facing commands unchanged in this PR.
+- Add a narrow watch helper that runs `verify_goal_gates()` only when:
+  - active goal exists and is still active;
+  - completion gate status is pending;
+  - there is no queued executable backlog;
+  - no active operator wait is already blocking the same target.
+- The helper writes sidecar evidence only under `targets/<id>/runs/harness` and can create `setup-wait` records for missing provider setup.
+- `refill_goal_if_idle()` should return verifier status fields:
+  - `gate_verifier_status`
+  - `gate_verifier_blocked_gate_ids`
+  - `operator_waits`
+  - `pending_gate_ids`
+- Watch status should show the verifier/setup wait next action without claiming goal completion.
+- If verifier blocks due missing env/provider, watch records `operator-wait` or `planner-refill-empty` with a concrete next action.
+- If verifier cannot pass because product evidence is missing, existing `task-verify-gates` generation remains the next step.
+- Preserve beginner UX: no new command is required.
+
+Tests:
+- `tests/test_harness_watch.py`
+  - active production goal + no backlog + missing setup runs verifier and records setup wait/status.
+  - active production goal + no backlog + pending gates still triggers `task-verify-gates` when verifier cannot pass.
+  - existing executable backlog skips verifier.
+  - existing operator-wait skips duplicate verifier/wait creation.
+- `tests/test_harness_goal.py`
+  - gate verification task keeps `gate_ids`, expected evidence, spec/attachment refs, and schema v2 operation notes.
+- Regression/export:
+  - No new module unless truly needed.
+  - `python3 -m pytest tests/test_harness_watch.py tests/test_harness_goal.py tests/test_harness_production_gate_verifier.py -q`
+  - `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
 
 Agent review:
-- Gate runner schema agent: compatibility with `harness_goal.py` collector.
-- Operator-wait/security agent: redaction and product repo boundary.
-- Export/guard agent: allowlist and related-test coverage.
+- Watch Runtime Agent: verify idle/refill control flow.
+- Goal Planner Agent: verify task metadata and idempotency.
+- Operator-Wait/Security Agent: verify setup waits are bounded and secret-free.
+- Regression/Export Agent: verify tests and no accidental product repo writes.
 - Blockers trigger correction notes here before patching.
 
 Correction 1:
-- Agent review confirmed the existing goal collector is compatible if the runner writes sidecar `runs/harness/**/generated-evidence.json` with `operation=goal-gate-verification` and `receipt_schema_version=2`.
-- Security review required sidecar provenance checks. The verifier now rejects non-`targets/<target-id>` state roots and state roots inside the product repo.
-- Export/guard review required explicit bundle and sanitizer coverage for the new verifier module/test.
+- Watch Runtime review found the first verifier hook was too early and could block a fresh goal before normal roadmap tasks were queued.
+- Move production gate verifier execution to the true idle path after normal planner refill and task selection fail to produce executable work.
 
 Correction 2:
-- Final security review found otherwise-valid probe evidence could leak local absolute paths.
-- Treat product repo and target sidecar absolute paths as forbidden proof text. A probe containing those paths is blocked, and final evidence serialization fails closed if a local path remains.
+- Goal Planner review found `task-verify-gates` did not preserve structured `spec_refs`, `attachment_refs`, `attachment_count`, or `expected_evidence` in progress metadata.
+- Persist task metadata through `_queue_task()` and add regression coverage using a spec plus image attachment.
 
 Correction 3:
-- Final review found an overlapping path edge case where `product_root` could be inside `state_root`.
-- Reject state/product overlap in both directions so generated evidence can never be written into a product repository.
+- Operator-Wait/Security review found duplicate wait detection was too broad and ignored deadline/symlink risks.
+- Restrict duplicate detection to active production-gate verifier setup waits with matching blocked gates, skip expired waits, ignore symlinked wait files before stat/read, and expand verifier wait summaries back to full wait payloads for status.
 
-Verification:
-- `python3 -m pytest tests/test_harness_production_gate_verifier.py tests/test_harness_goal_gates.py tests/test_harness_product_setup_readiness.py tests/test_harness_export.py -q`
-- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+Correction 4:
+- Full guard sanitizer self-test found verifier status could overwrite an existing manual-review-only planner result.
+- Run the verifier only after normal refill creates neither queued work nor manual-review work.
+
+Correction 5:
+- Final review found malformed production-gate setup waits with missing `blocked_gate_ids` could suppress new verifier waits.
+- Require active verifier setup waits to carry blocked gate context intersecting the current pending gates.
 
 Done criteria:
-- Blocked gates cannot complete goals.
-- Passed gates use schema v2 receipts accepted by existing normalization.
-- Missing credentials/env/provider create clear setup blockers without leaking values.
-- Full guard and PR CI pass before merge.
+- Pending production gates keep the goal active.
+- Watch no longer looks idle-complete when gates remain.
+- Missing provider/env setup becomes operator-wait evidence.
+- Product repo remains untouched.
+- Focused tests, full guard, and PR CI pass before merge.

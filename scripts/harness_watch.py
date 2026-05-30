@@ -19,6 +19,7 @@ import harness_incident
 import harness_loop
 import harness_operator_wait
 import harness_product_setup_readiness
+import harness_production_gate_verifier
 import harness_release
 import harness_task_intake
 from harness_autonomy.control import sanitize_for_outbox
@@ -760,6 +761,159 @@ def _watch_setup_readiness(
     )
 
 
+def _active_setup_operator_wait(
+    record: harness_controller.TargetRecord,
+    *,
+    pending_gate_ids: Sequence[str],
+) -> Mapping[str, object] | None:
+    wait_dir = record.state_root / "operator-waits"
+    if not wait_dir.exists() or wait_dir.is_symlink():
+        return None
+    pending_set = {str(gate_id) for gate_id in pending_gate_ids if str(gate_id)}
+    candidates = sorted(wait_dir.glob("*.json"), key=lambda path: path.name, reverse=True)
+    for path in candidates:
+        if path.is_symlink() or not path.exists() or not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, Mapping):
+            continue
+        if str(payload.get("target_id") or "") != record.target_id:
+            continue
+        if str(payload.get("wait_class") or "") != "setup-wait":
+            continue
+        if str(payload.get("status") or "").strip().lower() not in {"waiting", "operator-wait"}:
+            continue
+        deadline = _parse_operator_wait_time(payload.get("deadline_at"))
+        if deadline and deadline <= datetime.now(timezone.utc):
+            continue
+        if str(payload.get("resume_policy") or "") != "recheck-gate-readiness":
+            continue
+        context = payload.get("context") if isinstance(payload.get("context"), Mapping) else {}
+        run_id = str(context.get("run_id") or payload.get("run_id") or "")
+        if not run_id.startswith(harness_production_gate_verifier.RUN_PREFIX):
+            continue
+        blocked = context.get("blocked_gate_ids") if isinstance(context, Mapping) else []
+        blocked_set = {str(gate_id) for gate_id in blocked} if isinstance(blocked, list) else set()
+        if pending_set and not blocked_set:
+            continue
+        if pending_set and not pending_set.intersection(blocked_set):
+            continue
+        return _operator_wait_public_payload(record, payload)
+    return None
+
+
+def _operator_wait_from_summary(
+    record: harness_controller.TargetRecord,
+    wait: Mapping[str, object],
+) -> Mapping[str, object]:
+    raw_json_path = str(wait.get("json_path") or "")
+    if raw_json_path:
+        path = (record.state_root / raw_json_path).resolve(strict=False)
+        try:
+            path.relative_to(record.state_root.resolve())
+        except ValueError:
+            path = Path()
+        if path and path.exists() and path.is_file() and not path.is_symlink():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, Mapping):
+                return _operator_wait_public_payload(record, payload)
+    return _operator_wait_public_payload(record, wait)
+
+
+def _operator_waits_from_summaries(
+    record: harness_controller.TargetRecord,
+    waits: Sequence[object],
+) -> list[Mapping[str, object]]:
+    expanded: list[Mapping[str, object]] = []
+    for wait in waits:
+        if isinstance(wait, Mapping):
+            expanded.append(_operator_wait_from_summary(record, wait))
+    return expanded
+
+
+def _run_idle_goal_gate_verifier(
+    record: harness_controller.TargetRecord,
+    *,
+    active: harness_goal.GoalRecord,
+    goal_payload: Mapping[str, object],
+    gate_summary: Mapping[str, object],
+    setup_readiness: Mapping[str, object],
+) -> Mapping[str, object] | None:
+    pending_ids = gate_summary.get("pending_gate_ids")
+    pending_gate_ids = [str(item) for item in pending_ids] if isinstance(pending_ids, list) else []
+    if str(gate_summary.get("status") or "") != "pending" or not pending_gate_ids:
+        return None
+    if str(setup_readiness.get("status") or "") != "missing-setup":
+        return None
+    active_wait = _active_setup_operator_wait(record, pending_gate_ids=pending_gate_ids)
+    if active_wait:
+        return {
+            "status": "operator-wait",
+            "message": "goal gate verifier is already waiting on setup",
+            "pending_gate_ids": pending_gate_ids,
+            "operator_waits": [active_wait],
+            "gate_verifier_blocked_gate_ids": pending_gate_ids,
+        }
+    try:
+        result = harness_production_gate_verifier.verify_goal_gates(
+            product_root=record.repo,
+            state_root=record.state_root,
+            target_id=record.target_id,
+            goal_id=active.goal_id,
+            goal_payload=goal_payload,
+            write_operator_waits=True,
+        )
+    except harness_production_gate_verifier.ProductionGateVerifierError as exc:
+        raise _error(f"goal gate verifier failed: {exc}") from exc
+    raw_waits = result.get("operator_waits") if isinstance(result.get("operator_waits"), list) else []
+    operator_waits = _operator_waits_from_summaries(record, raw_waits)
+    return {
+        "status": str(result.get("status") or "blocked"),
+        "message": "goal gate verifier is waiting on setup" if operator_waits else "goal gate verifier blocked pending gates",
+        "pending_gate_ids": pending_gate_ids,
+        "operator_waits": operator_waits,
+        "gate_verifier_status": str(result.get("status") or "blocked"),
+        "gate_verifier_blocked_gate_ids": [
+            str(item) for item in result.get("blocked_gate_ids", []) if str(item)
+        ] if isinstance(result.get("blocked_gate_ids"), list) else [],
+    }
+
+
+def _operator_wait_from_refill(refill: Mapping[str, object]) -> Mapping[str, object] | None:
+    waits = refill.get("operator_waits")
+    if not isinstance(waits, list) or not waits:
+        return None
+    first = waits[0]
+    return first if isinstance(first, Mapping) else None
+
+
+def _idle_status_from_refill(refill: Mapping[str, object]) -> tuple[str, str, str, str, Mapping[str, object] | None]:
+    wait = _operator_wait_from_refill(refill)
+    reason = str(refill.get("message") or "goal planner did not queue executable work")
+    if wait:
+        return (
+            "operator-wait",
+            "operator-wait",
+            reason,
+            str(wait.get("next_action") or "complete the setup wait, then watch will recheck gates"),
+            wait,
+        )
+    phase = "manual-review-only" if int(refill.get("manual_review") or 0) else "planner-refill-empty"
+    return (
+        phase,
+        "idle",
+        reason,
+        "inspect generated manual-review tasks or adjust the goal",
+        None,
+    )
+
+
 def _watch_release_state(
     record: harness_controller.TargetRecord,
     *,
@@ -1323,6 +1477,44 @@ def refill_goal_if_idle(
     }
 
 
+def verify_goal_gates_if_truly_idle(
+    record: harness_controller.TargetRecord,
+) -> Mapping[str, object] | None:
+    try:
+        active = harness_goal.load_active_goal(record.state_root)
+    except harness_goal.GoalError as exc:
+        raise _error(str(exc))
+    if active is None or active.status != "active":
+        return None
+    goal_payload = watch_active_goal_payload(record)
+    gate_summary = _goal_gate_summary_from_payload(goal_payload)
+    setup_readiness = _watch_setup_readiness(record, goal_payload)
+    verifier_result = _run_idle_goal_gate_verifier(
+        record,
+        active=active,
+        goal_payload=goal_payload,
+        gate_summary=gate_summary,
+        setup_readiness=setup_readiness,
+    )
+    if verifier_result is None:
+        return None
+    return {
+        "goal_id": active.goal_id,
+        "plan_id": str(goal_payload.get("active_plan_id") or ""),
+        "created": 0,
+        "queued": 0,
+        "manual_review": 0,
+        "completed": False,
+        "queue_report_path": (active.goal_dir / "queue-report.json").as_posix(),
+        "generated_backlog_ids": [],
+        "message": str(verifier_result.get("message") or "goal gate verifier blocked pending gates"),
+        "gate_verifier_status": str(verifier_result.get("gate_verifier_status") or verifier_result.get("status") or ""),
+        "gate_verifier_blocked_gate_ids": list(verifier_result.get("gate_verifier_blocked_gate_ids") or ()),
+        "pending_gate_ids": list(verifier_result.get("pending_gate_ids") or ()),
+        "operator_waits": list(verifier_result.get("operator_waits") or ()),
+    }
+
+
 def command_watch(
     args: argparse.Namespace,
     runtime: WatchRuntime,
@@ -1476,18 +1668,17 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                         next_action="select generated backlog",
                     )
                 elif refill:
-                    last_idle_phase = "manual-review-only" if int(refill.get("manual_review") or 0) else "planner-refill-empty"
-                    last_idle_reason = str(refill.get("message") or "goal planner did not queue executable work")
-                    last_idle_next_action = "inspect generated manual-review tasks or adjust the goal"
+                    last_idle_phase, refill_status, last_idle_reason, last_idle_next_action, wait = _idle_status_from_refill(refill)
                     runtime.write_watch_status(
                         record,
                         phase=last_idle_phase,
-                        status="idle",
+                        status=refill_status,
                         active_goal_id=str(refill.get("goal_id") or ""),
                         pending_reason=last_idle_reason,
                         processed_count=processed,
                         idle_count=idle_count,
                         next_action=last_idle_next_action,
+                        operator_wait=wait,
                     )
             if args.watch and bool(getattr(args, "auto_merge", False)) and runtime.auto_merge_pending_publications:
                 merge_results = list(runtime.auto_merge_pending_publications(record=record))
@@ -1695,6 +1886,14 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                         next_action="select generated backlog",
                     )
                     continue
+                if not refill or (not int(refill.get("queued") or 0) and not int(refill.get("manual_review") or 0)):
+                    verifier_refill = verify_goal_gates_if_truly_idle(record)
+                    if verifier_refill:
+                        refill = verifier_refill
+                refill_status = "idle"
+                idle_operator_wait: Mapping[str, object] | None = None
+                if refill:
+                    last_idle_phase, refill_status, last_idle_reason, last_idle_next_action, idle_operator_wait = _idle_status_from_refill(refill)
                 idle_count += 1
                 active_goal_id = runtime.watch_active_goal_id(record)
                 if active_goal_id:
@@ -1708,15 +1907,18 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                     next_action = './harness goal "제품 목표"'
                     phase = "idle-no-goal"
                     pending_reason = ""
+                    refill_status = "idle"
+                    idle_operator_wait = None
                 runtime.write_watch_status(
                     record,
                     phase=phase,
-                    status="idle",
+                    status=refill_status,
                     active_goal_id=active_goal_id,
                     pending_reason=pending_reason,
                     processed_count=processed,
                     idle_count=idle_count,
                     next_action=next_action,
+                    operator_wait=idle_operator_wait,
                 )
                 if stop_on_idle:
                     runtime.write_watch_status(
@@ -1728,6 +1930,7 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                         processed_count=processed,
                         idle_count=idle_count,
                         next_action=next_action,
+                        operator_wait=idle_operator_wait,
                     )
                     print("watch 종료: stop-on-idle, 실행할 작업이 없습니다.")
                     return 0

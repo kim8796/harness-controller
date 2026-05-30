@@ -1586,6 +1586,62 @@ def test_goal_refill_creates_gate_verification_task_when_production_gates_remain
     assert "receipt_schema_version=2" in body
 
 
+def test_goal_gate_verification_task_preserves_spec_attachment_and_expected_evidence(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    product = tmp_path / "product"
+    product.mkdir()
+    _init_product(product)
+    spec = tmp_path / "goal-spec.md"
+    spec.write_text(
+        "\n".join(
+            [
+                "# 배포 가능한 채팅 서비스",
+                "",
+                "## 완료 증거",
+                "- Supabase DB persistence",
+                "- OpenAI AI reply",
+                "- Vercel production E2E smoke",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    image = tmp_path / "screen.png"
+    image.write_bytes(b"fake-png")
+    goal = module.create_goal_from_spec(
+        state_root=state_root,
+        target_id="chatapp",
+        source=spec,
+        images=(image,),
+        image_captions=("현재 화면",),
+        target_repo=product,
+    )
+    progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    progress["tasks"] = [{"task_key": "task-01-core", "backlog_id": "BL-core"}]
+    goal.progress_json.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
+    completed = state_root / "backlog" / "completed" / "BL-core.md"
+    completed.parent.mkdir(parents=True, exist_ok=True)
+    completed.write_text(
+        "\n".join(["ID: BL-core", "Status: completed", f"Goal: {goal.goal_id}", ""]),
+        encoding="utf-8",
+    )
+    _write_successful_publication(state_root, target_id="chatapp", goal_id=goal.goal_id, backlog_id="BL-core")
+
+    result = module.refill_goal_tasks(state_root=state_root, target_id="chatapp", target_repo=product, goal=goal)
+
+    assert result is not None
+    progress_after = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    gate_task = next(task for task in progress_after["tasks"] if task.get("task_key") == "task-verify-gates")
+    goal_payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    assert gate_task["goal_spec_path"] == goal_payload["spec_path"]
+    assert gate_task["spec_refs"] == [goal_payload["spec_path"]]
+    assert gate_task["attachment_manifest_path"] == goal_payload["attachment_manifest_path"]
+    assert gate_task["attachment_refs"] == [goal_payload["attachments"][0]["path"]]
+    assert gate_task["attachment_count"] == 1
+    assert gate_task["expected_evidence"]
+    assert any(item["gate_id"] == "database_persistence" for item in gate_task["expected_evidence"])
+
+
 def test_goal_refresh_progress_removes_active_pointer_when_completed(tmp_path: Path) -> None:
     module = _load_module()
     state_root = tmp_path / "targets" / "game"
