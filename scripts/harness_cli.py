@@ -29,8 +29,10 @@ import harness_fleet
 import harness_goal
 import harness_incident
 import harness_loop
+import harness_product_setup_readiness
 import harness_publication
 import harness_profiles
+import harness_release
 import harness_runtime_setup
 import harness_starter_install
 import harness_task_cli
@@ -83,6 +85,7 @@ CONTROLLER_RELEASE_CHECK_RUFF_PATHS = (
     "scripts/harness_operator_wait.py",
     "scripts/harness_product_audit.py",
     "scripts/harness_product_audit_support.py",
+    "scripts/harness_product_setup_readiness.py",
     "scripts/harness_profiles.py",
     "scripts/harness_publication.py",
     "scripts/harness_release.py",
@@ -111,6 +114,7 @@ CONTROLLER_RELEASE_CHECK_RUFF_PATHS = (
     "tests/test_harness_operator_wait.py",
     "tests/test_harness_product_audit.py",
     "tests/test_harness_product_maintainability.py",
+    "tests/test_harness_product_setup_readiness.py",
     "tests/test_harness_publication.py",
     "tests/test_harness_release.py",
     "tests/test_harness_relay_store.py",
@@ -140,6 +144,7 @@ CONTROLLER_RELEASE_CHECK_PYTEST_PATHS = (
     "tests/test_harness_operator_wait.py",
     "tests/test_harness_product_audit.py",
     "tests/test_harness_product_maintainability.py",
+    "tests/test_harness_product_setup_readiness.py",
     "tests/test_harness_publication.py",
     "tests/test_harness_release.py",
     "tests/test_harness_relay_store.py",
@@ -1727,6 +1732,17 @@ def _auto_merge_pending_publications(
             base_branch=str(item.get("base") or record.branch),
             pr_url=str(item.get("pr_url") or ""),
         )
+        if result.status == "merged":
+            _write_product_version_receipt(
+                record=record,
+                goal_id=str(item.get("goal_id") or ""),
+                backlog_id=str(item.get("backlog_id") or ""),
+                run_id=str(item.get("run_id") or ""),
+                product_commit_sha=result.local_head_after or str(item.get("commit_sha") or ""),
+                pr_url=result.pr_url,
+                merge_commit_sha=result.merge_commit_sha,
+                status="integrated",
+            )
         results.append(
             {
                 "status": result.status,
@@ -2120,6 +2136,42 @@ def _backlog_goal_id(record: harness_controller.TargetRecord, backlog_id: str) -
     return "unlinked"
 
 
+def _write_product_version_receipt(
+    *,
+    record: harness_controller.TargetRecord,
+    goal_id: str,
+    backlog_id: str,
+    run_id: str,
+    product_commit_sha: str,
+    pr_url: str = "",
+    merge_commit_sha: str = "",
+    status: str = "integrated",
+) -> None:
+    if not product_commit_sha:
+        return
+    try:
+        harness_release.write_receipt(
+            record.state_root,
+            target_id=record.target_id,
+            kind="version",
+            receipt_id=f"{backlog_id}-{product_commit_sha[:12]}",
+            payload={
+                "status": status,
+                "goal_id": goal_id,
+                "backlog_id": backlog_id,
+                "run_id": run_id,
+                "product_commit_sha": product_commit_sha,
+                "pr_url": pr_url,
+                "merge_commit_sha": merge_commit_sha,
+                "base_branch": record.branch,
+                "values_redacted": True,
+            },
+        )
+    except harness_release.ReleaseError as exc:
+        if "already exists" not in str(exc):
+            raise
+
+
 def _implementation_failure_message(output: str) -> str:
     lines = [line.rstrip() for line in sanitize_for_outbox(output).splitlines() if line.strip()]
     if not lines:
@@ -2212,6 +2264,14 @@ def _run_autopilot_transaction(record: harness_controller.TargetRecord, args: ar
     if publication.status == "already-in-base":
         print(f"- product branch: `{publication.branch}`")
         print("- product PR: `already in base`")
+        _write_product_version_receipt(
+            record=record,
+            goal_id=goal_id,
+            backlog_id=backlog_id,
+            run_id=run_id,
+            product_commit_sha=commit_sha,
+            status="integrated",
+        )
         return AutopilotTransaction(
             "merged",
             run_id,
@@ -2242,6 +2302,16 @@ def _run_autopilot_transaction(record: harness_controller.TargetRecord, args: ar
             if merge.merge_commit_sha:
                 print(f"- merge commit: `{merge.merge_commit_sha}`")
             if merge.status == "merged":
+                _write_product_version_receipt(
+                    record=record,
+                    goal_id=goal_id,
+                    backlog_id=backlog_id,
+                    run_id=run_id,
+                    product_commit_sha=merge.local_head_after or merge.merge_commit_sha or commit_sha,
+                    pr_url=publication.pr_url,
+                    merge_commit_sha=merge.merge_commit_sha,
+                    status="integrated",
+                )
                 return AutopilotTransaction(
                     "merged",
                     run_id,
@@ -3649,6 +3719,201 @@ def command_target_status(args: argparse.Namespace) -> int:
         return 2
 
 
+def _target_active_goal_payload(record: harness_controller.TargetRecord) -> dict[str, object]:
+    try:
+        active = harness_goal.load_active_goal(record.state_root)
+    except harness_goal.GoalError:
+        return {}
+    if active is None:
+        return {}
+    try:
+        harness_goal.refresh_progress(state_root=record.state_root, goal=active)
+        payload = json.loads(active.goal_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, harness_goal.GoalError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _target_setup_readiness(record: harness_controller.TargetRecord, goal_payload: Mapping[str, object]) -> dict[str, object]:
+    if not goal_payload:
+        return {"schema_version": 1, "ok": True, "status": "not-required", "missing_requirements": [], "entries": []}
+    return harness_product_setup_readiness.build_setup_readiness_report(
+        product_root=record.repo,
+        goal_payload=goal_payload,
+    )
+
+
+def _target_release_state(record: harness_controller.TargetRecord) -> dict[str, object]:
+    goal_payload = _target_active_goal_payload(record)
+    gate_status = goal_payload.get("completion_gate_status") if isinstance(goal_payload.get("completion_gate_status"), Mapping) else {}
+    setup = _target_setup_readiness(record, goal_payload)
+    verification = harness_controller.verify_target(record)
+    git_info = verification.get("git") if isinstance(verification, Mapping) else {}
+    dirty_paths = git_info.get("dirty_paths") if isinstance(git_info, Mapping) and isinstance(git_info.get("dirty_paths"), list) else []
+    head = harness_release.git_head(record.repo)
+    state = harness_release.build_target_release_state(
+        record.state_root,
+        target_id=record.target_id,
+        product_commit_sha=head,
+        gate_status=gate_status,
+        setup_readiness=setup,
+        dirty_paths=[str(item) for item in dirty_paths],
+        verification_blockers=harness_controller.target_run_blockers(verification),
+    )
+    state["active_goal_id"] = str(goal_payload.get("goal_id") or "")
+    state["target"] = record.to_json(repo_root())
+    state["verification"] = _json_safe(verification)
+    return state
+
+
+def _render_target_version_text(record: harness_controller.TargetRecord, payload: Mapping[str, object]) -> None:
+    print("하네스 target version")
+    print(f"- 대상: `{record.target_id}`")
+    print(f"- product commit: `{payload.get('product_commit_sha') or 'unknown'}`")
+    print(f"- 상태: `{payload.get('status') or 'unknown'}`")
+    blockers = payload.get("blockers") if isinstance(payload.get("blockers"), list) else []
+    print("- blockers: " + (", ".join(str(item) for item in blockers) if blockers else "none"))
+    for key, label in (("version", "version"), ("deployment", "deployment"), ("release", "release")):
+        section = payload.get(key)
+        current = section.get("current") if isinstance(section, Mapping) and isinstance(section.get("current"), Mapping) else {}
+        latest = section.get("latest") if isinstance(section, Mapping) and isinstance(section.get("latest"), Mapping) else {}
+        current_id = current.get("receipt_id") if isinstance(current, Mapping) else ""
+        latest_id = latest.get("receipt_id") if isinstance(latest, Mapping) else ""
+        print(f"- current {label}: `{current_id or 'none'}`")
+        print(f"- latest {label}: `{latest_id or 'none'}`")
+    setup = payload.get("setup_readiness") if isinstance(payload.get("setup_readiness"), Mapping) else {}
+    if setup and setup.get("ok") is False:
+        print("- setup readiness: missing")
+        for action in setup.get("next_actions", []) if isinstance(setup.get("next_actions"), list) else []:
+            print(f"  - {action}")
+    print(f"다음 명령: `./harness target release {record.target_id} --candidate`")
+
+
+def command_target_version(args: argparse.Namespace) -> int:
+    try:
+        record = _resolve_controller_target(args.target)
+        payload = _target_release_state(record)
+        if args.json:
+            print(json.dumps(_json_safe(payload), ensure_ascii=False, indent=2, sort_keys=True))
+        else:
+            _render_target_version_text(record, payload)
+        return 0 if not payload.get("blockers") else 2
+    except (harness_controller.ControllerError, harness_release.ReleaseError) as exc:
+        print(f"error: {exc}")
+        return 2
+
+
+def _release_receipt_payload(
+    record: harness_controller.TargetRecord,
+    *,
+    release_type: str,
+    release_state: Mapping[str, object],
+) -> dict[str, object]:
+    gate_status = release_state.get("gate_status") if isinstance(release_state.get("gate_status"), Mapping) else {}
+    setup = release_state.get("setup_readiness") if isinstance(release_state.get("setup_readiness"), Mapping) else {}
+    return {
+        "release_type": release_type,
+        "status": "released" if release_type == "production" else "candidate",
+        "product_commit_sha": str(release_state.get("product_commit_sha") or ""),
+        "active_goal_id": str(release_state.get("active_goal_id") or ""),
+        "passed_gate_ids": gate_status.get("passed_gate_ids") if isinstance(gate_status.get("passed_gate_ids"), list) else [],
+        "blocked_gate_ids": gate_status.get("pending_gate_ids") if isinstance(gate_status.get("pending_gate_ids"), list) else [],
+        "setup_missing_requirements": setup.get("missing_requirements") if isinstance(setup.get("missing_requirements"), list) else [],
+        "blockers": release_state.get("blockers") if isinstance(release_state.get("blockers"), list) else [],
+        "target_branch": record.branch,
+        "values_redacted": True,
+    }
+
+
+def command_target_release(args: argparse.Namespace) -> int:
+    try:
+        record = _resolve_controller_target(args.target)
+        state = _target_release_state(record)
+        blockers = [str(item) for item in state.get("blockers", []) if str(item)]
+        release_type = "candidate" if args.candidate else "production"
+        if blockers:
+            payload = {"schema_version": 1, "ok": False, "status": "blocked", "blockers": blockers, "release_state": state}
+            if args.json:
+                print(json.dumps(_json_safe(payload), ensure_ascii=False, indent=2, sort_keys=True))
+            else:
+                print("target release 중단")
+                print(f"- 대상: `{record.target_id}`")
+                print(f"- release type: `{release_type}`")
+                print(f"- blockers: {', '.join(blockers)}")
+                print(f"다음 명령: `./harness target version {record.target_id}`")
+            return 2
+        if release_type == "production":
+            release_section = state.get("release") if isinstance(state.get("release"), Mapping) else {}
+            current_release = (
+                release_section.get("current")
+                if isinstance(release_section.get("current"), Mapping)
+                else {}
+            )
+            current_payload = (
+                current_release.get("payload")
+                if isinstance(current_release, Mapping) and isinstance(current_release.get("payload"), Mapping)
+                else {}
+            )
+            current_type = str(current_payload.get("release_type") or current_payload.get("status") or "")
+            if current_type == "production":
+                payload = {
+                    "schema_version": 1,
+                    "ok": True,
+                    "status": "already-released",
+                    "target_id": record.target_id,
+                    "release_type": "production",
+                    "release_state": state,
+                }
+                if args.json:
+                    print(json.dumps(_json_safe(payload), ensure_ascii=False, indent=2, sort_keys=True))
+                else:
+                    print("target release 이미 완료")
+                    print(f"- 대상: `{record.target_id}`")
+                    print(f"- product commit: `{state.get('product_commit_sha') or 'unknown'}`")
+                return 0
+            if current_type != "candidate":
+                blockers = ["no-current-release-candidate"]
+                payload = {"schema_version": 1, "ok": False, "status": "blocked", "blockers": blockers, "release_state": state}
+                if args.json:
+                    print(json.dumps(_json_safe(payload), ensure_ascii=False, indent=2, sort_keys=True))
+                else:
+                    print("target release 승격 중단")
+                    print(f"- 대상: `{record.target_id}`")
+                    print("- blockers: no-current-release-candidate")
+                    print(f"다음 명령: `./harness target release {record.target_id} --candidate`")
+                return 2
+        receipt_payload = _release_receipt_payload(record, release_type=release_type, release_state=state)
+        receipt_id = args.version or f"{release_type}-{str(state.get('product_commit_sha') or 'unknown')[:12]}"
+        receipt_path = harness_release.write_receipt(
+            record.state_root,
+            target_id=record.target_id,
+            kind="release",
+            receipt_id=receipt_id,
+            payload=receipt_payload,
+        )
+        payload = {
+            "schema_version": 1,
+            "ok": True,
+            "target_id": record.target_id,
+            "release_type": release_type,
+            "receipt_path": receipt_path.relative_to(record.state_root).as_posix(),
+            "release_state": state,
+        }
+        if args.json:
+            print(json.dumps(_json_safe(payload), ensure_ascii=False, indent=2, sort_keys=True))
+        else:
+            print("target release receipt 작성 완료")
+            print(f"- 대상: `{record.target_id}`")
+            print(f"- release type: `{release_type}`")
+            print(f"- receipt: `{payload['receipt_path']}`")
+            if blockers:
+                print(f"- blockers recorded: {', '.join(blockers)}")
+        return 0
+    except (harness_controller.ControllerError, harness_release.ReleaseError) as exc:
+        print(f"error: {exc}")
+        return 2
+
+
 def command_target_dashboard(args: argparse.Namespace) -> int:
     try:
         record = _resolve_controller_target(args.target)
@@ -4879,6 +5144,18 @@ def build_parser() -> argparse.ArgumentParser:
     target_status.add_argument("target", help=target_selector_help)
     target_status.add_argument("--json", action="store_true")
     target_status.set_defaults(func=command_target_status)
+    target_version = target_subparsers.add_parser("version", help="Show product version/deployment/release state for a target.")
+    target_version.add_argument("target", help=target_selector_help)
+    target_version.add_argument("--json", action="store_true")
+    target_version.set_defaults(func=command_target_version)
+    target_release = target_subparsers.add_parser("release", help="Create target release candidate or production release receipts.")
+    target_release.add_argument("target", help=target_selector_help)
+    release_mode = target_release.add_mutually_exclusive_group(required=True)
+    release_mode.add_argument("--candidate", action="store_true", help="Write a release-candidate receipt for the current product commit.")
+    release_mode.add_argument("--promote", action="store_true", help="Promote the current release candidate to production release.")
+    target_release.add_argument("--version", help="Optional operator-facing release/version id; defaults to type + commit.")
+    target_release.add_argument("--json", action="store_true")
+    target_release.set_defaults(func=command_target_release)
     target_dashboard = target_subparsers.add_parser("dashboard", help="Write the read-only external target dashboard.")
     target_dashboard.add_argument("target", help=target_selector_help)
     target_dashboard.add_argument("--json", action="store_true")

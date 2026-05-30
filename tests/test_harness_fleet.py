@@ -140,6 +140,8 @@ def test_build_fleet_status_reports_targets_without_mutating_product(tmp_path: P
     assert target["target_id"] == "demo"
     assert target["default"] is True
     assert target["watch"]["transaction_status"] == "merged"
+    assert target["setup_readiness"]["status"] == "not-required"
+    assert target["release_state"]["status"] == "unversioned"
     assert target["memory"]["target_lessons"] == 1
     assert target["memory"]["global_lessons"] == 1
     assert payload["controller_root"] == "."
@@ -180,9 +182,12 @@ def test_fleet_status_surfaces_goal_gate_debt_and_product_audit(tmp_path: Path) 
     assert "database_persistence" in target["active_goal"]["pending_gate_ids"]
     assert "store_release_readiness" in target["active_goal"]["pending_gate_ids"]
     assert target["active_goal"]["product_audit"]["status"] == "failed"
+    assert target["setup_readiness"]["ok"] is False
+    assert "setup-readiness-missing" in target["release_state"]["blockers"]
     assert payload["ok"] is False
     assert payload["status"] == "attention"
     assert "active-goal-product-audit-failed" in target["readiness"]["blockers"]
+    assert "setup-readiness-missing" in target["readiness"]["blockers"]
 
 
 def test_build_fleet_status_no_targets_is_readable(tmp_path: Path) -> None:
@@ -211,7 +216,8 @@ def test_build_fleet_status_marks_missing_product_attention(tmp_path: Path) -> N
 
     assert payload["ok"] is False
     assert payload["status"] == "attention"
-    assert payload["targets"][0]["readiness"]["blockers"] == ["target-missing"]
+    assert "target-missing" in payload["targets"][0]["readiness"]["blockers"]
+    assert "product-commit-unavailable" in payload["targets"][0]["readiness"]["blockers"]
 
 
 def test_global_memory_symlink_fails_closed(tmp_path: Path) -> None:

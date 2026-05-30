@@ -152,6 +152,85 @@ def test_watch_status_surfaces_active_goal_gate_debt(tmp_path, capsys) -> None:
     assert "keep active goal open" in output
 
 
+def test_watch_status_includes_setup_readiness_and_release_state(tmp_path, monkeypatch, capsys) -> None:
+    module = _load_module()
+    module.ERROR_CLASS = RuntimeError
+    product_repo = tmp_path / "product"
+    product_repo.mkdir()
+    record = SimpleNamespace(target_id="demo", state_root=tmp_path / "targets" / "demo", repo=product_repo)
+    record.state_root.mkdir(parents=True)
+    goal_id = "goal-demo"
+    goal_dir = record.state_root / "goals" / goal_id
+    goal_dir.mkdir(parents=True)
+    (record.state_root / "goals" / "active-goal.json").write_text(
+        json.dumps({"schema_version": 2, "target_id": "demo", "goal_id": goal_id}),
+        encoding="utf-8",
+    )
+    (goal_dir / "progress.json").write_text(
+        json.dumps({"schema_version": 2, "target_id": "demo", "goal_id": goal_id, "tasks": []}),
+        encoding="utf-8",
+    )
+    (goal_dir / "goal.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "target_id": "demo",
+                "goal_id": goal_id,
+                "title": "production chat service",
+                "status": "active",
+                "goal_contract": {"product_standard": "production_web"},
+                "completion_gates": [
+                    {"id": "database_persistence", "label": "Remote DB persistence"},
+                    {"id": "production_e2e_smoke", "label": "Production E2E smoke"},
+                ],
+                "completion_gate_evidence": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module.harness_release, "git_head", lambda _repo: "abc1234")
+    monkeypatch.setattr(module.harness_release, "git_dirty_paths", lambda _repo: [])
+
+    module.write_watch_status(record, phase="testing", status="running", next_action="continue watch")
+
+    payload = json.loads((record.state_root / "watch" / "latest.json").read_text(encoding="utf-8"))
+    markdown = (record.state_root / "watch" / "latest.md").read_text(encoding="utf-8")
+
+    assert payload["setup_readiness"]["status"] == "missing-setup"
+    assert payload["setup_readiness"]["values_redacted"] is True
+    assert "supabase_browser_client" in payload["setup_readiness"]["missing_requirements"]
+    assert payload["release_state"]["status"] == "blocked"
+    assert "setup-readiness-missing" in payload["release_state"]["blockers"]
+    assert "goal-gates-pending" in payload["release_state"]["blockers"]
+    assert payload["release_state"]["product_commit_sha"] == "abc1234"
+    assert "## Setup Readiness" in markdown
+    assert "## Release State" in markdown
+
+    assert module.print_watch_status(record) == 0
+    output = capsys.readouterr().out
+    assert "- setup readiness: `missing-setup`" in output
+    assert "- release state: `blocked`" in output
+    assert "setup-readiness-missing" in output
+
+
+def test_watch_status_release_state_reports_dirty_product_without_product_mutation(tmp_path, monkeypatch) -> None:
+    module = _load_module()
+    module.ERROR_CLASS = RuntimeError
+    product_repo = tmp_path / "product"
+    product_repo.mkdir()
+    record = SimpleNamespace(target_id="demo", state_root=tmp_path / "targets" / "demo", repo=product_repo)
+    record.state_root.mkdir(parents=True)
+    monkeypatch.setattr(module.harness_release, "git_head", lambda _repo: "def5678")
+    monkeypatch.setattr(module.harness_release, "git_dirty_paths", lambda _repo: [" M package.json"])
+
+    module.write_watch_status(record, phase="testing", status="running", next_action="continue watch")
+
+    payload = json.loads((record.state_root / "watch" / "latest.json").read_text(encoding="utf-8"))
+    assert payload["release_state"]["status"] == "blocked"
+    assert "target-git-dirty" in payload["release_state"]["blockers"]
+    assert not (product_repo / "targets").exists()
+
+
 def test_watch_status_prints_operator_wait_plus_last_transaction(tmp_path, capsys) -> None:
     module = _load_module()
     module.ERROR_CLASS = RuntimeError

@@ -101,6 +101,8 @@ production 목표로 만든 product repo는 사람이든 AI든 이어받아 운�
 
 `watch --status`는 `targets/<target-id>/watch/latest.json` 과 `latest.md`를 읽어 active goal, 현재 backlog/run, 마지막 transaction, commit, PR publication/merge 상태와 다음 조치를 보여준다. 실행할 goal/backlog가 없을 때 바로 종료시키려면 `./harness watch --stop-on-idle --no-telegram-drain`을 쓴다. 고급 복구에서 PR만 만들고 머지는 멈추고 싶을 때만 `./harness watch --no-auto-merge`를 쓴다.
 
+목표가 Vercel, Supabase, OpenAI 같은 외부 provider를 요구하면 `watch --status`는 필요한 env/provider setup readiness와 target release 상태도 함께 보여준다. 값은 출력하지 않고 key 존재 여부와 다음 조치만 보여주며, secret은 product `.env`, shell env, 또는 provider secret UI에만 넣는다.
+
 사용자가 해결할 수 있는 외부 blocker가 있으면 `watch`는 내부 operator-wait 상태를 `targets/<target-id>/operator-waits/`와 watch status에 남긴다. 예시는 credential setup, provider outage 대기, dirty repo 정리, 명시 승인이 필요한 위험 판단이다. 새 beginner command는 없고, 안내된 조치를 끝낸 뒤 기존 `./harness watch` 또는 bounded smoke를 다시 실행한다. Secret은 답장이나 문서에 쓰지 않고 `.env` 또는 provider secret UI에만 둔다.
 
 5. 단일 작업만 즉시 처리하고 싶을 때만 `do`를 쓴다.

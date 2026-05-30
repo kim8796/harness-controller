@@ -164,3 +164,34 @@ def test_accepts_valid_maintainability_handoff(tmp_path: Path) -> None:
 
     assert result["status"] == "ok"
     assert result["failed_gate_ids"] == []
+
+
+def test_provider_goal_requires_operations_setup_guidance(tmp_path: Path) -> None:
+    module = _load_module()
+    repo = tmp_path / "product"
+    _write_valid_maintainability_handoff(repo)
+    (repo / ".env").write_text(
+        "\n".join(
+            [
+                "VERCEL_PROJECT_ID=project_123",
+                "NEXT_PUBLIC_APP_URL=https://app.example.test",
+                "NEXT_PUBLIC_SUPABASE_URL=https://example.supabase.co",
+                "NEXT_PUBLIC_SUPABASE_ANON_KEY=anon-placeholder",
+                "SUPABASE_SERVICE_ROLE_KEY=service-placeholder",
+                "OPENAI_API_KEY=sk-test-placeholder",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    payload = _maintainability_goal_payload()
+    payload["completion_gates"] = [
+        {"id": "maintainability_handoff"},
+        {"id": "deployed_url"},
+        {"id": "database_persistence"},
+        {"id": "ai_reply"},
+    ]
+
+    result = module.audit_product_for_goal(target_repo=repo, goal_payload=payload)
+
+    assert result["status"] == "failed"
+    assert "maintainability_ops_setup_guidance_missing" in {finding["id"] for finding in result["findings"]}

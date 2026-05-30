@@ -140,6 +140,9 @@ def test_export_bundle_copies_sources_and_writes_readme(tmp_path: Path) -> None:
     assert (bundle_dir / "scripts" / "harness_product_audit_support.py").read_text(encoding="utf-8") == (
         "scripts/harness_product_audit_support.py\n"
     )
+    assert (bundle_dir / "scripts" / "harness_product_setup_readiness.py").read_text(encoding="utf-8") == (
+        "scripts/harness_product_setup_readiness.py\n"
+    )
     assert (bundle_dir / "scripts" / "harness_release.py").read_text(encoding="utf-8") == (
         "scripts/harness_release.py\n"
     )
@@ -158,6 +161,9 @@ def test_export_bundle_copies_sources_and_writes_readme(tmp_path: Path) -> None:
     )
     assert (bundle_dir / "tests" / "test_harness_product_maintainability.py").read_text(encoding="utf-8") == (
         "tests/test_harness_product_maintainability.py\n"
+    )
+    assert (bundle_dir / "tests" / "test_harness_product_setup_readiness.py").read_text(encoding="utf-8") == (
+        "tests/test_harness_product_setup_readiness.py\n"
     )
     assert (bundle_dir / "tests" / "test_harness_release.py").read_text(encoding="utf-8") == (
         "tests/test_harness_release.py\n"
@@ -490,6 +496,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "scripts" / "harness_fleet.py").exists()
     assert (bundle / "scripts" / "harness_product_audit.py").exists()
     assert (bundle / "scripts" / "harness_product_audit_support.py").exists()
+    assert (bundle / "scripts" / "harness_product_setup_readiness.py").exists()
     assert (bundle / "scripts" / "harness_publication.py").exists()
     assert (bundle / "scripts" / "harness_release.py").exists()
     assert (bundle / "scripts" / "harness_target_remove.py").exists()
@@ -501,6 +508,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "tests" / "test_harness_fleet.py").exists()
     assert (bundle / "tests" / "test_harness_product_audit.py").exists()
     assert (bundle / "tests" / "test_harness_product_maintainability.py").exists()
+    assert (bundle / "tests" / "test_harness_product_setup_readiness.py").exists()
     assert (bundle / "tests" / "test_harness_publication.py").exists()
     assert (bundle / "tests" / "test_harness_release.py").exists()
     assert (bundle / "tests" / "test_harness_target_archive.py").exists()

@@ -1,3 +1,62 @@
+# Harness Product Setup Readiness + Version/Release Plan
+
+Diet-Exception: setup readiness and product release/version controller surfaces add temporary guarded tests and owner modules while preserving existing code diet caps.
+
+## Goal
+
+Make production goals operationally usable after implementation: Harness must explain missing provider/server/env setup, keep goals active while setup is missing, and manage product version/deployment/release state from controller sidecar receipts.
+
+## Agent/Superpowers Protocol
+
+- Use Superpowers execution, subagent-driven development, systematic debugging, code review, and verification-before-completion practices as workflow only.
+- Split implementation/review work into role agents:
+  - Setup Readiness Agent: provider/env readiness model and operator-facing next actions.
+  - Version Model Agent: version/deployment/release receipt schema and state computation.
+  - CLI UX Agent: `target version`, `target release`, and `fleet status` rendering.
+  - Watch Integration Agent: PR merge/deploy/gate results into version state.
+  - Product Ops Docs Agent: maintainability docs/setup guidance gate.
+  - Security Agent: secret redaction, symlink defense, wrong target/commit filtering.
+  - Export/CI Agent: export, sanitizer, focused CI coverage.
+  - Reviewers: version integrity, setup UX, production gate, security/secret, regression/export.
+- If any reviewer finds a blocker: write a correction note here, patch, rerun focused tests, and re-review until blocker 0.
+
+## Implementation Scope
+
+1. Product setup readiness:
+   - Add a controller-owned readiness module that maps production/native goal gates to setup requirements.
+   - Include Vercel, Supabase, OpenAI, native store setup classes as needed by gates.
+   - Read env presence from process env and product `.env*` files only as present/missing/weak; never print values.
+   - Surface missing setup as secret-safe next actions and setup-wait/blocker data.
+2. Version/release state:
+   - Extend release receipts for `version`, `deployment`, and `release`.
+   - Version means integrated product commit/merged PR.
+   - Deployment means production provider URL/check evidence.
+   - Release candidate means all required production gates are passed for the current product commit.
+   - Production release requires a candidate with no blocked gates.
+3. CLI/Fleet/Watch:
+   - Add `./harness target version <target>` for latest version/deployment/release/blocker status.
+   - Add `./harness target release <target> --candidate|--promote`.
+   - Extend `fleet status` with latest release state and setup blockers.
+   - Record a version receipt when watch completes a merged transaction.
+4. Maintainability docs:
+   - Strengthen product audit so production handoff docs include provider/env/deploy/rollback/smoke guidance when deployment/provider gates exist.
+   - Keep `.env.example` secret-free and CODEMAP path validation.
+5. Export and tests:
+   - Include new surfaces in export, controller sanitization self-test, CLI release-check, and focused CI lists.
+
+## Verification Plan
+
+- `python3 -m pytest tests/test_harness_product_setup_readiness.py tests/test_harness_release.py tests/test_harness_cli.py tests/test_harness_fleet.py tests/test_harness_watch.py tests/test_harness_goal.py tests/test_harness_product_audit.py tests/test_harness_export.py tests/test_harness_controller_sanitization.py -q`
+- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+
+## Boundaries
+
+- Do not mutate product repos in this change.
+- Do not store or print secret values.
+- Keep beginner UX `install -> goal/from -> watch`; target version/release commands are operational/status commands.
+
+---
+
 # Harness Production Goal Integrity Plan
 
 Diet-Exception: production goal gate modules and tests add temporary guarded surface until follow-up code diet extracts watch/goal helpers

@@ -23,6 +23,7 @@ CONTROLLER_SANITIZATION_SELF_TEST_TARGETS = (
     "tests/test_harness_guard.py",
     "tests/test_harness_product_audit.py",
     "tests/test_harness_product_maintainability.py",
+    "tests/test_harness_product_setup_readiness.py",
     "tests/test_harness_release.py",
     "tests/test_harness_relay_store.py",
     "tests/test_harness_telegram_bridge.py",
