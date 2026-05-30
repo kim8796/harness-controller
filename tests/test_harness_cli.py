@@ -1117,11 +1117,11 @@ def test_watch_preserves_manual_review_only_status(monkeypatch, tmp_path: Path, 
     _init_product_repo(product)
     monkeypatch.setattr(module, "repo_root", lambda: controller)
     monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.27")
-    monkeypatch.setattr(module.time, "sleep", lambda _seconds: pytest.fail("stop-on-idle must not sleep"))
 
     assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
     assert module.main(["goal", "manual-review only smoke"]) == 0
     record = module.harness_controller.default_target(controller)
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: pytest.fail("stop-on-idle must not sleep"))
 
     def fake_refill(_record):
         return {

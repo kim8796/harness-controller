@@ -7,6 +7,8 @@ import re
 from pathlib import Path
 from typing import Mapping, Sequence
 
+import harness_capability_registry
+
 
 SCHEMA_VERSION = 1
 ENV_FILE_NAMES = (".env", ".env.local", ".env.production", ".env.development")
@@ -21,122 +23,7 @@ SECRET_VALUE_RE = re.compile(
 )
 
 
-GATE_REQUIREMENTS: dict[str, tuple[dict[str, object], ...]] = {
-    "deployed_url": (
-        {
-            "id": "vercel_project",
-            "provider": "vercel",
-            "label": "Vercel production project",
-            "groups": (("VERCEL_PROJECT_ID",),),
-            "next_action": "Vercel Dashboard에서 Project를 만들고 project id/name을 확인하세요.",
-        },
-        {
-            "id": "production_app_url",
-            "provider": "vercel",
-            "label": "Production HTTPS app URL",
-            "groups": (("NEXT_PUBLIC_APP_URL", "APP_URL"),),
-            "next_action": "Vercel production domain을 NEXT_PUBLIC_APP_URL 또는 APP_URL로 설정하세요.",
-        },
-    ),
-    "production_e2e_smoke": (
-        {
-            "id": "production_app_url",
-            "provider": "vercel",
-            "label": "Production HTTPS app URL",
-            "groups": (("NEXT_PUBLIC_APP_URL", "APP_URL"),),
-            "next_action": "production smoke가 접근할 HTTPS URL을 설정하세요.",
-        },
-    ),
-    "database_persistence": (
-        {
-            "id": "supabase_browser_client",
-            "provider": "supabase",
-            "label": "Supabase browser client env",
-            "groups": (("NEXT_PUBLIC_SUPABASE_URL",), ("NEXT_PUBLIC_SUPABASE_ANON_KEY",)),
-            "next_action": "Supabase Project Settings > API에서 URL과 anon key를 product env에 넣으세요.",
-        },
-        {
-            "id": "supabase_server_key",
-            "provider": "supabase",
-            "label": "Supabase server-side service role",
-            "groups": (("SUPABASE_SERVICE_ROLE_KEY",),),
-            "next_action": "Supabase service role key는 server/runtime secret으로만 설정하세요.",
-        },
-    ),
-    "auth_flow": (
-        {
-            "id": "supabase_browser_client",
-            "provider": "supabase",
-            "label": "Supabase browser client env",
-            "groups": (("NEXT_PUBLIC_SUPABASE_URL",), ("NEXT_PUBLIC_SUPABASE_ANON_KEY",)),
-            "next_action": "Supabase Auth provider와 redirect URL을 설정하세요.",
-        },
-    ),
-    "realtime_two_user_chat": (
-        {
-            "id": "supabase_realtime",
-            "provider": "supabase",
-            "label": "Supabase Realtime project readiness",
-            "groups": (("NEXT_PUBLIC_SUPABASE_URL",), ("NEXT_PUBLIC_SUPABASE_ANON_KEY",)),
-            "next_action": "Supabase Realtime을 사용할 테이블 publication/RLS 정책을 확인하세요.",
-        },
-    ),
-    "image_upload": (
-        {
-            "id": "supabase_storage",
-            "provider": "supabase",
-            "label": "Supabase Storage readiness",
-            "groups": (("NEXT_PUBLIC_SUPABASE_URL",), ("NEXT_PUBLIC_SUPABASE_ANON_KEY",), ("SUPABASE_SERVICE_ROLE_KEY",)),
-            "next_action": "Supabase Storage bucket과 업로드 정책을 준비하세요.",
-        },
-    ),
-    "report_block": (
-        {
-            "id": "supabase_moderation_storage",
-            "provider": "supabase",
-            "label": "Supabase moderation persistence",
-            "groups": (("NEXT_PUBLIC_SUPABASE_URL",), ("NEXT_PUBLIC_SUPABASE_ANON_KEY",), ("SUPABASE_SERVICE_ROLE_KEY",)),
-            "next_action": "reports/blocks 테이블과 RLS 정책을 준비하세요.",
-        },
-    ),
-    "ai_reply": (
-        {
-            "id": "openai_runtime",
-            "provider": "openai",
-            "label": "OpenAI server runtime key",
-            "groups": (("OPENAI_API_KEY",),),
-            "optional_groups": (("OPENAI_MODEL",),),
-            "next_action": "OpenAI API key를 server/runtime secret으로 설정하세요. 값을 문서나 Telegram에 붙여넣지 마세요.",
-        },
-    ),
-    "ios_native_build": (
-        {
-            "id": "apple_developer",
-            "provider": "apple",
-            "label": "Apple Developer/App Store Connect readiness",
-            "groups": (("APP_STORE_CONNECT_KEY_ID",), ("APP_STORE_CONNECT_ISSUER_ID",)),
-            "next_action": "App Store Connect API key와 signing/provisioning 준비 상태를 확인하세요.",
-        },
-    ),
-    "android_native_build": (
-        {
-            "id": "google_play_console",
-            "provider": "google-play",
-            "label": "Google Play Console readiness",
-            "groups": (("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON",),),
-            "next_action": "Play Console service account와 signing key 준비 상태를 확인하세요.",
-        },
-    ),
-    "store_release_readiness": (
-        {
-            "id": "store_release_metadata",
-            "provider": "store",
-            "label": "Store release metadata readiness",
-            "groups": (("APP_STORE_CONNECT_KEY_ID",), ("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON",)),
-            "next_action": "스토어 심사 정보, privacy label, release notes, signing 자료를 준비하세요.",
-        },
-    ),
-}
+GATE_REQUIREMENTS: dict[str, tuple[dict[str, object], ...]] = harness_capability_registry.setup_requirements_by_gate()
 
 
 def _parse_dotenv_line(line: str) -> tuple[str, str] | None:
@@ -202,16 +89,28 @@ def _requirement_map_for_gates(gates: set[str]) -> dict[str, dict[str, object]]:
                 {
                     "id": req_id,
                     "provider": requirement["provider"],
+                    "provider_id": requirement.get("provider_id") or requirement["provider"],
+                    "capability_id": requirement.get("capability_id") or "",
+                    "setup_pack_id": requirement.get("setup_pack_id") or req_id,
                     "label": requirement["label"],
                     "groups": tuple(requirement.get("groups") or ()),
                     "optional_groups": tuple(requirement.get("optional_groups") or ()),
                     "next_action": requirement["next_action"],
                     "impacted_gates": [],
+                    "capability_ids": [],
                 },
             )
             impacted = current["impacted_gates"]
             if isinstance(impacted, list) and gate_id not in impacted:
                 impacted.append(gate_id)
+            capability_ids = current.get("capability_ids")
+            capability_id = str(requirement.get("capability_id") or "")
+            if isinstance(capability_ids, list) and capability_id and capability_id not in capability_ids:
+                capability_ids.append(capability_id)
+    for requirement in requirements.values():
+        capability_ids = requirement.get("capability_ids")
+        if isinstance(capability_ids, list):
+            requirement["capability_id"] = capability_ids[0] if len(capability_ids) == 1 else ""
     return requirements
 
 
@@ -275,6 +174,10 @@ def build_setup_readiness_report(
             {
                 "id": req_id,
                 "provider": requirement.get("provider"),
+                "provider_id": requirement.get("provider_id") or requirement.get("provider"),
+                "capability_id": requirement.get("capability_id") or "",
+                "capability_ids": list(requirement.get("capability_ids") or ()),
+                "setup_pack_id": requirement.get("setup_pack_id") or req_id,
                 "label": requirement.get("label"),
                 "state": "missing" if missing_groups else "present",
                 "required_groups": groups,

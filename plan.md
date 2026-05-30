@@ -1,30 +1,34 @@
-# Capability Provider Registry Introduction Plan
+# Setup Pack Readiness Migration Plan
 
-Diet-Exception: scripts/harness_capability_registry.py and registry tests add focused capability/provider metadata before later setup-pack migration.
+Diet-Exception: setup pack registry migration touches readiness tests and compatibility surfaces before provider decision assistant split.
 
 Goal:
-- Introduce a controller-owned capability/provider registry without changing existing goal, gate, or setup readiness behavior.
-- Keep this scoped to PR 2 of the provider/goal UX roadmap.
+- Move setup readiness requirement metadata behind the capability/provider registry.
+- Preserve existing setup readiness behavior and report schema while adding capability/provider/setup pack ids.
 
 Behavior:
-- Add stable capability ids for deployment, auth, db persistence, realtime, storage, AI, moderation, native, store release, and maintainability handoff.
-- Add provider pack metadata for Vercel, Supabase, OpenAI, Apple, Google Play, and Store.
-- Existing `harness_goal_contract`, `harness_goal_gates`, and `harness_product_setup_readiness` outputs must remain compatible.
-- Registry output must be secret-free and deterministic.
+- Existing `provider` field remains unchanged for compatibility.
+- Each readiness requirement also exposes:
+  - `provider_id`
+  - `capability_id`
+  - `setup_pack_id`
+- Vercel, Supabase, OpenAI, Apple, Google Play, and Store requirements remain unchanged in content and next actions.
+- Readiness reports stay secret-free and deterministic.
 
 Implementation:
-- Add `scripts/harness_capability_registry.py`.
-- Add tests in `tests/test_harness_capability_registry.py`.
-- Include the new module/test in export and controller release-check lists.
-- Do not migrate setup readiness yet; this PR only creates the source of truth and parity tests.
-
-Tests:
-- Registry exposes the expected capability and provider ids.
-- Existing production/native gate ids are mapped by at least one capability.
-- Existing setup readiness providers are present in provider packs.
-- Metadata contains no secret-like values.
-- Controller export includes the new module and tests.
+- Extend `scripts/harness_capability_registry.py` with setup requirement metadata and helper accessors.
+- Change `scripts/harness_product_setup_readiness.py` to read gate requirements from the registry.
+- Keep `GATE_REQUIREMENTS` exported as a compatibility alias.
+- Add focused tests for add-only fields, setup pack mapping, and unchanged missing/present behavior.
 
 Verification:
-- `python3 -m pytest tests/test_harness_capability_registry.py tests/test_harness_goal_contract.py tests/test_harness_goal_gates.py tests/test_harness_product_setup_readiness.py tests/test_harness_export.py tests/test_harness_cli.py -q`
+- `python3 -m pytest tests/test_harness_capability_registry.py tests/test_harness_product_setup_readiness.py tests/test_harness_export.py tests/test_harness_cli.py -q`
 - `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+
+Correction 1:
+- Reviewer found that one setup pack can satisfy multiple capabilities.
+- Do not emit a misleading singular `capability_id` when an aggregated setup
+  pack has multiple `capability_ids`.
+- Add duplicate setup-pack coverage for `supabase_browser_client`.
+- Narrow an unrelated watch test monkeypatch so install runtime probing does not
+  trip the stop-on-idle sleep assertion during full guard.
