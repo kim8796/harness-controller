@@ -156,6 +156,8 @@ def test_argparse_help_and_invalid_command_remain_advanced_reference(capsys) -> 
     output = capsys.readouterr().out
     assert "usage: harness goal from" in output
     assert "attachments" in output
+    assert "Relative paths may come from cwd or the selected target product repo" in output
+    assert "Image directories are expanded non-recursively" in output
     assert "--image" in output
     assert "--caption" in output
     assert "--target" not in output
@@ -567,6 +569,125 @@ def test_goal_from_cli_accepts_multi_value_image_option(monkeypatch, tmp_path: P
         (controller / "targets" / "demo" / "goals" / active["goal_id"] / "goal.json").read_text(encoding="utf-8")
     )
     assert [item["caption"] for item in goal_payload["attachments"]] == ["첫", "둘"]
+
+
+def test_goal_from_cli_resolves_relative_paths_from_default_target_repo(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module, "_controller_version", lambda: "test")
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    capsys.readouterr()
+
+    spec = product / "docs" / "goal-spec.md"
+    spec.parent.mkdir()
+    spec.write_text("# 제품 목표\n\n## 완료 조건\n- 상대경로가 동작한다.\n", encoding="utf-8")
+    screenshots = product / "screenshots"
+    screenshots.mkdir()
+    (screenshots / "b.jpg").write_bytes(b"b")
+    (screenshots / "a.png").write_bytes(b"a")
+    (screenshots / "note.txt").write_text("ignore\n", encoding="utf-8")
+    monkeypatch.chdir(controller)
+
+    assert module.main(["goal", "from", "docs/goal-spec.md", "screenshots/", "--caption", "제품 화면"]) == 0
+    output = capsys.readouterr().out
+    assert "- 첨부: 2개" in output
+
+    active = json.loads((controller / "targets" / "demo" / "goals" / "active-goal.json").read_text(encoding="utf-8"))
+    goal_payload = json.loads(
+        (controller / "targets" / "demo" / "goals" / active["goal_id"] / "goal.json").read_text(encoding="utf-8")
+    )
+    assert goal_payload["title"] == "제품 목표"
+    assert [Path(item["path"]).name for item in goal_payload["attachments"]] == [
+        "image-01-a.png",
+        "image-02-b.jpg",
+    ]
+    assert not (product / "targets").exists()
+
+
+def test_goal_from_cli_resolves_relative_paths_from_selected_target(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    first_product = tmp_path / "first-product"
+    second_product = tmp_path / "second-product"
+    controller.mkdir()
+    _init_product_repo(first_product)
+    _init_product_repo(second_product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module, "_controller_version", lambda: "test")
+    assert module.main(["install", "--repo", str(first_product), "--id", "first", "--default"]) == 0
+    assert module.main(["target", "add", "second", "--repo", str(second_product), "--branch", "main"]) == 0
+    capsys.readouterr()
+
+    spec = second_product / "goal-spec.md"
+    spec.write_text("# 두 번째 목표\n\n## 완료 조건\n- 선택 target 기준이다.\n", encoding="utf-8")
+    image = second_product / "screen.png"
+    image.write_bytes(b"screen")
+    monkeypatch.chdir(controller)
+
+    assert module.main(["goal", "from", "goal-spec.md", "screen.png", "--target", "second"]) == 0
+    output = capsys.readouterr().out
+    assert "- 대상: `second`" in output
+    assert "- 첨부: 1개" in output
+
+    assert not (first_product / "targets").exists()
+    assert not (second_product / "targets").exists()
+    active = json.loads((controller / "targets" / "second" / "goals" / "active-goal.json").read_text(encoding="utf-8"))
+    goal_payload = json.loads(
+        (controller / "targets" / "second" / "goals" / active["goal_id"] / "goal.json").read_text(encoding="utf-8")
+    )
+    assert goal_payload["title"] == "두 번째 목표"
+
+
+def test_goal_from_cli_missing_relative_path_reports_search_bases(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module, "_controller_version", lambda: "test")
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    capsys.readouterr()
+    monkeypatch.chdir(controller)
+
+    assert module.main(["goal", "from", "missing-goal.md"]) == 2
+    output = capsys.readouterr().out
+    assert "goal input path not found: missing-goal.md" in output
+    assert "checked:" in output
+    assert controller.as_posix() in output
+    assert product.as_posix() in output
+    assert (controller / "targets" / "demo").as_posix() in output
+    assert not (controller / "targets" / "demo" / "goals" / "active-goal.json").exists()
+
+
+def test_goal_from_cli_rejects_target_relative_symlink_parent(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    external = tmp_path / "external"
+    controller.mkdir()
+    external.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module, "_controller_version", lambda: "test")
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    capsys.readouterr()
+
+    docs = product / "docs"
+    docs.mkdir()
+    linked = docs / "linked"
+    linked.symlink_to(external, target_is_directory=True)
+    (external / "goal-spec.md").write_text("# Symlink Goal\n\n## 완료 조건\n- 거부된다.\n", encoding="utf-8")
+    monkeypatch.chdir(controller)
+
+    assert module.main(["goal", "from", "docs/linked/goal-spec.md"]) == 2
+    output = capsys.readouterr().out
+    assert "goal input must not be a symlink" in output
+    assert not (controller / "targets" / "demo" / "goals" / "active-goal.json").exists()
 
 
 def test_repo_harness_shim_reexecs_controller_venv(tmp_path: Path) -> None:

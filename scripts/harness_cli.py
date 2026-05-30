@@ -310,6 +310,57 @@ def _target_path(raw: Path) -> Path:
     return (Path.cwd() / raw).resolve()
 
 
+def _goal_from_search_bases(record: harness_controller.TargetRecord) -> tuple[Path, ...]:
+    bases: list[Path] = []
+    for base in (Path.cwd(), record.repo, record.state_root, repo_root()):
+        candidate = Path(base).expanduser().resolve(strict=False)
+        if candidate not in bases:
+            bases.append(candidate)
+    return tuple(bases)
+
+
+def _format_goal_from_checked_bases(bases: Sequence[Path]) -> str:
+    return ", ".join(path.as_posix() for path in bases)
+
+
+def _goal_from_has_symlink_component(base: Path, raw: Path) -> bool:
+    current = base
+    for part in raw.parts:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
+def _goal_from_candidate(base: Path, raw: Path) -> Path | None:
+    candidate = base / raw
+    if not candidate.exists() and not candidate.is_symlink():
+        return None
+    if _goal_from_has_symlink_component(base, raw):
+        raise HarnessCliError(f"goal input must not be a symlink: {raw.as_posix()}")
+    resolved_base = base.resolve(strict=False)
+    resolved_candidate = candidate.resolve(strict=False)
+    if not (resolved_candidate == resolved_base or _path_is_relative_to(resolved_candidate, resolved_base)):
+        raise HarnessCliError(f"goal input path escapes search base: {raw.as_posix()}")
+    return candidate
+
+
+def _resolve_goal_from_input(raw: Path, *, record: harness_controller.TargetRecord) -> Path:
+    original = Path(raw)
+    expanded = original.expanduser()
+    if expanded.is_absolute():
+        return expanded
+    bases = _goal_from_search_bases(record)
+    for base in bases:
+        candidate = _goal_from_candidate(base, expanded)
+        if candidate is not None:
+            return candidate
+    raise HarnessCliError(
+        "goal input path not found: "
+        f"{original.as_posix()}; checked: {_format_goal_from_checked_bases(bases)}"
+    )
+
+
 def _selected_profile(args: argparse.Namespace) -> str:
     if getattr(args, "no_telegram", False):
         return harness_profiles.PROFILE_MINIMAL
@@ -1571,6 +1622,8 @@ def _build_goal_from_parser() -> argparse.ArgumentParser:
         prog="harness goal from",
         description="Register a product goal from a markdown spec.",
         epilog=(
+            "Relative paths may come from cwd or the selected target product repo.\n"
+            "Image directories are expanded non-recursively.\n\n"
             "Examples:\n"
             "  harness goal from goal-spec.md screen1.png screen2.jpg screenshots/\n"
             "  harness goal from goal-spec.md screenshots/ --caption 'current screen reference'\n"
@@ -1579,7 +1632,12 @@ def _build_goal_from_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("source", type=Path, help="Path to goal-spec.md.")
-    parser.add_argument("attachments", nargs="*", type=Path, help="Optional image files or non-recursive image directories.")
+    parser.add_argument(
+        "attachments",
+        nargs="*",
+        type=Path,
+        help="Optional image files or non-recursive image directories; relative paths may come from cwd or the selected target.",
+    )
     parser.add_argument(
         "--image",
         type=Path,
@@ -1601,7 +1659,7 @@ def _build_goal_from_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _goal_from_image_paths(args: argparse.Namespace) -> tuple[Path, ...]:
+def _goal_from_image_paths(args: argparse.Namespace, *, record: harness_controller.TargetRecord) -> tuple[Path, ...]:
     paths: list[Path] = []
     paths.extend(Path(path) for path in getattr(args, "attachments", []) or ())
     for group in getattr(args, "image", []) or ():
@@ -1609,7 +1667,7 @@ def _goal_from_image_paths(args: argparse.Namespace) -> tuple[Path, ...]:
             paths.extend(Path(path) for path in group)
         else:
             paths.append(Path(group))
-    return tuple(_target_path(path) for path in paths)
+    return tuple(_resolve_goal_from_input(path, record=record) for path in paths)
 
 
 def command_goal_draft(args: argparse.Namespace) -> int:
@@ -1648,8 +1706,8 @@ def command_goal_from(args: argparse.Namespace) -> int:
         goal = harness_goal.create_goal_from_spec(
             state_root=record.state_root,
             target_id=record.target_id,
-            source=_target_path(args.source),
-            images=_goal_from_image_paths(args),
+            source=_resolve_goal_from_input(args.source, record=record),
+            images=_goal_from_image_paths(args, record=record),
             image_captions=tuple(str(caption) for caption in getattr(args, "caption", []) or ()),
             replace=bool(getattr(args, "replace", False)),
         )
