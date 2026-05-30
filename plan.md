@@ -1,93 +1,120 @@
-# Global Learning Planner Feedback Implementation Plan
+# Fleet Version Release Control Implementation Plan
 
-Diet-Exception: global reusable planner learning adds a focused helper module and regression tests for secret-safe cross-target planning
+Diet-Exception: fleet release control adds focused release-state policy and regression tests for safer multi-target operations
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans. This PR is one small checkpoint in the provider/goal UX roadmap.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans. Keep this PR focused on fleet/version/release state clarity; do not expand beginner commands.
 
-**Goal:** Improve controller-local reusable learning so future goal planning can avoid repeated setup, validation, fake-success, merge, and deploy failures without copying raw evidence or product contents.
+**Goal:** Make multi-project fleet status and target release/version management easier to understand, with production releases blocked unless real gate evidence is current.
 
-**Architecture:** Keep target-specific evidence in each target sidecar. Promote only deterministic, compact, redacted lessons to `targets/_global/memory`, then let `harness_goal` read a sanitized subset as roadmap/task hints. Do not add beginner commands or mutate product repos.
+**Architecture:** Keep version, deployment, and release receipts target-sidecar only. `harness_release.py` owns release-state policy and next-action derivation; `harness_fleet.py` projects concise per-target operations state; `harness_cli.py` renders the same state for `target version/release`. Product repos are read-only except normal git inspection.
 
-**Tech Stack:** Python stdlib, existing `scripts/harness_fleet.py`, `scripts/harness_goal.py`, pytest, ruff, controller export guard.
+**Tech Stack:** Python stdlib, existing Harness target sidecar receipts, pytest, ruff, full `harness_guard` pre-push.
 
 ---
 
 ## Scope
 
-- Modify `scripts/harness_fleet.py` to classify more reusable event types and expose a read-only planner hint API.
-- Add `scripts/harness_goal_learning.py` as a focused bridge from goal planning to safe global memory hints.
-- Modify `scripts/harness_goal.py` to pass compact hints into `build_roadmap_model()` and attach them to roadmap/tasks.
-- Modify `scripts/harness_guard.py` so the new helper maps to the focused goal/fleet/export tests.
-- Add focused coverage in `tests/test_harness_fleet.py` and `tests/test_harness_goal.py`.
-- Run focused tests and full pre-push guard.
+- Improve `scripts/harness_release.py` so production release readiness explicitly requires current deployment + required production gates.
+- Improve `scripts/harness_fleet.py` so `fleet status --json` exposes target product standard, gate debt, setup blocker, latest/current version/release/deployment, and one next action.
+- Improve `scripts/harness_cli.py` target version/release text output to show release blocker reason and next action clearly.
+- Add focused tests in `tests/test_harness_release.py`, `tests/test_harness_fleet.py`, and `tests/test_harness_cli.py`.
+- Do not add a new beginner command.
+- Do not write product repo files.
 
 ## Agent Roles
 
-- Memory Schema Agent: review lesson keys, dedupe, and allowed compact fields.
-- Planner Integration Agent: review `harness_goal` integration and import/coupling risks.
-- Security/Secret Reviewer: review redaction, raw evidence avoidance, symlink/path handling, and planner hint propagation.
-- Regression/Export Reviewer: covered locally because agent slot limit prevented a fourth live agent; verify no new module/export changes are required.
+- Fleet/Release Agent: review status schema and target summary projection.
+- Version Policy Agent: review release-state blockers and current/stale receipt logic.
+- UX/Operator Agent: review CLI output and next-action wording.
+- Security/Portability Agent: review secret/path redaction and sidecar-only behavior.
+- Regression/Export Agent: review tests, guard mapping, and export implications.
 
 ## Implementation Tasks
 
-### Task 1: Global Lesson Quality
+### Task 1: Release State Policy
+
+**Files:**
+- Modify: `scripts/harness_release.py`
+- Test: `tests/test_harness_release.py`
+
+- [x] Add `release_blocker_next_action(blockers)` or equivalent deterministic next-action helper.
+- [x] Add production release gate checks:
+  - `deployed_url` must be passed.
+  - `production_e2e_smoke` must be passed for production goals when present in gate status.
+  - current deployment receipt must match the current product commit for production release.
+- [x] Keep candidate release less strict than production release, but still report blockers and setup/gate debt.
+- [x] Keep stale version/release/deployment receipts visible but not current.
+- [x] Preserve redaction for secrets and provider URLs.
+
+### Task 2: Fleet Status Projection
 
 **Files:**
 - Modify: `scripts/harness_fleet.py`
 - Test: `tests/test_harness_fleet.py`
 
-- [ ] Add reusable classifications for `validation-failed`, `scope-normalization`, `fake-success-audit`, `deploy-blocked`, and production gate events without storing raw logs.
-- [ ] Keep samples small: event type, outcome class, capability/gate/provider ids, reason class, booleans, counts.
-- [ ] Add tests that secret-like payloads, raw logs, and absolute product paths do not appear in JSONL/index.
-- [ ] Add tests that repeated lessons update `count`, `first_seen_at`, `last_seen_at`, and `source_target_ids`.
+- [x] Add `operations` or `release_control` summary per target:
+  - `product_standard`
+  - `pending_gate_debt`
+  - `setup_blocked`
+  - `latest_version_id`
+  - `latest_deployment_id`
+  - `latest_release_id`
+  - `current_release_id`
+  - `release_status`
+  - `next_action`
+- [x] Keep existing fields backward compatible.
+- [x] Ensure one broken target does not break fleet status.
+- [x] Exclude archived targets as existing list behavior does.
 
-### Task 2: Planner Hint API
-
-**Files:**
-- Modify: `scripts/harness_fleet.py`
-- Test: `tests/test_harness_fleet.py`
-
-- [ ] Add `planner_reusable_lesson_hints(controller_root, target_id, product_standard, capability_ids, limit=5)`.
-- [ ] Read only `reusable-index.json`; fail closed to `[]` on missing/malformed/symlinked memory.
-- [ ] Return secret-free compact hints: `lesson_key`, `source_event`, `outcome`, `count`, `reuse_hint`, `capability_ids`, `gate_ids`, `provider_ids`, `reason_class`.
-- [ ] Prefer hints from the same target and matching capabilities/gates/providers, then highest count/recent lessons.
-
-### Task 3: Roadmap Feedback Integration
+### Task 3: CLI Version/Release UX
 
 **Files:**
-- Modify: `scripts/harness_goal.py`
-- Create: `scripts/harness_goal_learning.py`
-- Test: `tests/test_harness_goal.py`
+- Modify: `scripts/harness_cli.py`
+- Test: `tests/test_harness_cli.py`
 
-- [ ] In `build_roadmap()`, import/use `harness_fleet.planner_reusable_lesson_hints()` without creating a product dependency.
-- [ ] Store hints on the roadmap as `reusable_lesson_hints`.
-- [ ] Attach relevant hints to production task metadata and task notes so implementers see prior blockers.
-- [ ] Ensure `build_roadmap_model()` remains unit-testable with optional `reusable_lesson_hints`.
+- [x] `target version` should show gate debt, setup/deploy blockers, current vs latest receipts, and one next command.
+- [x] `target release --candidate` should allow creating a candidate receipt when blockers exist but record blockers if present.
+- [x] `target release --promote` should fail closed unless current release candidate exists and production release blockers are clear.
+- [x] JSON output should expose stable `next_action` without secrets.
 
 ### Task 4: Verification And Review
 
 **Files:**
-- Modify as needed: tests only for focused regressions.
+- Modify as needed only for focused test/export/guard requirements.
 
-- [ ] Run ruff on changed Python files.
-- [ ] Run focused pytest:
-  - `python3 -m pytest tests/test_harness_fleet.py tests/test_harness_goal.py -q`
-- [ ] Run full guard:
+- [x] Run focused lint:
+  - `python3 -m ruff check scripts/harness_release.py scripts/harness_fleet.py scripts/harness_cli.py tests/test_harness_release.py tests/test_harness_fleet.py tests/test_harness_cli.py`
+- [x] Run focused tests:
+  - `python3 -m pytest tests/test_harness_release.py tests/test_harness_fleet.py tests/test_harness_cli.py -q`
+- [x] Run full guard:
   - `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
-- [ ] Apply reviewer corrections until blocker count is zero.
+- [ ] If any reviewer or guard finds a blocker, write correction notes here, patch, rerun focused tests, rerun review, and repeat until blocker count is zero.
 
 ## Acceptance Criteria
 
-- Reusable global memory remains compact, deterministic, redacted, and controller-local.
-- Planner output includes reusable lesson hints when relevant.
-- Raw evidence, raw logs, product file contents, absolute product paths, and secret-like values are not copied into global memory or roadmap hints.
-- Existing fleet status and goal roadmap behavior remains compatible.
-- No product repo files are changed.
-- Focused tests and full guard pass before PR creation/merge.
+- `fleet status --json` shows each active target's product standard, pending gate debt, latest/current version/deployment/release, release blocker, and one next action.
+- Stale release receipts do not count as current.
+- Production release cannot be marked released without current deployment plus required deployment/smoke gate evidence.
+- Candidate release can be recorded as an intermediate milestone but does not imply production release.
+- Secret-like values and absolute product paths are not emitted in release/fleet JSON.
+- Product repo files are not written.
+- Focused tests, full guard, and PR CI pass before merge.
 
-## Correction Notes
+## Correction 1: Receipt Redaction Gap
 
-- Planner Integration review flagged module-cycle risk. Keep `harness_goal` free of top-level `harness_fleet` imports; use a local import only inside roadmap generation and keep `build_roadmap_model()` testable with explicit hints.
-- Security review flagged raw active goal title/id leakage and incomplete path redaction. Fleet status now projects active goal id/title through `safe_value()`, and redaction covers Unix paths with spaces plus Windows user paths.
-- Memory Schema review flagged that queue reports dropped rich metadata. Queue report candidates now copy task metadata, including gate/evidence/spec refs and reusable lesson hints.
-- Full guard flagged the new helper as missing related tests. Guard related-test mapping now points `scripts/harness_goal_learning.py` to goal/fleet/export focused coverage.
+- [x] Redact filesystem paths and structural path fields such as `root_context`, `state_root`, and `target_root` from release receipts.
+- [x] Treat `_KEY` credential names as secret-bearing keys, including Supabase-style key names.
+- [x] Add tests proving receipt payloads with absolute paths and provider key values do not leak through release state, fleet status, or CLI JSON.
+
+## Correction 2: Review Round Blockers
+
+- [x] Production deployment receipt must be same commit, production environment, and include a deployed URL.
+- [x] CLI JSON must keep backward-compatible `target` and `verification.git` keys in sanitized form.
+- [x] A single broken release receipt/projection must not abort `fleet status`.
+
+## Verification Notes
+
+- Focused lint passed: `python3 -m ruff check scripts/harness_release.py scripts/harness_fleet.py scripts/harness_cli.py tests/test_harness_release.py tests/test_harness_fleet.py tests/test_harness_cli.py`
+- Focused tests passed after correction loop: `python3 -m pytest tests/test_harness_release.py tests/test_harness_fleet.py tests/test_harness_cli.py -q` => 227 passed.
+- Final reviewer wave reported blocker count 0 after correction 2.
+- Full guard passed: `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`; changed-file pytest 227 passed, controller sanitizer self-test 869 passed.

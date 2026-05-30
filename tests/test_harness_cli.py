@@ -240,11 +240,20 @@ def test_target_version_reports_setup_readiness_blockers(monkeypatch, tmp_path: 
 
     assert module.main(["target", "version", "demo", "--json"]) == 2
     payload = json.loads(capsys.readouterr().out)
+    serialized = json.dumps(payload, ensure_ascii=False)
 
     assert payload["target_id"] == "demo"
     assert "setup-readiness-missing" in payload["blockers"]
     assert payload["setup_readiness"]["values_redacted"] is True
     assert "OPENAI_API_KEY" in json.dumps(payload, ensure_ascii=False)
+    assert payload["target"]["target_id"] == "demo"
+    assert "repo" not in payload["target"]
+    assert payload["verification"]["git"]["clean"] is True
+    assert controller.as_posix() not in serialized
+    assert product.as_posix() not in serialized
+    assert "state_root" not in serialized
+    assert "target_root" not in serialized
+    assert "root_context" not in serialized
 
 
 def test_target_release_candidate_writes_sidecar_receipt(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -264,9 +273,14 @@ def test_target_release_candidate_writes_sidecar_receipt(monkeypatch, tmp_path: 
 
     assert module.main(["target", "release", "demo", "--candidate", "--version", "v-test", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
+    serialized = json.dumps(payload, ensure_ascii=False)
 
     assert payload["release_type"] == "candidate"
     assert payload["receipt_path"] == "releases/v-test.json"
+    assert "state_root" not in serialized
+    assert "target_root" not in serialized
+    assert controller.as_posix() not in serialized
+    assert product.as_posix() not in serialized
     receipt = controller / "targets" / "demo" / payload["receipt_path"]
     assert receipt.exists()
     receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
@@ -274,7 +288,7 @@ def test_target_release_candidate_writes_sidecar_receipt(monkeypatch, tmp_path: 
     assert not (product / "targets").exists()
 
 
-def test_target_release_candidate_blocks_when_setup_missing(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_target_release_candidate_records_blockers_when_setup_missing(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_module()
     controller = tmp_path / "controller"
     product = tmp_path / "product"
@@ -294,12 +308,18 @@ def test_target_release_candidate_blocks_when_setup_missing(monkeypatch, tmp_pat
         text="배포 가능한 production Vercel Supabase OpenAI 채팅 서비스",
     )
 
-    assert module.main(["target", "release", "demo", "--candidate", "--version", "v-blocked", "--json"]) == 2
+    assert module.main(["target", "release", "demo", "--candidate", "--version", "v-blocked", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
+    serialized = json.dumps(payload, ensure_ascii=False)
 
-    assert payload["status"] == "blocked"
-    assert "setup-readiness-missing" in payload["blockers"]
-    assert not (controller / "targets" / "demo" / "releases" / "v-blocked.json").exists()
+    assert payload["release_state"]["status"] == "blocked"
+    assert "setup-readiness-missing" in payload["release_state"]["blockers"]
+    assert (controller / "targets" / "demo" / "releases" / "v-blocked.json").exists()
+    assert controller.as_posix() not in serialized
+    assert product.as_posix() not in serialized
+    assert "state_root" not in serialized
+    assert "target_root" not in serialized
+    assert "root_context" not in serialized
 
 
 def test_target_release_promote_blocks_when_setup_or_gates_pending(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -351,7 +371,7 @@ def test_target_release_promote_requires_current_candidate(monkeypatch, tmp_path
     assert payload["blockers"] == ["no-current-release-candidate"]
 
 
-def test_target_release_promotes_existing_current_candidate(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_target_release_promote_blocks_without_production_evidence(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_module()
     controller = tmp_path / "controller"
     product = tmp_path / "product"
@@ -368,6 +388,57 @@ def test_target_release_promotes_existing_current_candidate(monkeypatch, tmp_pat
 
     assert module.main(["target", "release", "demo", "--candidate", "--version", "v-candidate", "--json"]) == 0
     capsys.readouterr()
+    assert module.main(["target", "release", "demo", "--promote", "--version", "v-production", "--json"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["status"] == "blocked"
+    assert "required-gate-pending:deployed_url" in payload["blockers"]
+    assert "current-deployment-missing" in payload["blockers"]
+    assert not (controller / "targets" / "demo" / "releases" / "v-production.json").exists()
+    assert not (product / "targets").exists()
+
+
+def test_target_release_promotes_existing_current_candidate_with_production_evidence(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    head = _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    record = module.harness_controller.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.0",
+    )
+    assert module.main(["target", "release", "demo", "--candidate", "--version", "v-candidate", "--json"]) == 0
+    capsys.readouterr()
+    module.harness_release.write_receipt(
+        record.state_root,
+        target_id="demo",
+        kind="deployment",
+        receipt_id="current-deployment",
+        payload={"product_commit_sha": head, "environment": "production", "url": "https://example.test"},
+    )
+    ready_state = module.harness_release.build_target_release_state(
+        record.state_root,
+        target_id="demo",
+        product_commit_sha=head,
+        gate_status={
+            "status": "passed",
+            "pending_gate_ids": [],
+            "passed_gate_ids": ["deployed_url", "production_e2e_smoke"],
+        },
+        setup_readiness={"ok": True},
+    )
+    ready_state["active_goal_id"] = ""
+    ready_state["target_summary"] = {"target_id": "demo"}
+    ready_state["verification"] = {"ok": True, "blockers": [], "branch": {"expected": "main", "actual": "main"}}
+    monkeypatch.setattr(module, "_target_release_state", lambda _record: ready_state)
+
     assert module.main(["target", "release", "demo", "--promote", "--version", "v-production", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
 
@@ -376,7 +447,7 @@ def test_target_release_promotes_existing_current_candidate(monkeypatch, tmp_pat
     receipt = controller / "targets" / "demo" / payload["receipt_path"]
     receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
     assert receipt_payload["payload"]["release_type"] == "production"
-    assert receipt_payload["payload"]["product_commit_sha"]
+    assert receipt_payload["payload"]["product_commit_sha"] == head
     assert not (product / "targets").exists()
 
 
