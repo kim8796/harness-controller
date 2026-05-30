@@ -4,6 +4,7 @@ import hashlib
 import re
 from typing import Mapping, Sequence
 
+import harness_capability_registry
 import harness_goal_gates
 
 SCHEMA_VERSION = 2
@@ -209,6 +210,91 @@ def completion_gates_for(product_standard: str) -> list[dict[str, object]]:
     return [dict(gate) for gate in harness_goal_gates.gates_for_standard(product_standard)]
 
 
+def _setup_pack_ids_for_decision(capability_id: str, provider_id: str) -> list[str]:
+    gate_ids = set(harness_capability_registry.gate_ids_for_capability(capability_id))
+    setup_pack_ids: list[str] = []
+    for gate_id in gate_ids:
+        for requirement in harness_capability_registry.setup_requirements_for_gate(gate_id):
+            if str(requirement.get("provider_id") or requirement.get("provider") or "") != provider_id:
+                continue
+            setup_pack_id = str(requirement.get("setup_pack_id") or requirement.get("id") or "").strip()
+            if setup_pack_id and setup_pack_id not in setup_pack_ids:
+                setup_pack_ids.append(setup_pack_id)
+    return setup_pack_ids
+
+
+def _provider_label(provider_id: str) -> str:
+    provider = harness_capability_registry.provider_pack_by_id(provider_id)
+    if provider is None:
+        return provider_id
+    return str(provider.get("label") or provider_id)
+
+
+def _provider_capability_ids(provider_id: str) -> tuple[str, ...]:
+    provider = harness_capability_registry.provider_pack_by_id(provider_id)
+    if provider is None:
+        return tuple()
+    return tuple(str(item) for item in provider.get("capability_ids", []) if str(item))
+
+
+def resolve_provider_decisions(required_capabilities: Sequence[str], *texts: str) -> dict[str, object]:
+    explicit_provider_ids = harness_capability_registry.detect_provider_ids(*texts)
+    decisions: dict[str, dict[str, object]] = {}
+    suggestions: list[dict[str, object]] = []
+    sources: set[str] = set()
+    for capability_id in sorted({str(item) for item in required_capabilities if str(item)}):
+        supported_explicit = [
+            provider_id
+            for provider_id in explicit_provider_ids
+            if capability_id in _provider_capability_ids(provider_id)
+        ]
+        if supported_explicit:
+            provider_ids = supported_explicit
+            source = "spec"
+        else:
+            provider_ids = list(harness_capability_registry.default_provider_ids_for_capability(capability_id))
+            source = "recommended" if provider_ids else "none"
+        sources.add(source)
+        decisions[capability_id] = {"provider_ids": provider_ids, "source": source}
+        for provider_id in provider_ids:
+            setup_pack_ids = _setup_pack_ids_for_decision(capability_id, provider_id)
+            suggestions.append(
+                {
+                    "capability_id": capability_id,
+                    "provider_id": provider_id,
+                    "source": source,
+                    "setup_pack_ids": setup_pack_ids,
+                    "next_action": (
+                        f"{_provider_label(provider_id)} setup pack readiness를 확인하세요."
+                        if setup_pack_ids
+                        else f"{_provider_label(provider_id)} provider 설정을 goal spec 기준으로 준비하세요."
+                    ),
+                }
+            )
+    effective_sources = {source for source in sources if source != "none"}
+    if not decisions:
+        overall_source = "none"
+    elif effective_sources == {"spec"}:
+        overall_source = "spec"
+    elif effective_sources == {"recommended"}:
+        overall_source = "recommended"
+    elif effective_sources:
+        overall_source = "mixed"
+    else:
+        overall_source = "none"
+    return {
+        "detected_provider_ids": list(explicit_provider_ids),
+        "provider_decisions": decisions,
+        "provider_decision_source": overall_source,
+        "provider_decision_sources": {
+            capability_id: str(decision.get("source") or "")
+            for capability_id, decision in decisions.items()
+        },
+        "setup_status": "setup-needed" if suggestions else "not-required",
+        "setup_suggestions": suggestions,
+    }
+
+
 def build_goal_contract(
     *,
     title: str,
@@ -223,6 +309,7 @@ def build_goal_contract(
     service_level = classify_service_level(title, spec_text, criteria_text)
     product_standard = product_standard_for(title, spec_text, criteria_text, service_level=service_level)
     capabilities = required_capabilities_for(title, spec_text, criteria_text, product_standard=product_standard)
+    provider_resolution = resolve_provider_decisions(capabilities, title, spec_text, criteria_text)
     resolved_spec_path = source_spec_path or spec_path
     spec_sha256 = hashlib.sha256(spec_text.encode("utf-8")).hexdigest() if spec_text else ""
     attachment_items = [dict(attachment) for attachment in attachments]
@@ -232,6 +319,12 @@ def build_goal_contract(
         "product_standard": product_standard,
         "required_capabilities": capabilities,
         "completion_gates": completion_gates_for(product_standard),
+        "provider_decisions": provider_resolution["provider_decisions"],
+        "provider_decision_source": provider_resolution["provider_decision_source"],
+        "provider_decision_sources": provider_resolution["provider_decision_sources"],
+        "detected_provider_ids": provider_resolution["detected_provider_ids"],
+        "setup_status": provider_resolution["setup_status"],
+        "setup_suggestions": provider_resolution["setup_suggestions"],
         "source_of_truth": {
             "spec_path": resolved_spec_path,
             "spec_sha256": spec_sha256,

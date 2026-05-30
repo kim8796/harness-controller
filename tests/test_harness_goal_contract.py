@@ -80,3 +80,110 @@ def test_source_of_truth_preserves_spec_and_attachment_manifest() -> None:
     assert source["spec_sha256_prefix"]
     assert source["attachment_manifest_path"].endswith("attachment-manifest.json")
     assert source["attachment_count"] == 1
+
+
+def test_explicit_supabase_openai_stack_records_spec_provider_decisions() -> None:
+    module = _load_module()
+
+    contract = module.build_goal_contract(
+        title="배포 가능한 실시간 AI 채팅 서비스",
+        spec_text=(
+            "Stack: Next.js + Supabase + OpenAI.\n"
+            "Users need auth login, Postgres database persistence, realtime chat, image upload, and AI replies."
+        ),
+    )
+
+    decisions = contract["provider_decisions"]
+    assert decisions["auth"]["source"] == "spec"
+    assert decisions["auth"]["provider_ids"] == ["supabase"]
+    assert decisions["db_persistence"]["source"] == "spec"
+    assert decisions["ai"]["source"] == "spec"
+    assert decisions["ai"]["provider_ids"] == ["openai"]
+    assert decisions["deployment"]["source"] == "recommended"
+    assert decisions["deployment"]["provider_ids"] == ["vercel"]
+    assert contract["provider_decision_source"] == "mixed"
+    assert contract["setup_status"] == "setup-needed"
+
+
+def test_explicit_firebase_and_expo_are_not_overwritten_by_defaults() -> None:
+    module = _load_module()
+
+    contract = module.build_goal_contract(
+        title="배포 가능한 iOS Android 채팅 서비스",
+        spec_text=(
+            "Use Firebase Auth, Firestore database, realtime updates, image upload, "
+            "and Expo for native iOS Android builds."
+        ),
+    )
+
+    decisions = contract["provider_decisions"]
+    assert decisions["deployment"]["provider_ids"] == ["firebase"]
+    assert decisions["deployment"]["source"] == "spec"
+    assert decisions["auth"]["provider_ids"] == ["firebase"]
+    assert decisions["db_persistence"]["provider_ids"] == ["firebase"]
+    assert decisions["realtime"]["provider_ids"] == ["firebase"]
+    assert decisions["storage"]["provider_ids"] == ["firebase"]
+    assert decisions["ios_native"]["provider_ids"] == ["expo"]
+    assert decisions["android_native"]["provider_ids"] == ["expo"]
+
+
+def test_stackless_production_goal_gets_recommended_default_providers() -> None:
+    module = _load_module()
+
+    contract = module.build_goal_contract(
+        title="배포 가능한 실시간 AI 채팅 서비스 인증 DB 이미지 신고 차단",
+    )
+
+    decisions = contract["provider_decisions"]
+    assert decisions["deployment"] == {"provider_ids": ["vercel"], "source": "recommended"}
+    assert decisions["auth"] == {"provider_ids": ["supabase"], "source": "recommended"}
+    assert decisions["db_persistence"] == {"provider_ids": ["supabase"], "source": "recommended"}
+    assert decisions["realtime"] == {"provider_ids": ["supabase"], "source": "recommended"}
+    assert decisions["storage"] == {"provider_ids": ["supabase"], "source": "recommended"}
+    assert decisions["ai"] == {"provider_ids": ["openai"], "source": "recommended"}
+    assert contract["provider_decision_source"] == "recommended"
+
+
+def test_stackless_native_store_goal_keeps_full_default_store_recommendations() -> None:
+    module = _load_module()
+
+    contract = module.build_goal_contract(title="배포 가능한 iOS Android 네이티브 앱스토어 출시 서비스")
+
+    decisions = contract["provider_decisions"]
+    assert decisions["ios_native"] == {"provider_ids": ["apple"], "source": "recommended"}
+    assert decisions["android_native"] == {"provider_ids": ["google-play"], "source": "recommended"}
+    assert decisions["store_release"] == {"provider_ids": ["apple", "google-play", "store"], "source": "recommended"}
+
+
+def test_provider_metadata_is_secret_free() -> None:
+    module = _load_module()
+
+    contract = module.build_goal_contract(
+        title="배포 가능한 OpenAI 서비스",
+        spec_text="OPENAI_API_KEY=sk-12345678901234567890",
+    )
+    provider_only = {
+        "provider_decisions": contract["provider_decisions"],
+        "provider_decision_sources": contract["provider_decision_sources"],
+        "setup_suggestions": contract["setup_suggestions"],
+    }
+
+    rendered = str(provider_only)
+    assert "sk-12345678901234567890" not in rendered
+    assert "OPENAI_API_KEY" not in rendered
+
+
+def test_explicit_provider_without_registered_setup_pack_has_actionable_suggestion() -> None:
+    module = _load_module()
+
+    contract = module.build_goal_contract(
+        title="배포 가능한 Firebase 채팅 서비스",
+        spec_text="Use Firebase Auth, Firestore database persistence, realtime updates, and image upload.",
+    )
+
+    suggestions = contract["setup_suggestions"]
+    firebase_suggestions = [item for item in suggestions if item["provider_id"] == "firebase"]
+    assert firebase_suggestions
+    assert all(item["setup_pack_ids"] == [] for item in firebase_suggestions)
+    assert all("Firebase" in item["next_action"] for item in firebase_suggestions)
+    assert contract["setup_status"] == "setup-needed"

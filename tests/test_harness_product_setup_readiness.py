@@ -147,3 +147,38 @@ def test_native_store_setup_entries_include_pack_metadata(tmp_path: Path) -> Non
     assert entries["store_release_metadata"]["provider_id"] == "store"
     assert entries["store_release_metadata"]["capability_id"] == "store_release"
     assert entries["store_release_metadata"]["setup_pack_id"] == "store_release_metadata"
+
+
+def test_provider_decisions_filter_default_setup_requirements(tmp_path: Path) -> None:
+    module = _load_module()
+    product = tmp_path / "product"
+    product.mkdir()
+
+    report = module.build_setup_readiness_report(
+        product_root=product,
+        goal_payload={
+            "completion_gates": [
+                {"id": "deployed_url"},
+                {"id": "database_persistence"},
+                {"id": "auth_flow"},
+                {"id": "realtime_two_user_chat"},
+                {"id": "image_upload"},
+            ],
+            "goal_contract": {
+                "provider_decisions": {
+                    "deployment": {"provider_ids": ["firebase"], "source": "spec"},
+                    "auth": {"provider_ids": ["firebase"], "source": "spec"},
+                    "db_persistence": {"provider_ids": ["firebase"], "source": "spec"},
+                    "realtime": {"provider_ids": ["firebase"], "source": "spec"},
+                    "storage": {"provider_ids": ["firebase"], "source": "spec"},
+                }
+            },
+        },
+        environ={},
+    )
+
+    provider_ids = {entry["provider_id"] for entry in report["entries"]}
+    assert report["provider_decisions_respected"] is True
+    assert "vercel" not in provider_ids
+    assert "supabase" not in provider_ids
+    assert report["missing_requirements"] == []
