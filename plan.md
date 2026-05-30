@@ -1,44 +1,58 @@
-# Goal Gate Receipt v2 Implementation Plan
+# Product Audit Capability Matrix Implementation Plan
 
-Diet-Exception: goal gate receipt v2 adds focused schema/test coverage before production verifier runner split.
+Diet-Exception: PR 6 adds a compact audit matrix inside the existing product audit module instead of creating a new module.
 
-> For agentic workers: Use superpowers:subagent-driven-development or superpowers:executing-plans. Keep this PR small and test-first.
+> For agentic workers: Use superpowers:subagent-driven-development or superpowers:executing-plans. Keep this PR focused on fake-success detection and product audit output.
 
 Goal:
-- Make goal completion evidence explicitly v2 and keep PR merge evidence separate from goal completion evidence.
+- Expose a product audit `capability_matrix` so production goals can see which required capabilities are backed by real product wiring and which are blocked by fake-success signals.
 
 Architecture:
-- Existing `harness_goal_gates.normalize_gate_evidence_entry()` already rejects local/mock/README/screenshot evidence and requires product commit, environment, validator, observed result, and checked time.
-- This PR adds explicit receipt schema metadata and tightens tests around status and source behavior.
-- It does not add a production gate runner yet.
+- `scripts/harness_product_audit.py` remains the orchestrator and preserves stable fields: `status`, `failed_gate_ids`, and `findings`.
+- `scripts/harness_product_audit_support.py` keeps scanner helpers and gains small matrix helpers if needed.
+- The matrix is additive and metadata-only. It uses gate ids, capability ids, finding ids, and short path evidence. It never stores source snippets, env values, or absolute product paths.
 
 Implementation:
-- Modify `scripts/harness_goal_gates.py`.
-  - Add a public `GOAL_GATE_RECEIPT_SCHEMA_VERSION = 2`.
-  - Accepted normalized entries include `receipt_schema_version: 2` and `operation: goal-gate-verification`.
-  - `blocked` and `failed` remain non-passing and cannot complete a goal.
-- Modify `scripts/harness_goal.py` only if needed to preserve collected normalized fields.
-- Add tests in `tests/test_harness_goal_gates.py`.
-  - accepted evidence exposes schema version and operation
-  - blocked/failed receipts are rejected
-- Add tests in `tests/test_harness_goal.py`.
-  - wrong target/goal receipts are ignored
-  - PR publication/merge receipts do not count as goal completion
-  - failed/blocked goal-gate receipts do not complete a production goal
-- Keep product repo untouched.
+- Modify `scripts/harness_product_audit.py`.
+  - Build a required capability/gate matrix from `required_capabilities` plus derived gates.
+  - Mark each capability as `passed`, `failed`, or `not-required`.
+  - Attach finding ids and blocked gate ids to the matching capability rows.
+  - Include a summary with `required_count`, `failed_count`, and `passed_count`.
+- Add tests in `tests/test_harness_product_audit.py`.
+  - localStorage/seed-only chat app reports failed DB and realtime matrix rows.
+  - API route exists but UI is not wired reports failed AI/backend integration row.
+  - README native/store out-of-scope reports failed native/store rows.
+  - matrix output is secret-free, relative-path only, and product repo is not mutated.
+- Preserve current consumers.
+  - `scripts/harness_goal.py` and `scripts/harness_fleet.py` should keep working because existing top-level fields are unchanged.
+  - No product repo writes.
 
-Verification:
-- `python3 -m pytest tests/test_harness_goal_gates.py tests/test_harness_goal.py tests/test_harness_export.py -q`
-- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+Agent review:
+- Product Audit Capability Matrix Agent: schema and backcompat review.
+- Goal/Fleet Integration Reviewer: consumer compatibility review.
+- Fake-Success and Security Reviewer: detection and secret-safety review.
+- After implementation, run a final review pass. If a blocker appears, add a correction section here and patch before merge.
 
 Correction 1:
-- Raw goal-gate receipts must declare `receipt_schema_version: 2`; old or
-  unversioned receipts stay pending.
-- Add direct collector coverage for wrong target/goal, PR publication/merge
-  operations, and blocked/failed gate receipts.
+- Goal/Fleet Integration review found that downstream logic is gate-first.
+- Shape `capability_matrix` as an object with `schema_version`, `by_capability`, `by_gate`, and `summary` instead of a bare list.
+- Keep top-level `status`, `failed_gate_ids`, and `findings` unchanged.
 
 Correction 2:
-- Gate verification task prompts must instruct workers to emit
-  `receipt_schema_version: 2`, otherwise the collector's v2 requirement creates
-  a completion gap.
-- PR publication/merge receipt tests should use realistic publication statuses.
+- Fake-success/security review found small boundary and native-scope gaps.
+- Keep this PR bounded, but fix symlink product-root rejection, forward platform/release targets from goal payload, include `native_strategy` in native scope conflicts, and broaden README native/store exclusion phrasing.
+- Defer deeper mounted-component/static-call analysis to a later verifier PR because it needs a real app entry graph instead of safer metadata-only scanning.
+
+Correction 3:
+- Post-implementation review found blockers: seed/localStorage could be hidden by an API string, unknown capabilities were marked passed, and direct `audit_product_repo(required_capabilities=...)` used legacy single-gate mapping.
+- Fix root causes: always block required production data/smoke gates when mounted client uses seed/localStorage, mark unmapped required capabilities as `unknown`, and derive direct audit gates from `harness_capability_registry`.
+
+Verification:
+- `python3 -m pytest tests/test_harness_product_audit.py tests/test_harness_goal.py tests/test_harness_fleet.py tests/test_harness_export.py -q`
+- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+
+Done criteria:
+- Focused tests pass.
+- Full pre-push guard passes.
+- PR CI passes before merge.
+- Product repo state is untouched.

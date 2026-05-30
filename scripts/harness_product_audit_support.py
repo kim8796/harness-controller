@@ -5,8 +5,29 @@ from pathlib import Path
 from typing import Mapping
 
 
-TEXT_SUFFIXES = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".md", ".json", ".sql", ".html", ".css"}
-HEALTH_API_SEGMENTS = {"health", "status", "ping", "ready", "readiness", "live", "liveness", "version"}
+TEXT_SUFFIXES = {
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".mjs",
+    ".cjs",
+    ".md",
+    ".json",
+    ".sql",
+    ".html",
+    ".css",
+}
+HEALTH_API_SEGMENTS = {
+    "health",
+    "status",
+    "ping",
+    "ready",
+    "readiness",
+    "live",
+    "liveness",
+    "version",
+}
 CAPABILITY_TO_GATE = {
     "db_persistence": "database_persistence",
     "database": "database_persistence",
@@ -21,7 +42,10 @@ CAPABILITY_TO_GATE = {
     "store_release": "store_release_readiness",
     "maintainability_handoff": "maintainability_handoff",
 }
-GATE_TO_CAPABILITY = {gate: capability for capability, gate in CAPABILITY_TO_GATE.items()}
+GATE_TO_CAPABILITY = {
+    gate: capability for capability, gate in CAPABILITY_TO_GATE.items()
+}
+GATE_TO_CAPABILITY["database_persistence"] = "db_persistence"
 MAINTAINABILITY_GATE_ID = "maintainability_handoff"
 MAINTAINABILITY_REQUIRED_FILES = (
     "README.md",
@@ -32,7 +56,9 @@ MAINTAINABILITY_REQUIRED_FILES = (
     ".env.example",
 )
 MAINTAINABILITY_DECISION_FILES = ("docs/DECISIONS.md", "docs/ADR.md")
-PLACEHOLDER_DOC_PATTERN = re.compile(r"(?i)\b(?:todo|tbd|coming soon|write later|placeholder|lorem ipsum|추후|나중에)\b")
+PLACEHOLDER_DOC_PATTERN = re.compile(
+    r"(?i)\b(?:todo|tbd|coming soon|write later|placeholder|lorem ipsum|추후|나중에)\b"
+)
 SECRETISH_ENV_VALUE_PATTERN = re.compile(
     r"(?i)(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|"
     r"token|secret|password|credential|private[_-]?key|signing[_-]?key)\s*=\s*['\"]?"
@@ -57,7 +83,9 @@ CODEMAP_REF_ROOTS = (
 GATE_WIRING_PATTERNS = {
     "database_persistence": (
         re.compile(r"\bsupabase\s*\.\s*from\s*\(", re.IGNORECASE),
-        re.compile(r"(?i)/api/(?:messages?|conversations?|profiles?|participants?|data|db|database)\b"),
+        re.compile(
+            r"(?i)/api/(?:messages?|conversations?|profiles?|participants?|data|db|database)\b"
+        ),
     ),
     "auth_flow": (
         re.compile(r"\bsupabase\s*\.\s*auth\b", re.IGNORECASE),
@@ -67,24 +95,31 @@ GATE_WIRING_PATTERNS = {
         re.compile(r"\bsupabase\s*\.\s*channel\s*\(", re.IGNORECASE),
         re.compile(r"(?i)\brealtime\b|/api/(?:messages?|conversations?)/subscribe\b"),
     ),
-    "ai_reply": (
-        re.compile(r"(?i)/api/(?:ai|openai|llm|assistant|bot)\b"),
-    ),
+    "ai_reply": (re.compile(r"(?i)/api/(?:ai|openai|llm|assistant|bot)\b"),),
     "image_upload": (
         re.compile(r"\bsupabase\s*\.\s*storage\b", re.IGNORECASE),
         re.compile(r"(?i)/api/(?:media|upload|image|images|assets|storage)\b"),
     ),
     "report_block": (
-        re.compile(r"\bsupabase\s*\.\s*from\s*\(\s*['\"](?:reports?|blocks?|moderation)['\"]", re.IGNORECASE),
+        re.compile(
+            r"\bsupabase\s*\.\s*from\s*\(\s*['\"](?:reports?|blocks?|moderation)['\"]",
+            re.IGNORECASE,
+        ),
         re.compile(r"(?i)/api/(?:reports?|blocks?|moderation|abuse)\b"),
     ),
 }
 GATE_ROUTE_PATTERNS = {
-    "database_persistence": re.compile(r"(?i)^/api/(?:messages?|conversations?|profiles?|participants?|data|db|database)\b"),
+    "database_persistence": re.compile(
+        r"(?i)^/api/(?:messages?|conversations?|profiles?|participants?|data|db|database)\b"
+    ),
     "auth_flow": re.compile(r"(?i)^/api/(?:auth|login|signup|session|profile)\b"),
-    "realtime_two_user_chat": re.compile(r"(?i)^/api/(?:messages?|conversations?|realtime|subscribe)\b"),
+    "realtime_two_user_chat": re.compile(
+        r"(?i)^/api/(?:messages?|conversations?|realtime|subscribe)\b"
+    ),
     "ai_reply": re.compile(r"(?i)^/api/(?:ai|openai|llm|assistant|bot)\b"),
-    "image_upload": re.compile(r"(?i)^/api/(?:media|upload|image|images|assets|storage)\b"),
+    "image_upload": re.compile(
+        r"(?i)^/api/(?:media|upload|image|images|assets|storage)\b"
+    ),
     "report_block": re.compile(r"(?i)^/api/(?:reports?|blocks?|moderation|abuse)\b"),
 }
 
@@ -102,7 +137,9 @@ def _tracked_or_local_files(repo: Path) -> list[Path]:
         if not path.is_file() or path.is_symlink():
             continue
         rel = path.relative_to(repo).as_posix()
-        if rel.startswith((".git/", "node_modules/", ".next/", "dist/", "build/", "coverage/")):
+        if rel.startswith(
+            (".git/", "node_modules/", ".next/", "dist/", "build/", "coverage/")
+        ):
             continue
         if path.suffix in TEXT_SUFFIXES or path.name == ".env.example":
             files.append(path)
@@ -146,7 +183,9 @@ def _relative_evidence(repo: Path, path: Path, reason: str) -> dict[str, str]:
     return {"path": path.relative_to(repo).as_posix(), "reason": reason}
 
 
-def _client_sources(repo: Path, rel_to_text: Mapping[str, str]) -> list[tuple[str, str]]:
+def _client_sources(
+    repo: Path, rel_to_text: Mapping[str, str]
+) -> list[tuple[str, str]]:
     return [
         (rel, text)
         for rel, text in rel_to_text.items()
@@ -190,14 +229,21 @@ def _api_routes_by_path(rel_to_text: Mapping[str, str]) -> dict[str, str]:
 
 def _client_api_call_paths(client_text: str) -> set[str]:
     calls: set[str] = set()
-    for match in re.finditer(r"['\"`]((?:https?://[^'\"`]+)?/api(?:/[^'\"`?#)]*)?(?:\?[^'\"`]*)?)['\"`]", client_text):
+    for match in re.finditer(
+        r"['\"`]((?:https?://[^'\"`]+)?/api(?:/[^'\"`?#)]*)?(?:\?[^'\"`]*)?)['\"`]",
+        client_text,
+    ):
         calls.add(_normalize_api_path(match.group(1)))
     return calls
 
 
 def _is_health_api_path(path: str) -> bool:
     parts = [part for part in path.split("/") if part]
-    return len(parts) >= 2 and parts[0] == "api" and parts[1].lower() in HEALTH_API_SEGMENTS
+    return (
+        len(parts) >= 2
+        and parts[0] == "api"
+        and parts[1].lower() in HEALTH_API_SEGMENTS
+    )
 
 
 def _api_call_matches_route(call_path: str, route_path: str) -> bool:
@@ -214,12 +260,18 @@ def _has_supabase_client_call(client_text: str) -> bool:
     )
 
 
-def _gate_has_client_wiring(gate_id: str, client_text: str, client_api_calls: set[str]) -> bool:
+def _gate_has_client_wiring(
+    gate_id: str, client_text: str, client_api_calls: set[str]
+) -> bool:
     haystack = client_text + "\n" + "\n".join(sorted(client_api_calls))
-    return any(pattern.search(haystack) for pattern in GATE_WIRING_PATTERNS.get(gate_id, ()))
+    return any(
+        pattern.search(haystack) for pattern in GATE_WIRING_PATTERNS.get(gate_id, ())
+    )
 
 
-def _missing_gate_wiring(gates: set[str], client_text: str, client_api_calls: set[str]) -> set[str]:
+def _missing_gate_wiring(
+    gates: set[str], client_text: str, client_api_calls: set[str]
+) -> set[str]:
     return {
         gate_id
         for gate_id in gates & set(GATE_WIRING_PATTERNS)
@@ -249,11 +301,19 @@ def _uncalled_backend_gate_impacts(
 
 
 def _readme_excludes_native_or_store(readme_text: str) -> bool:
-    scope_terms = r"(?:app[- ]?store|play[- ]?store|ios|android|native|앱스토어|플레이스토어|스토어)"
-    out_of_scope = r"(?:out\s+of\s+scope|not\s+in\s+scope|excluded|제외|범위\s*밖|하지\s*않)"
+    scope_terms = r"(?:app[- ]?store|play[- ]?store|store\s+release|ios|android|native|mobile\s+apps?|web[- ]?only|앱스토어|플레이스토어|스토어|모바일|네이티브)"
+    out_of_scope = r"(?:out\s+of\s+scope|not\s+in\s+scope|excluded|deferred|later|web[- ]?only|제외|범위\s*밖|하지\s*않|추후|나중|이번\s*릴리스)"
     return bool(
-        re.search(rf"{out_of_scope}[\s\S]{{0,300}}{scope_terms}", readme_text, flags=re.IGNORECASE)
-        or re.search(rf"{scope_terms}[\s\S]{{0,300}}{out_of_scope}", readme_text, flags=re.IGNORECASE)
+        re.search(
+            rf"{out_of_scope}[\s\S]{{0,300}}{scope_terms}",
+            readme_text,
+            flags=re.IGNORECASE,
+        )
+        or re.search(
+            rf"{scope_terms}[\s\S]{{0,300}}{out_of_scope}",
+            readme_text,
+            flags=re.IGNORECASE,
+        )
     )
 
 
@@ -265,7 +325,11 @@ def _codemap_path_refs(text: str) -> list[str]:
     refs: list[str] = []
     for match in re.finditer(r"`([^`]+)`", text):
         value = match.group(1).strip().strip("/")
-        if not value or "*" in value or value.startswith(("./", "../", "http://", "https://")):
+        if (
+            not value
+            or "*" in value
+            or value.startswith(("./", "../", "http://", "https://"))
+        ):
             continue
         if value.startswith(CODEMAP_REF_ROOTS):
             refs.append(value)
@@ -273,7 +337,11 @@ def _codemap_path_refs(text: str) -> list[str]:
         value = match.group(1).strip().strip("/")
         if value.startswith("./"):
             value = value[2:]
-        if value and not any(token in value for token in ("*", "://")) and value.startswith(CODEMAP_REF_ROOTS):
+        if (
+            value
+            and not any(token in value for token in ("*", "://"))
+            and value.startswith(CODEMAP_REF_ROOTS)
+        ):
             refs.append(value)
     for match in re.finditer(
         r"(?<![A-Za-z0-9_./`(])(?:\./)?((?:src|app|pages|components|lib|server|api|tests|e2e|cypress|supabase|ios|android|docs)/[A-Za-z0-9._/@+-]+)",
@@ -293,12 +361,20 @@ def _maintainability_findings(
     findings: list[dict[str, object]] = []
     failed = {MAINTAINABILITY_GATE_ID}
     required = set(MAINTAINABILITY_REQUIRED_FILES)
-    if not any((repo / rel).exists() and not (repo / rel).is_symlink() for rel in MAINTAINABILITY_DECISION_FILES):
+    if not any(
+        (repo / rel).exists() and not (repo / rel).is_symlink()
+        for rel in MAINTAINABILITY_DECISION_FILES
+    ):
         required.add("docs/DECISIONS.md or docs/ADR.md")
     missing = [
         rel
         for rel in sorted(required)
-        if " or " in rel or not ((repo / rel).exists() and (repo / rel).is_file() and not (repo / rel).is_symlink())
+        if " or " in rel
+        or not (
+            (repo / rel).exists()
+            and (repo / rel).is_file()
+            and not (repo / rel).is_symlink()
+        )
     ]
     if missing:
         findings.append(
@@ -307,13 +383,22 @@ def _maintainability_findings(
                 severity="blocker",
                 impacted_gates=[MAINTAINABILITY_GATE_ID],
                 summary="Production goals require human/AI handoff artifacts before completion.",
-                evidence=[{"path": rel, "reason": "required maintainability handoff artifact is missing"} for rel in missing],
+                evidence=[
+                    {
+                        "path": rel,
+                        "reason": "required maintainability handoff artifact is missing",
+                    }
+                    for rel in missing
+                ],
             )
         )
 
     placeholder_docs = [
         rel
-        for rel in (*MAINTAINABILITY_REQUIRED_FILES[:-1], *MAINTAINABILITY_DECISION_FILES)
+        for rel in (
+            *MAINTAINABILITY_REQUIRED_FILES[:-1],
+            *MAINTAINABILITY_DECISION_FILES,
+        )
         if rel in rel_to_text and _doc_is_placeholder(rel_to_text.get(rel, ""))
     ]
     if placeholder_docs:
@@ -323,7 +408,10 @@ def _maintainability_findings(
                 severity="blocker",
                 impacted_gates=[MAINTAINABILITY_GATE_ID],
                 summary="Maintainability docs must contain concrete, non-placeholder operating and ownership guidance.",
-                evidence=[{"path": rel, "reason": "placeholder or too-short handoff document"} for rel in placeholder_docs],
+                evidence=[
+                    {"path": rel, "reason": "placeholder or too-short handoff document"}
+                    for rel in placeholder_docs
+                ],
             )
         )
 
@@ -337,7 +425,10 @@ def _maintainability_findings(
                 severity="blocker",
                 impacted_gates=[MAINTAINABILITY_GATE_ID],
                 summary="CODEMAP references paths that do not exist in the product repository.",
-                evidence=[{"path": ref, "reason": "CODEMAP path reference does not exist"} for ref in broken_refs[:8]],
+                evidence=[
+                    {"path": ref, "reason": "CODEMAP path reference does not exist"}
+                    for ref in broken_refs[:8]
+                ],
             )
         )
     elif "docs/CODEMAP.md" in rel_to_text and not refs:
@@ -347,7 +438,13 @@ def _maintainability_findings(
                 severity="blocker",
                 impacted_gates=[MAINTAINABILITY_GATE_ID],
                 summary="CODEMAP must reference concrete product source, test, or operations paths.",
-                evidence=[_relative_evidence(repo, source_by_rel["docs/CODEMAP.md"], "no concrete owned paths found")]
+                evidence=[
+                    _relative_evidence(
+                        repo,
+                        source_by_rel["docs/CODEMAP.md"],
+                        "no concrete owned paths found",
+                    )
+                ]
                 if "docs/CODEMAP.md" in source_by_rel
                 else [],
             )
@@ -361,7 +458,12 @@ def _maintainability_findings(
                 severity="blocker",
                 impacted_gates=[MAINTAINABILITY_GATE_ID],
                 summary=".env.example must document names/placeholders only and must not contain secret-like values.",
-                evidence=[{"path": ".env.example", "reason": "secret-like example value detected"}],
+                evidence=[
+                    {
+                        "path": ".env.example",
+                        "reason": "secret-like example value detected",
+                    }
+                ],
             )
         )
 
