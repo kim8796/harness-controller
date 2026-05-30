@@ -62,6 +62,7 @@ STATIC_EXPORT_SOURCE_PATHS = (
     Path("scripts/harness_goal.py"),
     Path("scripts/harness_goal_contract.py"),
     Path("scripts/harness_goal_gates.py"),
+    Path("scripts/harness_goal_learning.py"),
     Path("scripts/harness_incident.py"),
     Path("scripts/harness_operator_wait.py"),
     Path("scripts/harness_product_audit.py"),

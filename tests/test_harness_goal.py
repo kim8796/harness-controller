@@ -244,6 +244,111 @@ def test_production_roadmap_tasks_are_gate_derived_and_traceable(tmp_path: Path)
             assert expected["receipt_schema_version"] == 2
 
 
+def test_build_roadmap_includes_safe_global_reusable_lesson_hints(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    state_root = controller / "targets" / "chatapp"
+    product = tmp_path / "product"
+    product.mkdir()
+    _init_product(product)
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="배포 가능한 Supabase DB 채팅 서비스",
+    )
+    memory = controller / "targets" / "_global" / "memory"
+    memory.mkdir(parents=True)
+    (memory / "reusable-index.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "lesson_count": 1,
+                "lessons": {
+                    "fake-success-audit:database_persistence-other": {
+                        "lesson_key": "fake-success-audit:database_persistence-other",
+                        "source_event": "fake-success-audit",
+                        "outcome": "database_persistence-other",
+                        "count": 3,
+                        "last_seen_at": "2026-05-28T10:00:00",
+                        "reuse_hint": "Do not accept localStorage or seed data as production DB evidence.",
+                        "product_standard": "production_web",
+                        "capability_ids": ["db_persistence"],
+                        "gate_ids": ["database_persistence"],
+                        "provider_ids": ["supabase"],
+                        "reason_class": "other",
+                        "source_target_ids": ["chatapp"],
+                        "sample": {
+                            "raw": "OPENAI_API_KEY=sk-proj-abcdef1234567890 /Users/secret/product/src/app.js"
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    roadmap = module.build_roadmap(
+        state_root=state_root,
+        target_id="chatapp",
+        target_repo=product,
+        goal=goal,
+    )
+    queue_report = module.build_queue_report_model(state_root=state_root, target_id="chatapp")
+    serialized = json.dumps({"roadmap": roadmap, "queue_report": queue_report}, ensure_ascii=False)
+    database_task = next(task for task in roadmap["tasks"] if task["task_key"] == "task-03-database")
+    database_candidate = next(task for task in queue_report["tasks"] if task["task_key"] == "task-03-database")
+
+    assert roadmap["reusable_lesson_hints"][0]["lesson_key"] == "fake-success-audit:database_persistence-other"
+    assert database_task["reusable_lesson_hints"][0]["gate_ids"] == ["database_persistence"]
+    assert database_candidate["reusable_lesson_hints"][0]["source_event"] == "fake-success-audit"
+    assert "sample" not in serialized
+    assert "sk-proj" not in serialized
+    assert "/Users/secret" not in serialized
+
+
+def test_build_roadmap_ignores_symlinked_global_memory(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    state_root = controller / "targets" / "chatapp"
+    product = tmp_path / "product"
+    product.mkdir()
+    _init_product(product)
+    external = tmp_path / "external-memory"
+    external.mkdir()
+    (external / "reusable-index.json").write_text(
+        json.dumps(
+            {
+                "lessons": {
+                    "external": {
+                        "lesson_key": "external",
+                        "source_event": "deploy-blocked",
+                        "outcome": "credential",
+                        "reuse_hint": "external secret should not be read",
+                        "source_target_ids": ["chatapp"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (controller / "targets" / "_global").mkdir(parents=True)
+    (controller / "targets" / "_global" / "memory").symlink_to(external)
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="배포 가능한 Supabase DB 채팅 서비스",
+    )
+
+    roadmap = module.build_roadmap(
+        state_root=state_root,
+        target_id="chatapp",
+        target_repo=product,
+        goal=goal,
+    )
+
+    assert roadmap["reusable_lesson_hints"] == []
+
+
 def test_goal_service_level_prototype_requires_explicit_local_or_mvp_language(tmp_path: Path) -> None:
     module = _load_module()
     state_root = tmp_path / "targets" / "demo"

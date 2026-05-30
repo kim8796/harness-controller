@@ -509,6 +509,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "scripts" / "harness_goal_contract.py").exists()
     assert (bundle / "scripts" / "harness_capability_registry.py").exists()
     assert (bundle / "scripts" / "harness_goal_gates.py").exists()
+    assert (bundle / "scripts" / "harness_goal_learning.py").exists()
     assert (bundle / "scripts" / "harness_fleet.py").exists()
     assert (bundle / "scripts" / "harness_product_audit.py").exists()
     assert (bundle / "scripts" / "harness_product_audit_support.py").exists()

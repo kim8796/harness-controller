@@ -94,6 +94,92 @@ def test_promote_reusable_lesson_writes_redacted_compact_global_memory(tmp_path:
     assert "doctor_diagnosis" not in lessons_text
 
 
+def test_promote_reusable_lesson_classifies_fake_success_without_raw_payload(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    record = _add_target(controller, product)
+
+    module.promote_reusable_lesson(
+        controller_root=controller,
+        record=record,
+        event="fake-success-audit",
+        payload={
+            "product_standard": "production_web",
+            "capability_ids": ["db_persistence"],
+            "gate_ids": ["database_persistence"],
+            "provider_ids": ["supabase"],
+            "reason": "seed-only localStorage evidence is not production DB persistence",
+            "raw_log": "OPENAI_API_KEY=sk-proj-abcdef1234567890 /Users/secret/product/src/app.js",
+            "failed_gate_count": 1,
+        },
+        created_at="2026-05-28T10:00:00",
+    )
+
+    index_text = (controller / "targets" / "_global" / "memory" / "reusable-index.json").read_text(encoding="utf-8")
+    index = json.loads(index_text)
+    lesson = next(item for item in index["lessons"].values() if item["source_event"] == "fake-success-audit")
+
+    assert lesson["product_standard"] == "production_web"
+    assert lesson["capability_ids"] == ["db_persistence"]
+    assert lesson["gate_ids"] == ["database_persistence"]
+    assert lesson["provider_ids"] == ["supabase"]
+    assert lesson["sample"] == {"failed_gate_count": 1, "reason_class": "other"}
+    assert "raw_log" not in index_text
+    assert "sk-proj" not in index_text
+    assert "/Users/secret" not in index_text
+
+
+def test_planner_reusable_lesson_hints_returns_bounded_matching_hints(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    record = _add_target(controller, product)
+    module.promote_reusable_lesson(
+        controller_root=controller,
+        record=record,
+        event="maintenance",
+        payload={"status": "ok"},
+        created_at="2026-05-28T09:00:00",
+    )
+    module.promote_reusable_lesson(
+        controller_root=controller,
+        record=record,
+        event="deploy-blocked",
+        payload={
+            "product_standard": "production_web",
+            "capability_ids": ["deployment"],
+            "gate_ids": ["deployed_url"],
+            "provider_ids": ["vercel"],
+            "reason": "credential missing for Vercel deploy",
+            "stderr": "VERCEL_TOKEN=secret-value",
+        },
+        created_at="2026-05-28T10:00:00",
+    )
+
+    hints = module.planner_reusable_lesson_hints(
+        controller_root=controller,
+        target_id="demo",
+        product_standard="production_web",
+        capability_ids=["deployment"],
+        gate_ids=["deployed_url"],
+        provider_ids=["vercel"],
+        limit=1,
+    )
+
+    assert len(hints) == 1
+    assert hints[0]["source_event"] == "deploy-blocked"
+    assert hints[0]["gate_ids"] == ["deployed_url"]
+    assert hints[0]["provider_ids"] == ["vercel"]
+    assert hints[0]["reason_class"] == "credential-or-permission"
+    assert "sample" not in hints[0]
+    assert "secret-value" not in json.dumps(hints, ensure_ascii=False)
+
+
 def test_build_fleet_status_reports_targets_without_mutating_product(tmp_path: Path) -> None:
     module = _load_module()
     controller = tmp_path / "controller"
@@ -188,6 +274,33 @@ def test_fleet_status_surfaces_goal_gate_debt_and_product_audit(tmp_path: Path) 
     assert payload["status"] == "attention"
     assert "active-goal-product-audit-failed" in target["readiness"]["blockers"]
     assert "setup-readiness-missing" in target["readiness"]["blockers"]
+
+
+def test_fleet_status_redacts_active_goal_title_and_paths(tmp_path: Path) -> None:
+    module = _load_module()
+    goal_module = load_script_module("harness_goal_for_fleet_redaction", "scripts/harness_goal.py")
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    record = _add_target(controller, product)
+    goal_module.create_goal(
+        state_root=record.state_root,
+        target_id="demo",
+        text=(
+            "OPENAI_API_KEY=sk-proj-abcdef1234567890 "
+            "/Users/Alice Secret/product/.env "
+            r"C:\Users\Alice\product\.env 배포 목표"
+        ),
+    )
+
+    payload = module.build_fleet_status(controller_root=controller)
+    serialized = json.dumps(payload, ensure_ascii=False)
+
+    assert "sk-proj" not in serialized
+    assert "/Users/Alice" not in serialized
+    assert "Alice Secret" not in serialized
+    assert r"C:\Users" not in serialized
 
 
 def test_build_fleet_status_no_targets_is_readable(tmp_path: Path) -> None:
