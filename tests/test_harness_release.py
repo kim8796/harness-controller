@@ -99,7 +99,12 @@ def test_loaded_legacy_receipts_are_redacted_before_status(tmp_path: Path) -> No
                     "product_commit_sha": "abc1234",
                     "release_type": "candidate",
                     "OPENAI_API_KEY": "sk-thisshouldnotleak",
+                    "SUPABASE_SERVICE_ROLE_KEY": "plain-supabase-secret-value",
                     "diagnostic": "bearer ghp_thisshouldnotleak",
+                    "root_context": "/Users/secret/controller",
+                    "state_root": "/Users/secret/controller/targets/demo",
+                    "target_root": "/Users/secret/product",
+                    "note": "created from /Users/secret/product/src/app.js SUPABASE_SERVICE_ROLE_KEY=plain-freeform-key",
                     "url": "https://user:pass@example.invalid/app",
                 },
             }
@@ -118,8 +123,13 @@ def test_loaded_legacy_receipts_are_redacted_before_status(tmp_path: Path) -> No
 
     assert "sk-thisshouldnotleak" not in serialized
     assert "ghp_thisshouldnotleak" not in serialized
+    assert "plain-supabase-secret-value" not in serialized
+    assert "plain-freeform-key" not in serialized
+    assert "/Users/secret" not in serialized
     assert "user:pass" not in serialized
     assert state["release"]["current"]["payload"]["OPENAI_API_KEY"] == "<redacted>"
+    assert state["release"]["current"]["payload"]["SUPABASE_SERVICE_ROLE_KEY"] == "<redacted>"
+    assert state["release"]["current"]["payload"]["target_root"] == "<redacted>"
     assert state["release"]["current"]["payload"]["url"] == "https://<redacted>@example.invalid/app"
 
 
@@ -168,6 +178,13 @@ def test_release_state_marks_production_release_for_current_commit(tmp_path: Pat
     module.write_receipt(
         tmp_path,
         target_id="demo",
+        kind="deployment",
+        receipt_id="current-deployment",
+        payload={"product_commit_sha": "abc1234", "environment": "production", "url": "https://example.test"},
+    )
+    module.write_receipt(
+        tmp_path,
+        target_id="demo",
         kind="release",
         receipt_id="production-release",
         payload={"product_commit_sha": "abc1234", "release_type": "production", "status": "released"},
@@ -177,9 +194,220 @@ def test_release_state_marks_production_release_for_current_commit(tmp_path: Pat
         tmp_path,
         target_id="demo",
         product_commit_sha="abc1234",
-        gate_status={"status": "passed", "pending_gate_ids": []},
+        gate_status={
+            "status": "passed",
+            "pending_gate_ids": [],
+            "passed_gate_ids": ["deployed_url", "production_e2e_smoke"],
+        },
         setup_readiness={"ok": True},
     )
 
     assert state["status"] == "released"
     assert state["blockers"] == []
+
+
+def test_production_release_requires_current_deployment_and_smoke_gate(tmp_path: Path) -> None:
+    module = _load_module()
+    module.write_receipt(
+        tmp_path,
+        target_id="demo",
+        kind="version",
+        receipt_id="current-version",
+        payload={"product_commit_sha": "abc1234", "status": "integrated"},
+    )
+    module.write_receipt(
+        tmp_path,
+        target_id="demo",
+        kind="release",
+        receipt_id="production-release",
+        payload={"product_commit_sha": "abc1234", "release_type": "production", "status": "released"},
+    )
+
+    blocked = module.build_target_release_state(
+        tmp_path,
+        target_id="demo",
+        product_commit_sha="abc1234",
+        gate_status={
+            "status": "passed",
+            "pending_gate_ids": [],
+            "passed_gate_ids": ["deployed_url", "production_e2e_smoke"],
+        },
+        setup_readiness={"ok": True},
+    )
+
+    assert blocked["status"] == "blocked"
+    assert "current-deployment-missing" in blocked["blockers"]
+    assert blocked["production_release"]["ready"] is False
+    assert blocked["next_action"] == "./harness target release demo --candidate"
+
+    module.write_receipt(
+        tmp_path,
+        target_id="demo",
+        kind="deployment",
+        receipt_id="current-deployment",
+        payload={"product_commit_sha": "abc1234", "environment": "production", "url": "https://example.test"},
+    )
+
+    ready = module.build_target_release_state(
+        tmp_path,
+        target_id="demo",
+        product_commit_sha="abc1234",
+        gate_status={
+            "status": "passed",
+            "pending_gate_ids": [],
+            "passed_gate_ids": ["deployed_url", "production_e2e_smoke"],
+        },
+        setup_readiness={"ok": True},
+    )
+
+    assert ready["status"] == "released"
+    assert ready["blockers"] == []
+    assert ready["production_release"]["ready"] is True
+    assert ready["next_action"] == "./harness target version demo"
+
+
+def test_production_release_blocks_when_required_smoke_gate_is_pending(tmp_path: Path) -> None:
+    module = _load_module()
+    module.write_receipt(
+        tmp_path,
+        target_id="demo",
+        kind="deployment",
+        receipt_id="current-deployment",
+        payload={"product_commit_sha": "abc1234", "environment": "production"},
+    )
+    module.write_receipt(
+        tmp_path,
+        target_id="demo",
+        kind="release",
+        receipt_id="candidate",
+        payload={"product_commit_sha": "abc1234", "release_type": "candidate", "status": "candidate"},
+    )
+
+    state = module.build_target_release_state(
+        tmp_path,
+        target_id="demo",
+        product_commit_sha="abc1234",
+        gate_status={
+            "status": "pending",
+            "pending_gate_ids": ["production_e2e_smoke"],
+            "passed_gate_ids": ["deployed_url"],
+        },
+        setup_readiness={"ok": True},
+    )
+
+    assert state["status"] == "blocked"
+    assert "goal-gates-pending" in state["blockers"]
+    assert "required-gate-pending:production_e2e_smoke" in state["production_release"]["blockers"]
+    assert state["next_action"] == "./harness watch --max-cycles 1 --no-telegram-drain"
+
+
+def test_production_release_requires_production_deployment_url(tmp_path: Path) -> None:
+    module = _load_module()
+    module.write_receipt(
+        tmp_path,
+        target_id="demo",
+        kind="deployment",
+        receipt_id="staging-deployment",
+        payload={"product_commit_sha": "abc1234", "environment": "staging"},
+    )
+    module.write_receipt(
+        tmp_path,
+        target_id="demo",
+        kind="release",
+        receipt_id="production-release",
+        payload={"product_commit_sha": "abc1234", "release_type": "production", "status": "released"},
+    )
+
+    state = module.build_target_release_state(
+        tmp_path,
+        target_id="demo",
+        product_commit_sha="abc1234",
+        gate_status={
+            "status": "passed",
+            "pending_gate_ids": [],
+            "passed_gate_ids": ["deployed_url", "production_e2e_smoke"],
+        },
+        setup_readiness={"ok": True},
+    )
+
+    assert state["status"] == "blocked"
+    assert "current-deployment-not-production" in state["blockers"]
+    assert "current-deployment-url-missing" in state["blockers"]
+    assert state["production_release"]["ready"] is False
+
+    http_dir = tmp_path / "http-case"
+    module.write_receipt(
+        http_dir,
+        target_id="demo",
+        kind="deployment",
+        receipt_id="http-deployment",
+        payload={"product_commit_sha": "abc1234", "environment": "production", "url": "http://example.test"},
+    )
+    module.write_receipt(
+        http_dir,
+        target_id="demo",
+        kind="release",
+        receipt_id="production-release",
+        payload={"product_commit_sha": "abc1234", "release_type": "production", "status": "released"},
+    )
+
+    http_state = module.build_target_release_state(
+        http_dir,
+        target_id="demo",
+        product_commit_sha="abc1234",
+        gate_status={
+            "status": "passed",
+            "pending_gate_ids": [],
+            "passed_gate_ids": ["deployed_url", "production_e2e_smoke"],
+        },
+        setup_readiness={"ok": True},
+    )
+
+    assert http_state["status"] == "blocked"
+    assert "current-deployment-not-production" not in http_state["blockers"]
+    assert "current-deployment-url-missing" in http_state["blockers"]
+
+
+def test_release_control_projection_is_compact_and_secret_safe(tmp_path: Path) -> None:
+    module = _load_module()
+    module.write_receipt(
+        tmp_path,
+        target_id="demo",
+        kind="version",
+        receipt_id="current-version",
+        payload={"product_commit_sha": "abc1234", "status": "integrated", "api_key": "secret-value"},
+    )
+    state = module.build_target_release_state(
+        tmp_path,
+        target_id="demo",
+        product_commit_sha="abc1234",
+        gate_status={
+            "status": "pending",
+            "pending_gate_ids": ["deployed_url"],
+            "passed_gate_ids": [],
+        },
+        setup_readiness={
+            "ok": False,
+            "status": "missing",
+            "missing_requirements": ["OPENAI_API_KEY"],
+        },
+    )
+
+    projection = module.build_release_control_projection(
+        release_state=state,
+        active_goal={"product_standard": "production_web"},
+        setup_readiness=state["setup_readiness"],
+        next_action="./harness watch --max-cycles 1 --no-telegram-drain",
+    )
+    serialized = json.dumps(projection, ensure_ascii=False)
+
+    assert projection["product_standard"] == "production_web"
+    assert projection["pending_gate_debt"] == {
+        "status": "pending",
+        "count": 1,
+        "gate_ids": ["deployed_url"],
+    }
+    assert projection["setup_blocker"]["present"] is True
+    assert projection["receipts"]["version"]["current_receipt_id"] == "current-version"
+    assert "secret-value" not in serialized
+    assert "payload" not in serialized

@@ -140,7 +140,7 @@ def safe_value(value: object) -> object:
         safe: dict[str, object] = {}
         for key, item in value.items():
             key_text = str(key)
-            if re.search(r"(?i)(api|token|secret|password|credential|private|signing)", key_text):
+            if re.search(r"(?i)(api|token|secret|password|credential|private|signing|(^|[_-])key$)", key_text):
                 safe[key_text] = "<redacted>"
             else:
                 safe[key_text] = safe_value(item)
@@ -675,15 +675,46 @@ def _target_summary(
         if isinstance(active_goal_payload.get("completion_gate_status"), Mapping)
         else {}
     )
-    release_state = harness_release.build_target_release_state(
-        record.state_root,
-        target_id=record.target_id,
-        product_commit_sha=product_head,
-        gate_status=gate_status_payload,
-        setup_readiness=setup_readiness,
-        dirty_paths=[str(item) for item in dirty_paths],
-        verification_blockers=harness_controller.target_run_blockers(verification),
-    )
+    target_next_action = _next_action(record, active_goal=active_goal, backlog=backlog, watch=watch)
+    try:
+        release_state = harness_release.build_target_release_state(
+            record.state_root,
+            target_id=record.target_id,
+            product_commit_sha=product_head,
+            gate_status=gate_status_payload,
+            setup_readiness=setup_readiness,
+            dirty_paths=[str(item) for item in dirty_paths],
+            verification_blockers=harness_controller.target_run_blockers(verification),
+        )
+        release_control = harness_release.build_release_control_projection(
+            release_state=release_state,
+            active_goal=active_goal,
+            setup_readiness=setup_readiness,
+            next_action=target_next_action,
+        )
+    except Exception as exc:
+        release_error = redact_text(f"{exc.__class__.__name__}: {exc}")
+        errors.append(f"{record.target_id}: release status read failed")
+        release_state = {
+            "schema_version": SCHEMA_VERSION,
+            "target_id": record.target_id,
+            "product_commit_sha": product_head,
+            "status": "blocked",
+            "blockers": ["release-status-read-failed"],
+            "error": release_error,
+            "values_redacted": True,
+        }
+        release_control = {
+            "schema_version": SCHEMA_VERSION,
+            "product_standard": str(active_goal.get("product_standard") or ""),
+            "pending_gate_debt": {"status": "unknown", "count": 0, "gate_ids": []},
+            "setup_blocker": {"present": setup_readiness.get("ok") is False, "status": str(setup_readiness.get("status") or "unknown"), "missing_requirements": []},
+            "receipts": {},
+            "release_status": "blocked",
+            "release_blockers": ["release-status-read-failed"],
+            "next_action": target_next_action,
+            "values_redacted": True,
+        }
     readiness_ok = (
         bool(verification.get("ok"))
         and active_goal_audit.get("status") != "failed"
@@ -726,12 +757,13 @@ def _target_summary(
         "watch": watch,
         "setup_readiness": safe_value(setup_readiness),
         "release_state": safe_value(release_state),
+        "release_control": safe_value(release_control),
         "memory": {
             "target_lessons": target_memory_count,
             "global_lessons": _global_learning_count(global_index, record.target_id),
         },
         "state_root": f"targets/{record.target_id}",
-        "next_action": _next_action(record, active_goal=active_goal, backlog=backlog, watch=watch),
+        "next_action": target_next_action,
         "errors": errors,
     }
 

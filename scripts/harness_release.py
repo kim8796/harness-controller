@@ -16,9 +16,11 @@ RECEIPT_DIRS = {
     "release": "releases",
     "deployment": "deployments",
 }
-SECRET_KEY_RE = re.compile(r"(?i)(api[_-]?key|token|secret|password|credential|private[_-]?key|signing[_-]?key)")
+SECRET_KEY_RE = re.compile(
+    r"(?i)(api[_-]?key|token|secret|password|credential|private[_-]?key|signing[_-]?key|(^|[_-])key$)"
+)
 SECRET_VALUE_RE = re.compile(
-    r"(?i)(api[_-]?key|token|secret|password|credential|private[_-]?key|signing[_-]?key)\s*[:=]\s*[^\s\"']+"
+    r"(?i)(api[_-]?key|token|secret|password|credential|private[_-]?key|signing[_-]?key|[A-Z0-9_]*_KEY)\s*[:=]\s*[^\s\"']+"
 )
 UNLABELED_SECRET_RE = re.compile(
     r"(?i)(sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|bearer\s+[A-Za-z0-9._~+/=-]{12,}|eyJ[A-Za-z0-9._~-]{20,})"
@@ -57,7 +59,10 @@ def redact_value(value: object) -> object:
         safe: dict[str, object] = {}
         for key, item in value.items():
             key_text = str(key)
-            safe[key_text] = "<redacted>" if SECRET_KEY_RE.search(key_text) else redact_value(item)
+            if SECRET_KEY_RE.search(key_text) or key_text in {"repo", "root_context", "state_root", "target_root", "path"}:
+                safe[key_text] = "<redacted>"
+            else:
+                safe[key_text] = redact_value(item)
         return safe
     if isinstance(value, (list, tuple)):
         return [redact_value(item) for item in value[:50]]
@@ -65,6 +70,8 @@ def redact_value(value: object) -> object:
         redacted = SECRET_VALUE_RE.sub("<redacted>", value)
         redacted = UNLABELED_SECRET_RE.sub("<redacted>", redacted)
         redacted = re.sub(r"([A-Za-z][A-Za-z0-9+.-]*://)[^@\s/]+@", r"\1<redacted>@", redacted)
+        redacted = re.sub(r"(?<![A-Za-z0-9+.-]:)/(?:Users|private|tmp|var|Volumes|home)/[^\n\"'`<>]+", "<redacted-path>", redacted)
+        redacted = re.sub(r"\b[A-Za-z]:\\(?:Users|Documents and Settings|tmp|Temp|ProgramData)\\[^\n\"'`<>]+", "<redacted-path>", redacted)
         return redacted[:500]
     if isinstance(value, (bool, int, float)) or value is None:
         return value
@@ -132,6 +139,10 @@ def _receipt_commit(receipt: Mapping[str, object]) -> str:
     return str(payload.get("product_commit_sha") or receipt.get("product_commit_sha") or "")
 
 
+def _receipt_id(receipt: Mapping[str, object]) -> str:
+    return str(receipt.get("receipt_id") or "")
+
+
 def _git_env() -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
 
@@ -143,6 +154,63 @@ def _current_receipt(receipts: Sequence[Mapping[str, object]], current_commit_sh
         if _receipt_commit(receipt) == current_commit_sha:
             return receipt
     return {}
+
+
+def _gate_ids(gate_status: Mapping[str, object], key: str) -> list[str]:
+    values = gate_status.get(key)
+    if not isinstance(values, Sequence) or isinstance(values, str):
+        return []
+    return [str(item) for item in values if str(item)]
+
+
+def _production_release_blockers(
+    *,
+    product_commit_sha: str,
+    gate_status: Mapping[str, object],
+    current_deployment: Mapping[str, object],
+) -> list[str]:
+    blockers: list[str] = []
+    if not product_commit_sha:
+        blockers.append("product-commit-unavailable")
+    passed = set(_gate_ids(gate_status, "passed_gate_ids"))
+    for gate_id in ("deployed_url", "production_e2e_smoke"):
+        if gate_id not in passed:
+            blockers.append(f"required-gate-pending:{gate_id}")
+    if not current_deployment:
+        blockers.append("current-deployment-missing")
+    else:
+        deployment_payload = _receipt_payload(current_deployment)
+        environment = str(deployment_payload.get("environment") or deployment_payload.get("target_environment") or "")
+        deployed_url = str(
+            deployment_payload.get("deployed_url")
+            or deployment_payload.get("production_url")
+            or deployment_payload.get("app_url")
+            or deployment_payload.get("url")
+            or ""
+        )
+        if environment.casefold() not in {"production", "prod"}:
+            blockers.append("current-deployment-not-production")
+        if not deployed_url.startswith("https://"):
+            blockers.append("current-deployment-url-missing")
+    return blockers
+
+
+def release_next_action(*, target_id: str, status: str, blockers: Sequence[str], production_blockers: Sequence[str]) -> str:
+    blocker_set = {str(item) for item in blockers if str(item)}
+    production_set = {str(item) for item in production_blockers if str(item)}
+    if any(item.startswith("setup-readiness") for item in blocker_set):
+        return f"./harness target version {target_id}"
+    if "target-git-dirty" in blocker_set:
+        return f"git -C <product-repo> status --short && ./harness target version {target_id}"
+    if "goal-gates-pending" in blocker_set or any(item.startswith("required-gate-pending:") for item in production_set):
+        return "./harness watch --max-cycles 1 --no-telegram-drain"
+    if "current-deployment-missing" in production_set:
+        return f"./harness target release {target_id} --candidate"
+    if status == "released":
+        return f"./harness target version {target_id}"
+    if status == "release-candidate":
+        return f"./harness target release {target_id} --promote"
+    return f"./harness target release {target_id} --candidate"
 
 
 def latest_release_state(state_root: Path, *, current_commit_sha: str = "") -> dict[str, object]:
@@ -159,6 +227,74 @@ def latest_release_state(state_root: Path, *, current_commit_sha: str = "") -> d
             "latest_commit_sha": _receipt_commit(latest) if latest else "",
         }
     return state
+
+
+def _compact_receipt_section(section: object) -> dict[str, object]:
+    section_map = section if isinstance(section, Mapping) else {}
+    current = section_map.get("current") if isinstance(section_map.get("current"), Mapping) else {}
+    latest = section_map.get("latest") if isinstance(section_map.get("latest"), Mapping) else {}
+    return {
+        "count": int(section_map.get("count") or 0),
+        "current_receipt_id": _receipt_id(current),
+        "latest_receipt_id": _receipt_id(latest),
+        "latest_is_current": bool(section_map.get("latest_is_current")),
+        "current_commit_sha": _receipt_commit(current),
+        "latest_commit_sha": _receipt_commit(latest),
+    }
+
+
+def _missing_setup_requirements(setup_readiness: Mapping[str, object]) -> list[str]:
+    missing = setup_readiness.get("missing_requirements")
+    if not isinstance(missing, Sequence) or isinstance(missing, str):
+        return []
+    return [str(item) for item in missing if str(item)][:20]
+
+
+def build_release_control_projection(
+    *,
+    release_state: Mapping[str, object],
+    active_goal: Mapping[str, object] | None = None,
+    setup_readiness: Mapping[str, object] | None = None,
+    next_action: str = "",
+) -> dict[str, object]:
+    active_goal = active_goal or {}
+    setup_readiness = setup_readiness or {}
+    gate_debt = release_state.get("gate_debt") if isinstance(release_state.get("gate_debt"), Mapping) else {}
+    pending_gate_ids = gate_debt.get("pending_gate_ids")
+    pending_gate_list = (
+        [str(item) for item in pending_gate_ids if str(item)]
+        if isinstance(pending_gate_ids, Sequence) and not isinstance(pending_gate_ids, str)
+        else []
+    )
+    setup_blocked = setup_readiness.get("ok") is False
+    release_next = str(release_state.get("next_action") or next_action or "")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "product_standard": str(active_goal.get("product_standard") or ""),
+        "pending_gate_debt": {
+            "status": "pending" if pending_gate_list else "clear",
+            "count": len(pending_gate_list),
+            "gate_ids": pending_gate_list,
+        },
+        "setup_blocker": {
+            "present": setup_blocked,
+            "status": str(setup_readiness.get("status") or ("missing" if setup_blocked else "ready")),
+            "missing_requirements": _missing_setup_requirements(setup_readiness),
+        },
+        "receipts": {
+            "version": _compact_receipt_section(release_state.get("version")),
+            "deployment": _compact_receipt_section(release_state.get("deployment")),
+            "release": _compact_receipt_section(release_state.get("release")),
+        },
+        "release_status": str(release_state.get("status") or "unknown"),
+        "release_blockers": [str(item) for item in release_state.get("blockers", []) if str(item)]
+        if isinstance(release_state.get("blockers"), Sequence)
+        and not isinstance(release_state.get("blockers"), str)
+        else [],
+        "production_release": redact_value(release_state.get("production_release") or {}),
+        "next_action": release_next,
+        "values_redacted": True,
+    }
 
 
 def git_head(repo: Path) -> str:
@@ -229,23 +365,60 @@ def build_target_release_state(
         if "target-git-dirty" not in blockers:
             blockers.append("target-git-dirty")
     current_version = latest["version"]["current"] if isinstance(latest.get("version"), Mapping) else {}
+    current_deployment = latest["deployment"]["current"] if isinstance(latest.get("deployment"), Mapping) else {}
     current_release = latest["release"]["current"] if isinstance(latest.get("release"), Mapping) else {}
     release_payload = _receipt_payload(current_release) if isinstance(current_release, Mapping) else {}
-    release_type = str(release_payload.get("release_type") or release_payload.get("status") or "")
-    if current_release and release_type == "production" and not blockers:
-        status = "released"
+    release_type = str(release_payload.get("release_type") or "")
+    production_blockers = _production_release_blockers(
+        product_commit_sha=product_commit_sha,
+        gate_status=gate_status,
+        current_deployment=current_deployment if isinstance(current_deployment, Mapping) else {},
+    )
+    combined_blockers = list(blockers)
+    if current_release and release_type == "production":
+        for blocker in production_blockers:
+            if blocker not in combined_blockers:
+                combined_blockers.append(blocker)
+    if current_release and release_type == "production":
+        status = "released" if not combined_blockers else "blocked"
     elif current_release and release_type == "candidate":
         status = "release-candidate" if not blockers else "blocked"
     elif current_version:
         status = "integrated" if not blockers else "blocked"
     else:
         status = "unversioned" if not blockers else "blocked"
+    next_action = release_next_action(
+        target_id=target_id,
+        status=status,
+        blockers=combined_blockers,
+        production_blockers=production_blockers,
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "target_id": target_id,
         "product_commit_sha": product_commit_sha,
         "status": status,
-        "blockers": blockers,
+        "blockers": combined_blockers,
+        "gate_debt": {
+            "pending_gate_ids": _gate_ids(gate_status, "pending_gate_ids"),
+            "passed_gate_ids": _gate_ids(gate_status, "passed_gate_ids"),
+            "pending_gate_count": len(_gate_ids(gate_status, "pending_gate_ids")),
+        },
+        "receipt_summary": {
+            "current_version_id": _receipt_id(current_version) if isinstance(current_version, Mapping) else "",
+            "current_deployment_id": _receipt_id(current_deployment) if isinstance(current_deployment, Mapping) else "",
+            "current_release_id": _receipt_id(current_release) if isinstance(current_release, Mapping) else "",
+            "latest_version_id": _receipt_id(latest["version"].get("latest", {})) if isinstance(latest.get("version"), Mapping) else "",
+            "latest_deployment_id": _receipt_id(latest["deployment"].get("latest", {})) if isinstance(latest.get("deployment"), Mapping) else "",
+            "latest_release_id": _receipt_id(latest["release"].get("latest", {})) if isinstance(latest.get("release"), Mapping) else "",
+        },
+        "production_release": {
+            "ready": not production_blockers,
+            "blockers": production_blockers,
+            "requires_current_deployment": True,
+            "required_gate_ids": ["deployed_url", "production_e2e_smoke"],
+        },
+        "next_action": next_action,
         "version": latest["version"],
         "deployment": latest["deployment"],
         "release": latest["release"],

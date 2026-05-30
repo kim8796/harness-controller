@@ -228,6 +228,9 @@ def test_build_fleet_status_reports_targets_without_mutating_product(tmp_path: P
     assert target["watch"]["transaction_status"] == "merged"
     assert target["setup_readiness"]["status"] == "not-required"
     assert target["release_state"]["status"] == "unversioned"
+    assert target["release_control"]["release_status"] == "unversioned"
+    assert target["release_control"]["receipts"]["version"]["count"] == 0
+    assert target["release_control"]["next_action"]
     assert target["memory"]["target_lessons"] == 1
     assert target["memory"]["global_lessons"] == 1
     assert payload["controller_root"] == "."
@@ -270,10 +273,96 @@ def test_fleet_status_surfaces_goal_gate_debt_and_product_audit(tmp_path: Path) 
     assert target["active_goal"]["product_audit"]["status"] == "failed"
     assert target["setup_readiness"]["ok"] is False
     assert "setup-readiness-missing" in target["release_state"]["blockers"]
+    assert target["release_control"]["product_standard"] == "production_native"
+    assert target["release_control"]["pending_gate_debt"]["count"] > 0
+    assert "deployed_url" in target["release_control"]["pending_gate_debt"]["gate_ids"]
+    assert target["release_control"]["setup_blocker"]["present"] is True
+    assert target["release_control"]["next_action"]
     assert payload["ok"] is False
     assert payload["status"] == "attention"
     assert "active-goal-product-audit-failed" in target["readiness"]["blockers"]
     assert "setup-readiness-missing" in target["readiness"]["blockers"]
+
+
+def test_fleet_status_release_control_keeps_receipts_compact_and_current_scoped(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    record = _add_target(controller, product)
+    head = module.harness_release.git_head(product)
+    module.harness_release.write_receipt(
+        record.state_root,
+        target_id="demo",
+        kind="version",
+        receipt_id="current-version",
+        payload={
+            "product_commit_sha": head,
+            "status": "integrated",
+            "api_key": "secret-value",
+            "SUPABASE_SERVICE_ROLE_KEY": "plain-supabase-secret-value",
+            "target_root": product.as_posix(),
+            "note": f"from {product / 'src' / 'app.js'}",
+        },
+        now="2026-05-29T00:00:00+00:00",
+    )
+    module.harness_release.write_receipt(
+        record.state_root,
+        target_id="demo",
+        kind="version",
+        receipt_id="stale-version",
+        payload={"product_commit_sha": "stale123", "status": "integrated"},
+        now="2026-05-29T01:00:00+00:00",
+    )
+    module.harness_release.write_receipt(
+        record.state_root,
+        target_id="demo",
+        kind="release",
+        receipt_id="current-candidate",
+        payload={"product_commit_sha": head, "release_type": "candidate", "status": "candidate"},
+        now="2026-05-29T02:00:00+00:00",
+    )
+
+    payload = module.build_fleet_status(controller_root=controller)
+    target = payload["targets"][0]
+    serialized = json.dumps(target["release_control"], ensure_ascii=False)
+
+    assert target["release_control"]["receipts"]["version"]["count"] == 2
+    assert target["release_control"]["receipts"]["version"]["current_receipt_id"] == "current-version"
+    assert target["release_control"]["receipts"]["version"]["latest_receipt_id"] == "stale-version"
+    assert target["release_control"]["receipts"]["version"]["latest_is_current"] is False
+    assert target["release_control"]["receipts"]["release"]["current_receipt_id"] == "current-candidate"
+    assert "secret-value" not in serialized
+    assert "plain-supabase-secret-value" not in json.dumps(payload, ensure_ascii=False)
+    assert "payload" not in serialized
+    assert controller.as_posix() not in json.dumps(payload, ensure_ascii=False)
+    assert product.as_posix() not in json.dumps(payload, ensure_ascii=False)
+
+
+def test_fleet_status_keeps_running_when_one_release_state_is_broken(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product_a = tmp_path / "product-a"
+    product_b = tmp_path / "product-b"
+    controller.mkdir()
+    _init_product_repo(product_a)
+    _init_product_repo(product_b)
+    broken = _add_target(controller, product_a, target_id="broken")
+    _add_target(controller, product_b, target_id="healthy")
+    releases_dir = broken.state_root / "releases"
+    releases_dir.symlink_to(product_a)
+
+    payload = module.build_fleet_status(controller_root=controller)
+    targets = {target["target_id"]: target for target in payload["targets"]}
+
+    assert payload["status"] == "attention"
+    assert targets["broken"]["release_state"]["status"] == "blocked"
+    assert "release-status-read-failed" in targets["broken"]["release_state"]["blockers"]
+    assert targets["broken"]["release_control"]["release_status"] == "blocked"
+    assert "release-status-read-failed" in targets["broken"]["release_control"]["release_blockers"]
+    assert targets["healthy"]["release_state"]["status"] == "unversioned"
+    assert any("broken: release status read failed" in str(error) for error in payload["errors"])
 
 
 def test_fleet_status_redacts_active_goal_title_and_paths(tmp_path: Path) -> None:

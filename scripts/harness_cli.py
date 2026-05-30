@@ -3824,8 +3824,29 @@ def _target_release_state(record: harness_controller.TargetRecord) -> dict[str, 
         verification_blockers=harness_controller.target_run_blockers(verification),
     )
     state["active_goal_id"] = str(goal_payload.get("goal_id") or "")
-    state["target"] = record.to_json(repo_root())
-    state["verification"] = _json_safe(verification)
+    state["target_summary"] = {
+        "target_id": record.target_id,
+        "display_name": record.display_name,
+        "repo_name": record.repo.name,
+        "branch": record.branch,
+        "aliases": list(record.aliases),
+        "default": bool(record.is_default),
+    }
+    state["target"] = dict(state["target_summary"])
+    branch_info = verification.get("branch") if isinstance(verification, Mapping) and isinstance(verification.get("branch"), Mapping) else {}
+    git_info = verification.get("git") if isinstance(verification, Mapping) and isinstance(verification.get("git"), Mapping) else {}
+    state["verification"] = {
+        "ok": bool(verification.get("ok")) if isinstance(verification, Mapping) else False,
+        "blockers": harness_controller.target_run_blockers(verification),
+        "warnings": list(verification.get("warnings") or []) if isinstance(verification, Mapping) else [],
+        "branch": branch_info,
+        "git": {
+            "clean": git_info.get("clean") if isinstance(git_info, Mapping) else None,
+            "dirty_paths": [str(item) for item in git_info.get("dirty_paths", [])]
+            if isinstance(git_info.get("dirty_paths"), list)
+            else [],
+        },
+    }
     return state
 
 
@@ -3836,6 +3857,9 @@ def _render_target_version_text(record: harness_controller.TargetRecord, payload
     print(f"- 상태: `{payload.get('status') or 'unknown'}`")
     blockers = payload.get("blockers") if isinstance(payload.get("blockers"), list) else []
     print("- blockers: " + (", ".join(str(item) for item in blockers) if blockers else "none"))
+    gate_debt = payload.get("gate_debt") if isinstance(payload.get("gate_debt"), Mapping) else {}
+    pending_gate_ids = gate_debt.get("pending_gate_ids") if isinstance(gate_debt.get("pending_gate_ids"), list) else []
+    print("- pending gates: " + (", ".join(str(item) for item in pending_gate_ids) if pending_gate_ids else "none"))
     for key, label in (("version", "version"), ("deployment", "deployment"), ("release", "release")):
         section = payload.get(key)
         current = section.get("current") if isinstance(section, Mapping) and isinstance(section.get("current"), Mapping) else {}
@@ -3847,9 +3871,7 @@ def _render_target_version_text(record: harness_controller.TargetRecord, payload
     setup = payload.get("setup_readiness") if isinstance(payload.get("setup_readiness"), Mapping) else {}
     if setup and setup.get("ok") is False:
         print("- setup readiness: missing")
-        for action in setup.get("next_actions", []) if isinstance(setup.get("next_actions"), list) else []:
-            print(f"  - {action}")
-    print(f"다음 명령: `./harness target release {record.target_id} --candidate`")
+    print(f"다음 명령: `{payload.get('next_action') or f'./harness target release {record.target_id} --candidate'}`")
 
 
 def command_target_version(args: argparse.Namespace) -> int:
@@ -3894,7 +3916,7 @@ def command_target_release(args: argparse.Namespace) -> int:
         state = _target_release_state(record)
         blockers = [str(item) for item in state.get("blockers", []) if str(item)]
         release_type = "candidate" if args.candidate else "production"
-        if blockers:
+        if blockers and release_type == "production":
             payload = {"schema_version": 1, "ok": False, "status": "blocked", "blockers": blockers, "release_state": state}
             if args.json:
                 print(json.dumps(_json_safe(payload), ensure_ascii=False, indent=2, sort_keys=True))
@@ -3917,8 +3939,14 @@ def command_target_release(args: argparse.Namespace) -> int:
                 if isinstance(current_release, Mapping) and isinstance(current_release.get("payload"), Mapping)
                 else {}
             )
-            current_type = str(current_payload.get("release_type") or current_payload.get("status") or "")
-            if current_type == "production":
+            current_type = str(current_payload.get("release_type") or "")
+            production_release = state.get("production_release") if isinstance(state.get("production_release"), Mapping) else {}
+            production_blockers = (
+                [str(item) for item in production_release.get("blockers", []) if str(item)]
+                if isinstance(production_release.get("blockers"), list)
+                else []
+            )
+            if current_type == "production" and state.get("status") == "released":
                 payload = {
                     "schema_version": 1,
                     "ok": True,
@@ -3934,6 +3962,17 @@ def command_target_release(args: argparse.Namespace) -> int:
                     print(f"- 대상: `{record.target_id}`")
                     print(f"- product commit: `{state.get('product_commit_sha') or 'unknown'}`")
                 return 0
+            if current_type == "production":
+                blockers = production_blockers or [str(item) for item in state.get("blockers", []) if str(item)]
+                payload = {"schema_version": 1, "ok": False, "status": "blocked", "blockers": blockers, "release_state": state}
+                if args.json:
+                    print(json.dumps(_json_safe(payload), ensure_ascii=False, indent=2, sort_keys=True))
+                else:
+                    print("target release 승격 중단")
+                    print(f"- 대상: `{record.target_id}`")
+                    print(f"- blockers: {', '.join(blockers)}")
+                    print(f"다음 명령: `{state.get('next_action') or f'./harness target version {record.target_id}'}`")
+                return 2
             if current_type != "candidate":
                 blockers = ["no-current-release-candidate"]
                 payload = {"schema_version": 1, "ok": False, "status": "blocked", "blockers": blockers, "release_state": state}
@@ -3944,6 +3983,22 @@ def command_target_release(args: argparse.Namespace) -> int:
                     print(f"- 대상: `{record.target_id}`")
                     print("- blockers: no-current-release-candidate")
                     print(f"다음 명령: `./harness target release {record.target_id} --candidate`")
+                return 2
+            if production_blockers:
+                payload = {
+                    "schema_version": 1,
+                    "ok": False,
+                    "status": "blocked",
+                    "blockers": production_blockers,
+                    "release_state": state,
+                }
+                if args.json:
+                    print(json.dumps(_json_safe(payload), ensure_ascii=False, indent=2, sort_keys=True))
+                else:
+                    print("target release 승격 중단")
+                    print(f"- 대상: `{record.target_id}`")
+                    print(f"- blockers: {', '.join(production_blockers)}")
+                    print(f"다음 명령: `{state.get('next_action') or './harness watch --max-cycles 1 --no-telegram-drain'}`")
                 return 2
         receipt_payload = _release_receipt_payload(record, release_type=release_type, release_state=state)
         receipt_id = args.version or f"{release_type}-{str(state.get('product_commit_sha') or 'unknown')[:12]}"
