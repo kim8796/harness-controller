@@ -236,23 +236,16 @@ BEGINNER_HELP_TEXT = """하네스 시작
 - install: 제품 저장소를 하네스 관리 대상으로 등록합니다. 제품 저장소에는 하네스 파일을 쓰지 않습니다.
   터미널에서 ./harness install만 입력하면 제품 저장소 경로만 물어봅니다.
 - goal: 제품 완성 목표를 등록합니다. watch가 이 목표를 계획/task로 나눕니다.
-- watch: Telegram relay와 goal/task backlog를 계속 감시하며 구현, 검증, commit, push/PR publication을 반복합니다.
+- watch: Telegram relay와 goal/task backlog를 계속 감시하며 구현, 검증, commit, push/PR publication을 반복합니다. Production goal은 PR merge만으로 완료하지 않습니다.
 - do: 특정 작업 하나를 즉시 처리하는 보조 명령입니다.
 - fleet status: 등록된 여러 프로젝트의 goal, backlog, watch, operator-wait 상태를 한 화면에서 봅니다.
 - target remove: 더 이상 관리하지 않을 프로젝트를 controller 등록에서 제거합니다. 제품 저장소 파일은 삭제하지 않습니다.
 - task/run/finish/archive: 복구와 디버깅을 위한 고급 명령입니다.
 
 자주 쓰는 확인:
-- ./harness status
-- ./harness dashboard
+- ./harness watch --status
 - ./harness fleet status
-- ./harness goal
-- ./harness watch
 - ./harness target remove my-app
-- ./harness telegram setup --target-id my-app --repo-id my-app --dry-run
-- ./harness verify --loop-ready
-- ./harness smoke implementation
-- ./harness controller audit-size
 
 고급 명령:
 - ./harness --help

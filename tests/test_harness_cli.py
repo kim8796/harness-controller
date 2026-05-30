@@ -84,15 +84,17 @@ def test_beginner_help_home_no_args_and_help_are_static(monkeypatch, tmp_path: P
     assert "./harness install /path/to/product" in no_arg_output
     assert './harness goal "이 프로젝트를 배포 가능한 완성도 있는 제품으로 만든다"' in no_arg_output
     assert './harness goal draft "목표 제목"' in no_arg_output
-    assert "./harness goal from <goal-spec.md>" in no_arg_output
+    assert "./harness goal from <goal-spec.md> screenshots/" in no_arg_output
     assert "./harness watch" in no_arg_output
     assert "./harness fleet status" in no_arg_output
     assert "./harness target remove my-app" in no_arg_output
     assert "제품 저장소 파일은 삭제하지 않습니다" in no_arg_output
+    assert "PR merge만으로 완료하지 않습니다" in no_arg_output
+    assert "완성도 있는 MVP" not in no_arg_output
     assert "./harness task review <packet-id> --normalize auto" not in no_arg_output
     assert "./harness target archive plan my-app" not in no_arg_output
-    assert "./harness telegram setup --target-id my-app --repo-id my-app --dry-run" in no_arg_output
-    assert "./harness controller audit-size" in no_arg_output
+    assert "./harness telegram setup --target-id my-app --repo-id my-app --dry-run" not in no_arg_output
+    assert "./harness controller audit-size" not in no_arg_output
     assert "./harness --help" in no_arg_output
     assert "./harness task --help" in no_arg_output
     assert not (tmp_path / "targets").exists()
