@@ -1974,6 +1974,31 @@ def _goal_task_notes(goal: GoalRecord, plan_id: str, task: Mapping[str, object])
     return tuple(notes)
 
 
+def _copy_task_metadata(item: dict[str, object], task: Mapping[str, object]) -> dict[str, object]:
+    for key in (
+        "goal_spec_path",
+        "attachment_manifest_path",
+        "traceability_path",
+        "spec_refs",
+        "attachment_refs",
+        "attachment_count",
+        "gate_ids",
+        "expected_evidence",
+        "service_level",
+        "product_standard",
+    ):
+        value = task.get(key)
+        if value in (None, "", (), []):
+            continue
+        if isinstance(value, (list, tuple)):
+            item[key] = [str(entry) if not isinstance(entry, Mapping) else dict(entry) for entry in value]
+        elif isinstance(value, Mapping):
+            item[key] = dict(value)
+        else:
+            item[key] = value
+    return item
+
+
 def _queue_task(
     *,
     state_root: Path,
@@ -2013,6 +2038,7 @@ def _queue_task(
         "queued_backlog_path": "",
         "backlog_id": "",
     }
+    _copy_task_metadata(item, task)
     if review.auto_eligible:
         queued = harness_task_intake.queue_packet(
             state_root=state_root,
@@ -2320,6 +2346,9 @@ def refill_goal_tasks(
                 "goal_spec_path": str(goal_payload.get("spec_path") or ""),
                 "attachment_manifest_path": str(goal_payload.get("attachment_manifest_path") or ""),
                 "traceability_path": str(goal_payload.get("traceability_path") or ""),
+                "spec_refs": [str(goal_payload.get("spec_path") or "")] if str(goal_payload.get("spec_path") or "") else [],
+                "attachment_refs": _attachment_refs_from_goal_payload(goal_payload),
+                "attachment_count": len(goal_payload.get("attachments")) if isinstance(goal_payload.get("attachments"), list) else 0,
                 "gate_ids": pending_gate_ids,
                 "expected_evidence": _expected_evidence_for_gate_ids(pending_gate_ids, completion_gates),
             }

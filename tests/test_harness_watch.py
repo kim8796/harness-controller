@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +14,27 @@ from conftest import load_script_module
 
 def _load_module():
     return load_script_module("harness_watch", "scripts/harness_watch.py")
+
+
+def _init_product_repo(repo: Path) -> None:
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / "package.json").write_text(
+        '{"scripts":{"test":"echo ok","build":"echo build"}}\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, stdout=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "test@example.test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, stdout=subprocess.PIPE)
+
+
+def _product_file_snapshot(repo: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(repo).as_posix(): path.read_bytes()
+        for path in repo.rglob("*")
+        if path.is_file() and ".git/" not in path.relative_to(repo).as_posix()
+    }
 
 
 def test_watch_status_writer_redacts_and_uses_sidecar_relative_paths(tmp_path) -> None:
@@ -211,6 +235,228 @@ def test_watch_status_includes_setup_readiness_and_release_state(tmp_path, monke
     assert "- setup readiness: `missing-setup`" in output
     assert "- release state: `blocked`" in output
     assert "setup-readiness-missing" in output
+
+
+def test_goal_refill_queues_normal_tasks_before_gate_verifier_wait(tmp_path) -> None:
+    module = _load_module()
+    module.ERROR_CLASS = RuntimeError
+    product = tmp_path / "product"
+    _init_product_repo(product)
+    state_root = tmp_path / "targets" / "demo"
+    state_root.mkdir(parents=True)
+    record = SimpleNamespace(target_id="demo", state_root=state_root, repo=product)
+    goal = module.harness_goal.create_goal(
+        state_root=state_root,
+        target_id="demo",
+        text="배포 가능한 실시간 채팅 서비스 Vercel Supabase DB 인증 OpenAI",
+    )
+    before = _product_file_snapshot(product)
+
+    result = module.refill_goal_if_idle(
+        record,
+        target_executable_backlog_items=lambda _record: [],
+    )
+
+    assert result is not None
+    assert result["queued"] > 0
+    assert result["goal_id"] == goal.goal_id
+    assert "operator_waits" not in result
+    assert not (state_root / "operator-waits").exists()
+    assert not (state_root / "runs" / "harness").exists()
+    assert before == _product_file_snapshot(product)
+
+
+def test_true_idle_gate_verifier_reuses_existing_setup_wait(tmp_path) -> None:
+    module = _load_module()
+    module.ERROR_CLASS = RuntimeError
+    product = tmp_path / "product"
+    _init_product_repo(product)
+    state_root = tmp_path / "targets" / "demo"
+    state_root.mkdir(parents=True)
+    record = SimpleNamespace(target_id="demo", state_root=state_root, repo=product)
+    module.harness_goal.create_goal(
+        state_root=state_root,
+        target_id="demo",
+        text="배포 가능한 실시간 채팅 서비스 Vercel Supabase DB 인증 OpenAI",
+    )
+
+    first = module.verify_goal_gates_if_truly_idle(record)
+    second = module.verify_goal_gates_if_truly_idle(record)
+
+    wait_files = tuple((state_root / "operator-waits").glob("*.json"))
+    verifier_receipts = tuple((state_root / "runs" / "harness").glob("production-gate-verifier-*/generated-evidence.json"))
+    assert first is not None and first["operator_waits"]
+    assert second is not None and second["operator_waits"]
+    assert second["message"] == "goal gate verifier is already waiting on setup"
+    assert second["operator_waits"][0]["status"] == "waiting"
+    assert second["operator_waits"][0]["deadline_at"]
+    assert second["operator_waits"][0]["next_action"]
+    assert len(wait_files) == 1
+    assert len(verifier_receipts) == 1
+
+
+def test_true_idle_gate_verifier_ignores_unrelated_and_expired_setup_waits(tmp_path) -> None:
+    module = _load_module()
+    module.ERROR_CLASS = RuntimeError
+    product = tmp_path / "product"
+    _init_product_repo(product)
+    state_root = tmp_path / "targets" / "demo"
+    state_root.mkdir(parents=True)
+    record = SimpleNamespace(target_id="demo", state_root=state_root, repo=product)
+    module.harness_goal.create_goal(
+        state_root=state_root,
+        target_id="demo",
+        text="배포 가능한 실시간 채팅 서비스 Vercel Supabase DB 인증 OpenAI",
+    )
+    old_started = module.harness_operator_wait.utc_now() - timedelta(minutes=30)
+    unrelated = module.harness_operator_wait.build_operator_wait_record(
+        target_id="demo",
+        wait_id="setup-wait-publication",
+        wait_class="setup-wait",
+        reason="publication credential missing",
+        risk_summary="publication wait",
+        next_action="run gh auth status",
+        allowed_replies=("resolved", "stop"),
+        resume_policy="next-safe-point",
+        context={"run_id": "publication-run", "blocked_gate_ids": ["deployed_url"]},
+    )
+    expired = module.harness_operator_wait.build_operator_wait_record(
+        target_id="demo",
+        wait_id="setup-wait-expired-gate",
+        wait_class="setup-wait",
+        reason="old gate setup missing",
+        risk_summary="expired gate wait",
+        next_action="set provider env",
+        allowed_replies=("resolved", "stop"),
+        resume_policy="recheck-gate-readiness",
+        started_at=old_started,
+        timeout_seconds=0,
+        context={"run_id": "production-gate-verifier-old", "blocked_gate_ids": ["deployed_url"]},
+    )
+    malformed = module.harness_operator_wait.build_operator_wait_record(
+        target_id="demo",
+        wait_id="setup-wait-no-gates",
+        wait_class="setup-wait",
+        reason="malformed gate wait",
+        risk_summary="missing blocked gate context",
+        next_action="set provider env",
+        allowed_replies=("resolved", "stop"),
+        resume_policy="recheck-gate-readiness",
+        context={"run_id": "production-gate-verifier-no-gates"},
+    )
+    module.harness_operator_wait.write_operator_wait_record(state_root, unrelated)
+    module.harness_operator_wait.write_operator_wait_record(state_root, expired)
+    module.harness_operator_wait.write_operator_wait_record(state_root, malformed)
+    wait_dir = state_root / "operator-waits"
+    (wait_dir / "broken.json").symlink_to(tmp_path / "missing.json")
+
+    result = module.verify_goal_gates_if_truly_idle(record)
+
+    assert result is not None
+    wait_files = tuple(path for path in wait_dir.glob("*.json") if not path.is_symlink())
+    assert len(wait_files) == 4
+    assert result["operator_waits"][0]["wait_id"] not in {
+        "setup-wait-publication",
+        "setup-wait-expired-gate",
+        "setup-wait-no-gates",
+    }
+    assert result["operator_waits"][0]["status"] == "waiting"
+    assert result["operator_waits"][0]["next_action"]
+
+
+def test_goal_refill_skips_gate_verifier_when_executable_backlog_exists(tmp_path) -> None:
+    module = _load_module()
+    module.ERROR_CLASS = RuntimeError
+    product = tmp_path / "product"
+    _init_product_repo(product)
+    state_root = tmp_path / "targets" / "demo"
+    state_root.mkdir(parents=True)
+    record = SimpleNamespace(target_id="demo", state_root=state_root, repo=product)
+    module.harness_goal.create_goal(
+        state_root=state_root,
+        target_id="demo",
+        text="배포 가능한 실시간 채팅 서비스 Vercel Supabase DB 인증 OpenAI",
+    )
+
+    result = module.refill_goal_if_idle(
+        record,
+        target_executable_backlog_items=lambda _record: [SimpleNamespace(item_id="BL-ready")],
+    )
+
+    assert result is None
+    assert not (state_root / "operator-waits").exists()
+    assert not (state_root / "runs" / "harness").exists()
+
+
+def test_command_run_true_idle_preserves_gate_operator_wait_status(tmp_path, capsys) -> None:
+    module = _load_module()
+    module.ERROR_CLASS = RuntimeError
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    _init_product_repo(product)
+    state_root = controller / "targets" / "demo"
+    state_root.mkdir(parents=True)
+    record = SimpleNamespace(target_id="demo", repo=product, branch="main", state_root=state_root)
+    goal = module.harness_goal.create_goal(
+        state_root=state_root,
+        target_id="demo",
+        text="배포 가능한 실시간 채팅 서비스 Vercel Supabase DB 인증 OpenAI",
+    )
+    runtime = SimpleNamespace(
+        repo_root=lambda: controller,
+        default_target=lambda _root: record,
+        target_executable_backlog_items=lambda _record: [],
+        target_next_auto_backlog_item=lambda _record: None,
+        drain_telegram_relay_for_record=lambda _record: {},
+        process_operator_task_inbox=lambda _record: {},
+        refill_goal_if_idle=lambda _record: None,
+        pending_backlog_product_pushes=lambda **_kwargs: [],
+        auto_merge_pending_publications=None,
+        github_credentials_ready=lambda **_kwargs: True,
+        write_watch_status=module.write_watch_status,
+        watch_active_goal_id=module.watch_active_goal_id,
+        print_watch_status=lambda _record: 0,
+        record_autopilot_doctor_diagnosis=lambda **_kwargs: {"path": "doctor.json"},
+        append_autopilot_memory=lambda *_args, **_kwargs: state_root / "memory.json",
+        record_autopilot_incident=lambda **_kwargs: {"signature": "sig", "count": 1},
+        target_open_incident_blocker=lambda _record, _backlog_id: None,
+        block_sidecar_backlog_for_incident=lambda **_kwargs: (True, "blocked.md"),
+        run_autopilot_transaction=lambda _record, _args: None,
+        print_beginner_transaction_error=lambda exc: print(f"transaction error: {exc}"),
+        backlog_goal_id=lambda _record, _backlog_id: goal.goal_id,
+        run_target_sidecar_maintenance=lambda _record: {},
+        incident_record_incident=lambda **_kwargs: {},
+        materialize_controller_repair_task=lambda **_kwargs: state_root / "repair.md",
+        sleep=lambda _seconds: None,
+        finish_push_caution="push caution",
+        autopilot_incident_threshold=2,
+        controller_errors=(RuntimeError,),
+        discover_errors=(RuntimeError,),
+        transaction_errors=(RuntimeError,),
+    )
+    args = argparse.Namespace(
+        extra=[],
+        once=False,
+        watch=True,
+        max_cycles=0,
+        idle_seconds=1,
+        stop_on_idle=True,
+        drain_telegram=False,
+        auto_maintenance=False,
+        auto_merge=True,
+    )
+
+    assert module.command_run(args, runtime) == 0
+    capsys.readouterr()
+    status = json.loads((state_root / "watch" / "latest.json").read_text(encoding="utf-8"))
+    text = json.dumps(status, ensure_ascii=False)
+    assert status["phase"] == "stopped-idle"
+    assert status["operator_wait"]["status"] == "waiting"
+    assert status["operator_wait_deadline_at"]
+    assert status["operator_wait_next_action"]
+    assert product.as_posix() not in text
+    assert state_root.as_posix() not in text
+    assert "OPENAI_API_KEY=" not in text
 
 
 def test_watch_status_release_state_reports_dirty_product_without_product_mutation(tmp_path, monkeypatch) -> None:
