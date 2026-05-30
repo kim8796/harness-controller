@@ -27,10 +27,18 @@ REUSABLE_EVENTS = frozenset(
         "transaction-merged",
         "publication-blocked",
         "publication-credential-blocked",
+        "validation-failed",
+        "scope-normalization",
+        "fake-success-audit",
+        "deploy-blocked",
+        "production-gate-blocked",
+        "production-gate-passed",
+        "goal-gate-verification",
         "maintenance",
         "doctor-diagnosis",
     }
 )
+MAX_PLANNER_HINTS = 5
 
 
 class FleetError(RuntimeError):
@@ -122,6 +130,8 @@ def redact_text(value: object) -> str:
     for pattern in patterns:
         redacted = re.sub(pattern, "<redacted>", redacted)
     redacted = re.sub(r"([A-Za-z][A-Za-z0-9+.-]*://)[^@\s/]+@", r"\1<redacted>@", redacted)
+    redacted = re.sub(r"(?<![A-Za-z0-9+.-]:)/(?:Users|private|tmp|var|Volumes|home)/[^\n\"'`<>]+", "<redacted-path>", redacted)
+    redacted = re.sub(r"\b[A-Za-z]:\\(?:Users|Documents and Settings|tmp|Temp|ProgramData)\\[^\n\"'`<>]+", "<redacted-path>", redacted)
     return redacted
 
 
@@ -169,6 +179,33 @@ def _classify_reason(value: object) -> str:
     return "other"
 
 
+def _compact_id_list(value: object, *, limit: int = 12) -> list[str]:
+    if isinstance(value, str):
+        raw_items: Sequence[object] = re.split(r"[\s,]+", value)
+    elif isinstance(value, Sequence):
+        raw_items = value
+    else:
+        raw_items = ()
+    items: list[str] = []
+    for item in raw_items:
+        text = re.sub(r"[^0-9A-Za-z_.:-]+", "-", redact_text(item).strip()).strip("-")
+        if not text or text == "redacted":
+            continue
+        if text not in items:
+            items.append(text[:80])
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _payload_id_fields(payload: Mapping[str, object]) -> dict[str, list[str]]:
+    return {
+        "capability_ids": _compact_id_list(payload.get("capability_ids") or payload.get("capabilities")),
+        "gate_ids": _compact_id_list(payload.get("gate_ids") or payload.get("gates") or payload.get("blocked_gate_ids")),
+        "provider_ids": _compact_id_list(payload.get("provider_ids") or payload.get("providers")),
+    }
+
+
 def is_reusable_event(event: str) -> bool:
     return event in REUSABLE_EVENTS or event.startswith("merge-")
 
@@ -184,6 +221,9 @@ def _lesson_from_event(
         return None
     outcome = "observed"
     sample: dict[str, object] = {}
+    id_fields = _payload_id_fields(payload)
+    product_standard = _compact_id_list(payload.get("product_standard"), limit=1)
+    reason_class = ""
     reuse_hint = "Use this compact signal when planning similar targets."
     if event == "task-intake":
         queued = bool(payload.get("queued"))
@@ -205,6 +245,41 @@ def _lesson_from_event(
         outcome = f"{event}-{reason_class}"
         sample = {"reason_class": reason_class, "has_pr": bool(payload.get("pr_url"))}
         reuse_hint = "Surface this blocker early in fleet readiness before selecting more work."
+    elif event == "validation-failed":
+        command_class = _slug(payload.get("command") or payload.get("validation") or "unknown", max_length=32)
+        reason_class = _classify_reason(payload.get("reason") or payload.get("stderr") or payload.get("error"))
+        outcome = f"{command_class}-{reason_class}"
+        sample = {"command_class": command_class, "reason_class": reason_class}
+        reuse_hint = "Prefer planner validation commands that avoid this repeated failure shape."
+    elif event == "scope-normalization":
+        status = "auto-fixed" if bool(payload.get("auto_fixed") or payload.get("normalized")) else "manual-needed"
+        outcome = status
+        sample = {"status": status, "scope_count": safe_value(payload.get("scope_count"))}
+        reuse_hint = "Use this signal to infer tighter file_scope before queueing similar tasks."
+    elif event == "fake-success-audit":
+        gate_ids = id_fields["gate_ids"]
+        reason_class = _classify_reason(payload.get("reason") or payload.get("finding") or payload.get("summary"))
+        outcome = f"{gate_ids[0] if gate_ids else 'unknown-gate'}-{reason_class}"
+        sample = {"reason_class": reason_class, "failed_gate_count": safe_value(payload.get("failed_gate_count"))}
+        reuse_hint = "Do not accept local/mock/seed evidence for matching production gates."
+    elif event == "deploy-blocked":
+        provider_ids = id_fields["provider_ids"]
+        reason_class = _classify_reason(payload.get("reason") or payload.get("message") or payload.get("error"))
+        outcome = f"{provider_ids[0] if provider_ids else 'deployment'}-{reason_class}"
+        sample = {"reason_class": reason_class}
+        reuse_hint = "Check deployment provider readiness before assigning deploy or release tasks."
+    elif event in {"production-gate-blocked", "production-gate-passed", "goal-gate-verification"}:
+        status = str(payload.get("status") or ("passed" if event == "production-gate-passed" else "blocked")).casefold()
+        gate_ids = id_fields["gate_ids"]
+        outcome = f"{gate_ids[0] if gate_ids else 'unknown-gate'}-{_slug(status, max_length=32)}"
+        sample = {
+            "status": safe_value(status),
+            "gate_count": len(gate_ids),
+        }
+        if status in {"blocked", "failed"}:
+            reason_class = _classify_reason(payload.get("reason") or payload.get("observed_result"))
+            sample["reason_class"] = reason_class
+        reuse_hint = "Plan next tasks from the remaining production gate evidence gap."
     elif event == "maintenance":
         status = str(payload.get("status") or "unknown")
         outcome = f"maintenance-{_slug(status, max_length=32)}"
@@ -236,6 +311,9 @@ def _lesson_from_event(
         "first_seen_at": created_at,
         "last_seen_at": created_at,
         "reuse_hint": reuse_hint,
+        "product_standard": product_standard[0] if product_standard else "",
+        **id_fields,
+        "reason_class": reason_class,
         "sample": sample,
     }
 
@@ -294,6 +372,96 @@ def promote_reusable_lesson(
     return lessons_path
 
 
+def _lesson_matches(
+    lesson: Mapping[str, object],
+    *,
+    target_id: str,
+    product_standard: str,
+    capability_ids: set[str],
+    gate_ids: set[str],
+    provider_ids: set[str],
+) -> tuple[int, str]:
+    score = 0
+    reasons: list[str] = []
+    lesson_target_ids = lesson.get("source_target_ids")
+    if isinstance(lesson_target_ids, Sequence) and not isinstance(lesson_target_ids, str):
+        if target_id in {str(item) for item in lesson_target_ids}:
+            score += 6
+            reasons.append("same-target")
+    lesson_standard = str(lesson.get("product_standard") or "")
+    if product_standard and lesson_standard == product_standard:
+        score += 3
+        reasons.append("product-standard")
+    for key, wanted, weight, label in (
+        ("capability_ids", capability_ids, 4, "capability"),
+        ("gate_ids", gate_ids, 5, "gate"),
+        ("provider_ids", provider_ids, 4, "provider"),
+    ):
+        values = lesson.get(key)
+        if not isinstance(values, Sequence) or isinstance(values, str):
+            continue
+        if {str(item) for item in values if str(item)}.intersection(wanted):
+            score += weight
+            reasons.append(label)
+    count = lesson.get("count")
+    if isinstance(count, int) and count > 1:
+        score += min(count, 5)
+        reasons.append("repeated")
+    return score, ",".join(reasons)
+
+
+def planner_reusable_lesson_hints(
+    *,
+    controller_root: Path,
+    target_id: str,
+    product_standard: str = "",
+    capability_ids: Sequence[str] = (),
+    gate_ids: Sequence[str] = (),
+    provider_ids: Sequence[str] = (),
+    limit: int = MAX_PLANNER_HINTS,
+) -> list[dict[str, object]]:
+    global_index, errors = _read_global_index_for_status(controller_root)
+    if errors:
+        return []
+    lessons = global_index.get("lessons")
+    if not isinstance(lessons, Mapping):
+        return []
+    wanted_capabilities = {str(item) for item in capability_ids if str(item)}
+    wanted_gates = {str(item) for item in gate_ids if str(item)}
+    wanted_providers = {str(item) for item in provider_ids if str(item)}
+    ranked: list[tuple[int, str, dict[str, object]]] = []
+    for lesson in lessons.values():
+        if not isinstance(lesson, Mapping):
+            continue
+        score, matched_by = _lesson_matches(
+            lesson,
+            target_id=target_id,
+            product_standard=product_standard,
+            capability_ids=wanted_capabilities,
+            gate_ids=wanted_gates,
+            provider_ids=wanted_providers,
+        )
+        if score <= 0:
+            continue
+        hint = {
+            "lesson_key": safe_value(lesson.get("lesson_key") or ""),
+            "source_event": safe_value(lesson.get("source_event") or ""),
+            "outcome": safe_value(lesson.get("outcome") or ""),
+            "count": safe_value(lesson.get("count") or 1),
+            "last_seen_at": safe_value(lesson.get("last_seen_at") or ""),
+            "reuse_hint": safe_value(lesson.get("reuse_hint") or ""),
+            "product_standard": safe_value(lesson.get("product_standard") or ""),
+            "capability_ids": safe_value(lesson.get("capability_ids") or []),
+            "gate_ids": safe_value(lesson.get("gate_ids") or []),
+            "provider_ids": safe_value(lesson.get("provider_ids") or []),
+            "reason_class": safe_value(lesson.get("reason_class") or ""),
+            "matched_by": matched_by,
+        }
+        ranked.append((score, str(lesson.get("last_seen_at") or ""), hint))
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [hint for _, _, hint in ranked[: max(0, min(limit, MAX_PLANNER_HINTS))]]
+
+
 def _trim_jsonl(path: Path, *, keep: int = 500) -> None:
     lines = path.read_text(encoding="utf-8").splitlines()
     if len(lines) > keep:
@@ -345,8 +513,8 @@ def _active_goal(record: harness_controller.TargetRecord) -> dict[str, object]:
     passed = gate_status.get("passed_gate_ids") if isinstance(gate_status, Mapping) else []
     summary: dict[str, object] = {
         "status": "active",
-        "goal_id": goal.goal_id,
-        "title": goal.title,
+        "goal_id": safe_value(goal.goal_id),
+        "title": safe_value(goal.title),
         "product_standard": safe_value(
             (payload.get("goal_contract") or {}).get("product_standard")
             if isinstance(payload.get("goal_contract"), Mapping)

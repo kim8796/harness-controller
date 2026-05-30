@@ -1,77 +1,93 @@
-# Gate-Driven Planner Watch Refill Implementation Plan
+# Global Learning Planner Feedback Implementation Plan
 
-Diet-Exception: PR 8 wires existing gate-driven planner/watch logic to the new production verifier with focused tests; the change is intentionally narrow.
+Diet-Exception: global reusable planner learning adds a focused helper module and regression tests for secret-safe cross-target planning
 
-> For agentic workers: Use superpowers:subagent-driven-development or superpowers:executing-plans. Keep this PR focused on pending gate refill and verifier/operator-wait integration.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans. This PR is one small checkpoint in the provider/goal UX roadmap.
 
-Goal:
-- Make `watch` goal-first: when an active production goal has pending completion gates and no executable backlog, the controller must not idle as "done"; it should run gate verification, surface setup blockers, and/or create the next executable gate task.
+**Goal:** Improve controller-local reusable learning so future goal planning can avoid repeated setup, validation, fake-success, merge, and deploy failures without copying raw evidence or product contents.
 
-Existing baseline:
-- Roadmaps already include production gate ids and traceability metadata.
-- `refill_goal_tasks()` already creates a `task-verify-gates` backlog when all ordinary tasks are done but gates remain.
-- PR 7 added `harness_production_gate_verifier.py`, but watch does not yet invoke it.
+**Architecture:** Keep target-specific evidence in each target sidecar. Promote only deterministic, compact, redacted lessons to `targets/_global/memory`, then let `harness_goal` read a sanitized subset as roadmap/task hints. Do not add beginner commands or mutate product repos.
 
-Implementation:
-- Add a narrow watch helper that runs `verify_goal_gates()` only when:
-  - active goal exists and is still active;
-  - completion gate status is pending;
-  - there is no queued executable backlog;
-  - no active operator wait is already blocking the same target.
-- The helper writes sidecar evidence only under `targets/<id>/runs/harness` and can create `setup-wait` records for missing provider setup.
-- `refill_goal_if_idle()` should return verifier status fields:
-  - `gate_verifier_status`
-  - `gate_verifier_blocked_gate_ids`
-  - `operator_waits`
-  - `pending_gate_ids`
-- Watch status should show the verifier/setup wait next action without claiming goal completion.
-- If verifier blocks due missing env/provider, watch records `operator-wait` or `planner-refill-empty` with a concrete next action.
-- If verifier cannot pass because product evidence is missing, existing `task-verify-gates` generation remains the next step.
-- Preserve beginner UX: no new command is required.
+**Tech Stack:** Python stdlib, existing `scripts/harness_fleet.py`, `scripts/harness_goal.py`, pytest, ruff, controller export guard.
 
-Tests:
-- `tests/test_harness_watch.py`
-  - active production goal + no backlog + missing setup runs verifier and records setup wait/status.
-  - active production goal + no backlog + pending gates still triggers `task-verify-gates` when verifier cannot pass.
-  - existing executable backlog skips verifier.
-  - existing operator-wait skips duplicate verifier/wait creation.
-- `tests/test_harness_goal.py`
-  - gate verification task keeps `gate_ids`, expected evidence, spec/attachment refs, and schema v2 operation notes.
-- Regression/export:
-  - No new module unless truly needed.
-  - `python3 -m pytest tests/test_harness_watch.py tests/test_harness_goal.py tests/test_harness_production_gate_verifier.py -q`
+---
+
+## Scope
+
+- Modify `scripts/harness_fleet.py` to classify more reusable event types and expose a read-only planner hint API.
+- Add `scripts/harness_goal_learning.py` as a focused bridge from goal planning to safe global memory hints.
+- Modify `scripts/harness_goal.py` to pass compact hints into `build_roadmap_model()` and attach them to roadmap/tasks.
+- Modify `scripts/harness_guard.py` so the new helper maps to the focused goal/fleet/export tests.
+- Add focused coverage in `tests/test_harness_fleet.py` and `tests/test_harness_goal.py`.
+- Run focused tests and full pre-push guard.
+
+## Agent Roles
+
+- Memory Schema Agent: review lesson keys, dedupe, and allowed compact fields.
+- Planner Integration Agent: review `harness_goal` integration and import/coupling risks.
+- Security/Secret Reviewer: review redaction, raw evidence avoidance, symlink/path handling, and planner hint propagation.
+- Regression/Export Reviewer: covered locally because agent slot limit prevented a fourth live agent; verify no new module/export changes are required.
+
+## Implementation Tasks
+
+### Task 1: Global Lesson Quality
+
+**Files:**
+- Modify: `scripts/harness_fleet.py`
+- Test: `tests/test_harness_fleet.py`
+
+- [ ] Add reusable classifications for `validation-failed`, `scope-normalization`, `fake-success-audit`, `deploy-blocked`, and production gate events without storing raw logs.
+- [ ] Keep samples small: event type, outcome class, capability/gate/provider ids, reason class, booleans, counts.
+- [ ] Add tests that secret-like payloads, raw logs, and absolute product paths do not appear in JSONL/index.
+- [ ] Add tests that repeated lessons update `count`, `first_seen_at`, `last_seen_at`, and `source_target_ids`.
+
+### Task 2: Planner Hint API
+
+**Files:**
+- Modify: `scripts/harness_fleet.py`
+- Test: `tests/test_harness_fleet.py`
+
+- [ ] Add `planner_reusable_lesson_hints(controller_root, target_id, product_standard, capability_ids, limit=5)`.
+- [ ] Read only `reusable-index.json`; fail closed to `[]` on missing/malformed/symlinked memory.
+- [ ] Return secret-free compact hints: `lesson_key`, `source_event`, `outcome`, `count`, `reuse_hint`, `capability_ids`, `gate_ids`, `provider_ids`, `reason_class`.
+- [ ] Prefer hints from the same target and matching capabilities/gates/providers, then highest count/recent lessons.
+
+### Task 3: Roadmap Feedback Integration
+
+**Files:**
+- Modify: `scripts/harness_goal.py`
+- Create: `scripts/harness_goal_learning.py`
+- Test: `tests/test_harness_goal.py`
+
+- [ ] In `build_roadmap()`, import/use `harness_fleet.planner_reusable_lesson_hints()` without creating a product dependency.
+- [ ] Store hints on the roadmap as `reusable_lesson_hints`.
+- [ ] Attach relevant hints to production task metadata and task notes so implementers see prior blockers.
+- [ ] Ensure `build_roadmap_model()` remains unit-testable with optional `reusable_lesson_hints`.
+
+### Task 4: Verification And Review
+
+**Files:**
+- Modify as needed: tests only for focused regressions.
+
+- [ ] Run ruff on changed Python files.
+- [ ] Run focused pytest:
+  - `python3 -m pytest tests/test_harness_fleet.py tests/test_harness_goal.py -q`
+- [ ] Run full guard:
   - `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+- [ ] Apply reviewer corrections until blocker count is zero.
 
-Agent review:
-- Watch Runtime Agent: verify idle/refill control flow.
-- Goal Planner Agent: verify task metadata and idempotency.
-- Operator-Wait/Security Agent: verify setup waits are bounded and secret-free.
-- Regression/Export Agent: verify tests and no accidental product repo writes.
-- Blockers trigger correction notes here before patching.
+## Acceptance Criteria
 
-Correction 1:
-- Watch Runtime review found the first verifier hook was too early and could block a fresh goal before normal roadmap tasks were queued.
-- Move production gate verifier execution to the true idle path after normal planner refill and task selection fail to produce executable work.
+- Reusable global memory remains compact, deterministic, redacted, and controller-local.
+- Planner output includes reusable lesson hints when relevant.
+- Raw evidence, raw logs, product file contents, absolute product paths, and secret-like values are not copied into global memory or roadmap hints.
+- Existing fleet status and goal roadmap behavior remains compatible.
+- No product repo files are changed.
+- Focused tests and full guard pass before PR creation/merge.
 
-Correction 2:
-- Goal Planner review found `task-verify-gates` did not preserve structured `spec_refs`, `attachment_refs`, `attachment_count`, or `expected_evidence` in progress metadata.
-- Persist task metadata through `_queue_task()` and add regression coverage using a spec plus image attachment.
+## Correction Notes
 
-Correction 3:
-- Operator-Wait/Security review found duplicate wait detection was too broad and ignored deadline/symlink risks.
-- Restrict duplicate detection to active production-gate verifier setup waits with matching blocked gates, skip expired waits, ignore symlinked wait files before stat/read, and expand verifier wait summaries back to full wait payloads for status.
-
-Correction 4:
-- Full guard sanitizer self-test found verifier status could overwrite an existing manual-review-only planner result.
-- Run the verifier only after normal refill creates neither queued work nor manual-review work.
-
-Correction 5:
-- Final review found malformed production-gate setup waits with missing `blocked_gate_ids` could suppress new verifier waits.
-- Require active verifier setup waits to carry blocked gate context intersecting the current pending gates.
-
-Done criteria:
-- Pending production gates keep the goal active.
-- Watch no longer looks idle-complete when gates remain.
-- Missing provider/env setup becomes operator-wait evidence.
-- Product repo remains untouched.
-- Focused tests, full guard, and PR CI pass before merge.
+- Planner Integration review flagged module-cycle risk. Keep `harness_goal` free of top-level `harness_fleet` imports; use a local import only inside roadmap generation and keep `build_roadmap_model()` testable with explicit hints.
+- Security review flagged raw active goal title/id leakage and incomplete path redaction. Fleet status now projects active goal id/title through `safe_value()`, and redaction covers Unix paths with spaces plus Windows user paths.
+- Memory Schema review flagged that queue reports dropped rich metadata. Queue report candidates now copy task metadata, including gate/evidence/spec refs and reusable lesson hints.
+- Full guard flagged the new helper as missing related tests. Guard related-test mapping now points `scripts/harness_goal_learning.py` to goal/fleet/export focused coverage.

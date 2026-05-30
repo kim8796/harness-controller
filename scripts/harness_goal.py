@@ -15,6 +15,7 @@ from typing import Mapping, Sequence
 
 import harness_goal_contract
 import harness_goal_gates
+import harness_goal_learning
 import harness_loop
 import harness_product_audit
 import harness_task_intake
@@ -1686,6 +1687,16 @@ def build_roadmap(
     profile = collect_product_profile(target_repo)
     plan_id = f"plan-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     goal_payload = _read_json(goal.goal_json)
+    goal_contract = goal_payload.get("goal_contract") if isinstance(goal_payload.get("goal_contract"), Mapping) else {}
+    product_standard = str(goal_contract.get("product_standard") or goal_payload.get("service_level") or "")
+    completion_gates = _completion_gates_for_goal_contract(goal_contract) if goal_contract else []
+    reusable_hints = harness_goal_learning.reusable_lesson_hints_for_goal(
+        state_root=state_root,
+        target_id=target_id,
+        goal_contract=goal_contract,
+        product_standard=product_standard,
+        completion_gate_ids=sorted(harness_goal_gates.gate_ids(completion_gates)),
+    ) if goal_contract else []
     roadmap = build_roadmap_model(
         target_id=target_id,
         goal_id=goal.goal_id,
@@ -1694,6 +1705,7 @@ def build_roadmap(
         plan_id=plan_id,
         created_at=utc_timestamp(),
         goal_payload=goal_payload,
+        reusable_lesson_hints=reusable_hints,
     )
     _write_json(goal.roadmap_json, roadmap)
     goal_payload["active_plan_id"] = plan_id
@@ -1711,6 +1723,7 @@ def build_roadmap_model(
     plan_id: str,
     created_at: str,
     goal_payload: Mapping[str, object] | None = None,
+    reusable_lesson_hints: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     goal_payload = goal_payload or {}
     context_summary = str(goal_payload.get("context_summary") or "").strip()
@@ -1726,6 +1739,7 @@ def build_roadmap_model(
     traceability_path = str(goal_payload.get("traceability_path") or goal_contract.get("traceability_path") or "")
     spec_refs = [spec_path] if spec_path else []
     attachment_refs = _attachment_refs_from_goal_payload(goal_payload)
+    compact_hints = [dict(hint) for hint in reusable_lesson_hints[:5] if isinstance(hint, Mapping)]
     if service_level == "production":
         completion_gates = _completion_gates_for_goal_contract(goal_contract) if goal_contract else _completion_gates_for_service_level(service_level)
         completion_gate_ids = sorted(harness_goal_gates.gate_ids(completion_gates))
@@ -1740,6 +1754,7 @@ def build_roadmap_model(
                 for gate_id in _gate_ids_for_task_kind(kind, product_standard=product_standard)
                 if gate_id in allowed_gate_ids
             ]
+            task_hints = harness_goal_learning.hints_for_task(gate_ids, compact_hints)
             tasks.append(
                 {
                     "task_key": f"task-{index:02d}-{kind}",
@@ -1765,6 +1780,7 @@ def build_roadmap_model(
                     "product_standard": product_standard,
                     "gate_ids": gate_ids,
                     "expected_evidence": _expected_evidence_for_gate_ids(gate_ids, completion_gates),
+                    "reusable_lesson_hints": task_hints,
                 }
             )
         return {
@@ -1777,6 +1793,7 @@ def build_roadmap_model(
             "service_level": service_level,
             "product_standard": product_standard,
             "completion_gates": completion_gates,
+            "reusable_lesson_hints": compact_hints,
             "milestones": [
                 {
                     "id": f"m{index}",
@@ -1887,21 +1904,20 @@ def build_queue_report_model(*, state_root: Path, target_id: str) -> dict[str, o
     for task in roadmap.get("tasks") or []:
         if not isinstance(task, Mapping):
             continue
-        candidates.append(
-            {
-                "target_id": target_id,
-                "goal_id": active.goal_id,
-                "task_key": str(task.get("task_key") or ""),
-                "title": str(task.get("title") or ""),
-                "summary": str(task.get("summary") or ""),
-                "acceptance": [str(item) for item in task.get("acceptance") or ()],
-                "file_scope": [str(item) for item in task.get("file_scope") or ()],
-                "forbidden_scope": [".env*", "runs/**", "reports/**", "targets/**"],
-                "validation": [str(item) for item in task.get("validation") or ()],
-                "queue_status": "candidate",
-                "autonomy_execute": "auto",
-            }
-        )
+        candidate = {
+            "target_id": target_id,
+            "goal_id": active.goal_id,
+            "task_key": str(task.get("task_key") or ""),
+            "title": str(task.get("title") or ""),
+            "summary": str(task.get("summary") or ""),
+            "acceptance": [str(item) for item in task.get("acceptance") or ()],
+            "file_scope": [str(item) for item in task.get("file_scope") or ()],
+            "forbidden_scope": [".env*", "runs/**", "reports/**", "targets/**"],
+            "validation": [str(item) for item in task.get("validation") or ()],
+            "queue_status": "candidate",
+            "autonomy_execute": "auto",
+        }
+        candidates.append(_copy_task_metadata(candidate, task))
     return {
         "schema_version": GOAL_SCHEMA_VERSION,
         "goal_id": active.goal_id,
@@ -1963,6 +1979,15 @@ def _goal_task_notes(goal: GoalRecord, plan_id: str, task: Mapping[str, object])
     if task.get("expected_evidence"):
         notes.append(f"Goal-Gate-Evidence-Operation: {harness_goal_gates.REQUIRED_GATE_OPERATION}")
         notes.append("Goal-Gate-Evidence-Rule: production gates require typed generated-evidence receipts plus product audit pass.")
+    reusable_hints = task.get("reusable_lesson_hints")
+    if isinstance(reusable_hints, Sequence) and not isinstance(reusable_hints, str):
+        for hint in reusable_hints[:3]:
+            if not isinstance(hint, Mapping):
+                continue
+            lesson_key = str(hint.get("lesson_key") or "").strip()
+            reuse_hint = str(hint.get("reuse_hint") or "").strip()
+            if lesson_key:
+                notes.append(f"Reusable-Lesson: {lesson_key} - {reuse_hint}")
     attachments = goal_payload.get("attachments")
     if isinstance(attachments, list):
         for attachment in attachments:
@@ -1984,6 +2009,7 @@ def _copy_task_metadata(item: dict[str, object], task: Mapping[str, object]) -> 
         "attachment_count",
         "gate_ids",
         "expected_evidence",
+        "reusable_lesson_hints",
         "service_level",
         "product_standard",
     ):
