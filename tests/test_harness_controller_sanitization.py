@@ -53,6 +53,7 @@ def test_controller_sanitization_self_test_covers_goal_gate_product_audit_tests(
 
     assert {
         "tests/test_harness_fleet.py",
+        "tests/test_harness_capability_registry.py",
         "tests/test_harness_goal.py",
         "tests/test_harness_goal_contract.py",
         "tests/test_harness_goal_gates.py",

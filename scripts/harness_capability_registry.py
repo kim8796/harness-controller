@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Mapping
 
@@ -28,12 +29,14 @@ class ProviderPack:
     provider_id: str
     label: str
     capability_ids: tuple[str, ...]
+    aliases: tuple[str, ...] = ()
 
     def to_json(self) -> dict[str, object]:
         return {
             "id": self.provider_id,
             "label": self.label,
             "capability_ids": list(self.capability_ids),
+            "aliases": list(self.aliases),
         }
 
 
@@ -76,12 +79,17 @@ CAPABILITIES: tuple[Capability, ...] = (
 )
 
 PROVIDER_PACKS: tuple[ProviderPack, ...] = (
-    ProviderPack("vercel", "Vercel", ("deployment",)),
-    ProviderPack("supabase", "Supabase", ("auth", "db_persistence", "realtime", "storage", "moderation")),
-    ProviderPack("openai", "OpenAI", ("ai",)),
-    ProviderPack("apple", "Apple Developer", ("ios_native", "store_release")),
-    ProviderPack("google-play", "Google Play", ("android_native", "store_release")),
-    ProviderPack("store", "Store metadata", ("store_release",)),
+    ProviderPack("vercel", "Vercel", ("deployment",), ("vercel",)),
+    ProviderPack("supabase", "Supabase", ("auth", "db_persistence", "realtime", "storage", "moderation"), ("supabase",)),
+    ProviderPack("openai", "OpenAI", ("ai",), ("openai", "responses api")),
+    ProviderPack("apple", "Apple Developer", ("ios_native", "store_release"), ("apple developer", "app store connect", "testflight")),
+    ProviderPack("google-play", "Google Play", ("android_native", "store_release"), ("google play console", "play console")),
+    ProviderPack("store", "Store metadata", ("store_release",), ()),
+    ProviderPack("firebase", "Firebase", ("deployment", "auth", "db_persistence", "realtime", "storage"), ("firebase", "firestore")),
+    ProviderPack("aws-amplify", "AWS Amplify", ("deployment", "auth", "db_persistence", "realtime", "storage"), ("aws amplify", "amplify")),
+    ProviderPack("capacitor", "Capacitor", ("ios_native", "android_native"), ("capacitor",)),
+    ProviderPack("expo", "Expo", ("ios_native", "android_native"), ("expo", "expo application services")),
+    ProviderPack("react-native", "React Native", ("ios_native", "android_native"), ("react native",)),
 )
 
 SETUP_REQUIREMENTS_BY_GATE: dict[str, tuple[SetupRequirement, ...]] = {
@@ -261,6 +269,11 @@ def default_provider_ids_for_capability(capability_id: str) -> tuple[str, ...]:
     return tuple()
 
 
+def provider_ids_for_capability(capability_id: str) -> tuple[str, ...]:
+    target = str(capability_id or "").strip()
+    return tuple(provider.provider_id for provider in PROVIDER_PACKS if target in provider.capability_ids)
+
+
 def capability_provider_map() -> dict[str, tuple[str, ...]]:
     return {capability.capability_id: capability.default_provider_ids for capability in CAPABILITIES}
 
@@ -284,6 +297,25 @@ def provider_pack_by_id(provider_id: str) -> Mapping[str, object] | None:
         if provider.provider_id == target:
             return provider.to_json()
     return None
+
+
+def detect_provider_ids(*texts: str) -> tuple[str, ...]:
+    haystack = " ".join(str(text or "") for text in texts).casefold()
+    detected: list[str] = []
+    for provider in PROVIDER_PACKS:
+        aliases = provider.aliases
+        for alias in aliases:
+            needle = str(alias or "").casefold().strip()
+            if not needle:
+                continue
+            if any(char.isalnum() for char in needle):
+                matched = re.search(rf"(?<![A-Za-z0-9]){re.escape(needle)}(?![A-Za-z0-9])", haystack)
+            else:
+                matched = needle in haystack
+            if matched and provider.provider_id not in detected:
+                detected.append(provider.provider_id)
+                break
+    return tuple(detected)
 
 
 def setup_requirements_for_gate(gate_id: str) -> tuple[dict[str, object], ...]:

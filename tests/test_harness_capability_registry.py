@@ -34,7 +34,11 @@ def test_registry_exposes_expected_capabilities_and_providers() -> None:
         "store_release",
         "maintainability_handoff",
     }
-    assert set(module.provider_ids()) == {"vercel", "supabase", "openai", "apple", "google-play", "store"}
+    provider_ids = set(module.provider_ids())
+    assert {"vercel", "supabase", "openai", "apple", "google-play", "store"}.issubset(provider_ids)
+    assert {"firebase", "aws-amplify", "capacitor", "expo", "react-native"}.issubset(provider_ids)
+    assert set(module.provider_ids_for_capability("auth")).issuperset({"supabase", "firebase", "aws-amplify"})
+    assert set(module.provider_ids_for_capability("ios_native")).issuperset({"apple", "capacitor", "expo", "react-native"})
 
 
 def test_registry_maps_existing_goal_gates_to_capabilities() -> None:
@@ -97,3 +101,14 @@ def test_registry_metadata_is_secret_free_and_deterministic() -> None:
     assert not re.search(r"gh[pousr]_[A-Za-z0-9_]{8,}", text)
     assert not re.search(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{12,}", text)
     assert "placeholder" not in text.casefold()
+
+
+def test_provider_detection_is_deterministic_and_avoids_broad_alias_false_positives() -> None:
+    module = _load_module()
+
+    assert module.detect_provider_ids("Next.js + Supabase + OpenAI") == ("supabase", "openai")
+    assert module.detect_provider_ids("Use Firebase Auth, Firestore, and Expo for native apps") == ("firebase", "expo")
+    assert "openai" not in module.detect_provider_ids("GPT-SoVITS voice experiment")
+    assert "expo" not in module.detect_provider_ids("make the setup easy for users")
+    assert "store" not in module.detect_provider_ids("store messages in database")
+    assert "store" not in module.detect_provider_ids("App Store release readiness is required")

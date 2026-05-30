@@ -871,6 +871,38 @@ def test_goal_from_spec_imports_spec_attachments_and_criteria(tmp_path: Path) ->
     assert traceability["attachment_manifest_path"] == payload["attachment_manifest_path"]
 
 
+def test_goal_from_spec_persists_provider_decisions_from_spec(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    spec = tmp_path / "goal-spec.md"
+    spec.write_text(
+        "\n".join(
+            [
+                "# 배포 가능한 채팅 서비스",
+                "",
+                "## Stack",
+                "- Next.js + Supabase + OpenAI",
+                "",
+                "## 완료 조건",
+                "- Supabase Auth 로그인",
+                "- Supabase DB 메시지 저장",
+                "- OpenAI AI 답변",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    goal = module.create_goal_from_spec(state_root=state_root, target_id="chatapp", source=spec)
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+
+    contract = payload["goal_contract"]
+    assert contract["provider_decisions"]["auth"]["provider_ids"] == ["supabase"]
+    assert contract["provider_decisions"]["auth"]["source"] == "spec"
+    assert contract["provider_decisions"]["ai"]["provider_ids"] == ["openai"]
+    assert contract["provider_decisions"]["ai"]["source"] == "spec"
+    assert payload["completion_gates"] == contract["completion_gates"]
+
+
 def test_goal_from_spec_parses_completion_evidence_as_gates(tmp_path: Path) -> None:
     module = _load_module()
     state_root = tmp_path / "targets" / "chatapp"

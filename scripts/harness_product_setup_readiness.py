@@ -79,10 +79,42 @@ def _gate_ids(goal_payload: Mapping[str, object]) -> set[str]:
     }
 
 
-def _requirement_map_for_gates(gates: set[str]) -> dict[str, dict[str, object]]:
+def _provider_decisions(goal_payload: Mapping[str, object]) -> Mapping[str, object]:
+    contract = goal_payload.get("goal_contract")
+    if not isinstance(contract, Mapping):
+        return {}
+    decisions = contract.get("provider_decisions")
+    return decisions if isinstance(decisions, Mapping) else {}
+
+
+def _decision_provider_ids(decisions: Mapping[str, object], capability_id: str) -> set[str]:
+    decision = decisions.get(capability_id)
+    if not isinstance(decision, Mapping):
+        return set()
+    raw = decision.get("provider_ids")
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        return set()
+    return {str(item) for item in raw if str(item)}
+
+
+def _requirement_allowed_by_provider_decisions(requirement: Mapping[str, object], decisions: Mapping[str, object]) -> bool:
+    capability_id = str(requirement.get("capability_id") or "")
+    if not capability_id:
+        return True
+    selected_provider_ids = _decision_provider_ids(decisions, capability_id)
+    if not selected_provider_ids:
+        return True
+    provider_id = str(requirement.get("provider_id") or requirement.get("provider") or "")
+    return provider_id in selected_provider_ids
+
+
+def _requirement_map_for_gates(gates: set[str], provider_decisions: Mapping[str, object] | None = None) -> dict[str, dict[str, object]]:
     requirements: dict[str, dict[str, object]] = {}
+    decisions = provider_decisions or {}
     for gate_id in sorted(gates):
         for requirement in GATE_REQUIREMENTS.get(gate_id, ()):
+            if not _requirement_allowed_by_provider_decisions(requirement, decisions):
+                continue
             req_id = str(requirement["id"])
             current = requirements.setdefault(
                 req_id,
@@ -157,7 +189,8 @@ def build_setup_readiness_report(
 ) -> dict[str, object]:
     repo = product_root.resolve()
     gates = _gate_ids(goal_payload)
-    requirements = _requirement_map_for_gates(gates)
+    provider_decisions = _provider_decisions(goal_payload)
+    requirements = _requirement_map_for_gates(gates, provider_decisions)
     values, documented = _read_product_env(repo, environ)
     entries: list[dict[str, object]] = []
     missing_gate_ids: set[str] = set()
@@ -198,6 +231,7 @@ def build_setup_readiness_report(
         "ok": ok,
         "status": "ready" if ok else "missing-setup",
         "required_gate_ids": sorted(gates),
+        "provider_decisions_respected": bool(provider_decisions),
         "missing_gate_ids": sorted(missing_gate_ids),
         "missing_requirements": sorted(missing_requirements),
         "entries": entries,

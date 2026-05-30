@@ -11,6 +11,7 @@ from typing import Protocol, Sequence
 CONTROLLER_SANITIZATION_ALLOWED_HISTORICAL_PATHS = frozenset({"tests/test_harness_autonomy.py"})
 CONTROLLER_SANITIZATION_SELF_TEST_TARGETS = (
     "tests/test_harness_autonomy.py",
+    "tests/test_harness_capability_registry.py",
     "tests/test_harness_cli.py",
     "tests/test_harness_controller.py",
     "tests/test_harness_controller_sanitization.py",
