@@ -10,6 +10,8 @@ from typing import Mapping, Sequence
 import harness_controller
 import harness_goal
 import harness_product_audit
+import harness_product_setup_readiness
+import harness_release
 
 
 SCHEMA_VERSION = 1
@@ -483,14 +485,55 @@ def _target_summary(
         operator_wait = {"count": 0, "active": False, "error": redact_text(exc)}
         errors.append(f"{record.target_id}: operator wait read failed")
     target_memory_count = _line_count(record.state_root / TARGET_MEMORY_FILE)
-    readiness_ok = bool(verification.get("ok")) and active_goal_audit.get("status") != "failed"
+    active_goal_payload = {}
+    if active_goal.get("status") == "active":
+        goal_id = str(active_goal.get("goal_id") or "")
+        goal_json = record.state_root / "goals" / goal_id / "goal.json"
+        try:
+            active_goal_payload = _read_json(goal_json)
+        except FleetError:
+            active_goal_payload = {}
+    setup_readiness = harness_product_setup_readiness.build_setup_readiness_report(
+        product_root=record.repo,
+        goal_payload=active_goal_payload,
+    ) if active_goal_payload else {"schema_version": SCHEMA_VERSION, "ok": True, "status": "not-required"}
+    if setup_readiness.get("ok") is False:
+        errors.append(f"{record.target_id}: product setup readiness missing")
+    product_head = harness_release.git_head(record.repo)
+    git_info = verification.get("git") if isinstance(verification, Mapping) else {}
+    dirty_paths = git_info.get("dirty_paths") if isinstance(git_info, Mapping) and isinstance(git_info.get("dirty_paths"), list) else []
+    gate_status_payload = (
+        active_goal_payload.get("completion_gate_status")
+        if isinstance(active_goal_payload.get("completion_gate_status"), Mapping)
+        else {}
+    )
+    release_state = harness_release.build_target_release_state(
+        record.state_root,
+        target_id=record.target_id,
+        product_commit_sha=product_head,
+        gate_status=gate_status_payload,
+        setup_readiness=setup_readiness,
+        dirty_paths=[str(item) for item in dirty_paths],
+        verification_blockers=harness_controller.target_run_blockers(verification),
+    )
+    readiness_ok = (
+        bool(verification.get("ok"))
+        and active_goal_audit.get("status") != "failed"
+        and setup_readiness.get("ok") is not False
+        and not release_state.get("blockers")
+    )
     readiness_blockers = list(blockers or ())
     if active_goal_audit.get("status") == "failed":
         readiness_blockers.append("active-goal-product-audit-failed")
+    if setup_readiness.get("ok") is False:
+        readiness_blockers.append("setup-readiness-missing")
+    for blocker in release_state.get("blockers", []) if isinstance(release_state.get("blockers"), list) else []:
+        if blocker not in readiness_blockers:
+            readiness_blockers.append(str(blocker))
     status = "ready" if readiness_ok else "needs attention"
     if bool(operator_wait.get("active")):
         status = "operator-wait"
-    elif active_goal.get("status") == "active" or backlog["queued"] or backlog["active"]:
+    elif readiness_ok and (active_goal.get("status") == "active" or backlog["queued"] or backlog["active"]):
         status = "active"
     return {
         "target_id": record.target_id,
@@ -513,6 +556,8 @@ def _target_summary(
             **operator_wait,
         },
         "watch": watch,
+        "setup_readiness": safe_value(setup_readiness),
+        "release_state": safe_value(release_state),
         "memory": {
             "target_lessons": target_memory_count,
             "global_lessons": _global_learning_count(global_index, record.target_id),
@@ -556,7 +601,13 @@ def build_fleet_status(*, controller_root: Path) -> dict[str, object]:
         "targets_total": len(targets),
         "targets_ready": sum(1 for target in targets if target.get("readiness", {}).get("ok")),
         "targets_attention": sum(1 for target in targets if not target.get("readiness", {}).get("ok")),
-        "targets_blocked": sum(1 for target in targets if target.get("status") in {"needs attention", "operator-wait"}),
+        "targets_blocked": sum(
+            1
+            for target in targets
+            if target.get("status") in {"needs attention", "operator-wait"}
+            or target.get("setup_readiness", {}).get("ok") is False
+            or bool(target.get("release_state", {}).get("blockers"))
+        ),
         "active_goals": sum(1 for target in targets if target.get("active_goal", {}).get("status") == "active"),
         "queued_backlog": sum(int(target.get("backlog", {}).get("queued") or 0) for target in targets),
         "queued_auto_backlog": sum(int(target.get("backlog", {}).get("queued_auto") or 0) for target in targets),

@@ -181,6 +181,7 @@ def test_goal_gate_and_product_audit_modules_have_explicit_related_tests() -> No
     goal_gates_related = module._guess_related_tests(Path("scripts/harness_goal_gates.py"), root)
     product_audit_related = module._guess_related_tests(Path("scripts/harness_product_audit.py"), root)
     product_audit_support_related = module._guess_related_tests(Path("scripts/harness_product_audit_support.py"), root)
+    setup_readiness_related = module._guess_related_tests(Path("scripts/harness_product_setup_readiness.py"), root)
     release_related = module._guess_related_tests(Path("scripts/harness_release.py"), root)
 
     assert Path("tests/test_harness_goal.py") in goal_contract_related
@@ -194,6 +195,9 @@ def test_goal_gate_and_product_audit_modules_have_explicit_related_tests() -> No
     assert Path("tests/test_harness_product_audit.py") in product_audit_support_related
     assert Path("tests/test_harness_product_maintainability.py") in product_audit_support_related
     assert Path("tests/test_harness_export.py") in product_audit_support_related
+    assert Path("tests/test_harness_product_setup_readiness.py") in setup_readiness_related
+    assert Path("tests/test_harness_product_audit.py") in setup_readiness_related
+    assert Path("tests/test_harness_export.py") in setup_readiness_related
     assert Path("tests/test_harness_release.py") in release_related
     assert Path("tests/test_harness_fleet.py") in release_related
     assert Path("tests/test_harness_publication.py") in release_related

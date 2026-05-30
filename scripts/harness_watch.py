@@ -18,6 +18,8 @@ import harness_goal
 import harness_incident
 import harness_loop
 import harness_operator_wait
+import harness_product_setup_readiness
+import harness_release
 import harness_task_intake
 from harness_autonomy.control import sanitize_for_outbox
 
@@ -703,7 +705,7 @@ def watch_active_goal_id(record: harness_controller.TargetRecord) -> str:
     return active.goal_id
 
 
-def watch_active_goal_gate_summary(record: harness_controller.TargetRecord) -> Mapping[str, object]:
+def watch_active_goal_payload(record: harness_controller.TargetRecord) -> Mapping[str, object]:
     try:
         active = harness_goal.load_active_goal(record.state_root)
     except harness_goal.GoalError:
@@ -717,6 +719,10 @@ def watch_active_goal_gate_summary(record: harness_controller.TargetRecord) -> M
         return {}
     if not isinstance(payload, Mapping):
         return {}
+    return payload
+
+
+def _goal_gate_summary_from_payload(payload: Mapping[str, object]) -> Mapping[str, object]:
     gate_status = payload.get("completion_gate_status") if isinstance(payload.get("completion_gate_status"), Mapping) else {}
     gates = payload.get("completion_gates") if isinstance(payload.get("completion_gates"), list) else []
     pending = gate_status.get("pending_gate_ids") if isinstance(gate_status, Mapping) else []
@@ -733,6 +739,47 @@ def watch_active_goal_gate_summary(record: harness_controller.TargetRecord) -> M
             else payload.get("service_level") or ""
         ),
     }
+
+
+def watch_active_goal_gate_summary(record: harness_controller.TargetRecord) -> Mapping[str, object]:
+    return _goal_gate_summary_from_payload(watch_active_goal_payload(record))
+
+
+def _watch_setup_readiness(
+    record: harness_controller.TargetRecord,
+    goal_payload: Mapping[str, object],
+) -> Mapping[str, object]:
+    if not goal_payload:
+        return {"schema_version": 1, "ok": True, "status": "not-required", "missing_requirements": []}
+    repo = getattr(record, "repo", None)
+    if repo is None:
+        return {"schema_version": 1, "ok": True, "status": "not-inspected", "missing_requirements": []}
+    return harness_product_setup_readiness.build_setup_readiness_report(
+        product_root=Path(repo),
+        goal_payload=goal_payload,
+    )
+
+
+def _watch_release_state(
+    record: harness_controller.TargetRecord,
+    *,
+    goal_payload: Mapping[str, object],
+    gate_summary: Mapping[str, object],
+    setup_readiness: Mapping[str, object],
+) -> Mapping[str, object]:
+    repo = getattr(record, "repo", None)
+    if repo is None:
+        return {"schema_version": 1, "status": "not-inspected", "blockers": [], "product_commit_sha": ""}
+    gate_status = goal_payload.get("completion_gate_status") if isinstance(goal_payload.get("completion_gate_status"), Mapping) else gate_summary
+    return harness_release.build_target_release_state(
+        record.state_root,
+        target_id=record.target_id,
+        product_commit_sha=harness_release.git_head(Path(repo)),
+        gate_status=gate_status,
+        setup_readiness=setup_readiness,
+        dirty_paths=harness_release.git_dirty_paths(Path(repo)),
+        verification_blockers=(),
+    )
 
 
 def _goal_gate_next_action(gate_summary: Mapping[str, object]) -> str:
@@ -924,12 +971,21 @@ def write_watch_status(
         "json_path": watch_sidecar_relative(record, json_path),
         "markdown_path": watch_sidecar_relative(record, md_path),
     }
-    gate_summary = watch_active_goal_gate_summary(record)
+    goal_payload = watch_active_goal_payload(record)
+    gate_summary = _goal_gate_summary_from_payload(goal_payload)
     if gate_summary:
         payload["goal_gate_status"] = gate_summary
         gate_next_action = _goal_gate_next_action(gate_summary)
         if gate_next_action:
             payload["goal_gate_next_action"] = gate_next_action
+    setup_readiness = _watch_setup_readiness(record, goal_payload)
+    payload["setup_readiness"] = setup_readiness
+    payload["release_state"] = _watch_release_state(
+        record,
+        goal_payload=goal_payload,
+        gate_summary=gate_summary,
+        setup_readiness=setup_readiness,
+    )
     if wait_payload:
         payload["operator_wait"] = wait_payload
         payload["operator_wait_id"] = str(wait_payload.get("id") or "")
@@ -1024,6 +1080,36 @@ def render_watch_status_markdown(payload: Mapping[str, object]) -> str:
                 f"- Pending: {gate_status.get('pending_count') or 0}",
                 f"- Pending gates: {pending_text or 'none'}",
                 f"- Next action: {gate_next_action}" if gate_next_action else "",
+                "",
+            ]
+        )
+    setup_readiness = payload.get("setup_readiness")
+    if isinstance(setup_readiness, Mapping) and str(setup_readiness.get("status") or "") not in ("", "not-required", "not-inspected"):
+        missing = setup_readiness.get("missing_requirements")
+        missing_text = ", ".join(str(item) for item in missing[:8]) if isinstance(missing, list) else ""
+        actions = setup_readiness.get("next_actions")
+        action_lines = [f"- Next action: {action}" for action in actions[:5]] if isinstance(actions, list) else []
+        lines.extend(
+            [
+                "## Setup Readiness",
+                "",
+                f"- Status: `{setup_readiness.get('status') or 'unknown'}`",
+                f"- Missing: {missing_text or 'none'}",
+                *action_lines,
+                "",
+            ]
+        )
+    release_state = payload.get("release_state")
+    if isinstance(release_state, Mapping) and str(release_state.get("status") or "") not in ("", "not-inspected"):
+        blockers = release_state.get("blockers")
+        blocker_text = ", ".join(str(item) for item in blockers[:8]) if isinstance(blockers, list) else ""
+        lines.extend(
+            [
+                "## Release State",
+                "",
+                f"- Status: `{release_state.get('status') or 'unknown'}`",
+                f"- Product commit: `{release_state.get('product_commit_sha') or 'unknown'}`",
+                f"- Blockers: {blocker_text or 'none'}",
                 "",
             ]
         )
@@ -1125,6 +1211,21 @@ def print_watch_status(record: harness_controller.TargetRecord) -> int:
         gate_next_action = str(payload.get("goal_gate_next_action") or "")
         if gate_next_action:
             print(f"  - next: {gate_next_action}")
+    setup_readiness = payload.get("setup_readiness")
+    if isinstance(setup_readiness, Mapping) and str(setup_readiness.get("status") or "") not in ("", "not-required", "not-inspected"):
+        print(f"- setup readiness: `{setup_readiness.get('status') or 'unknown'}`")
+        missing = setup_readiness.get("missing_requirements")
+        if isinstance(missing, list) and missing:
+            print("  - missing: " + ", ".join(str(item) for item in missing[:8]))
+        actions = setup_readiness.get("next_actions")
+        if isinstance(actions, list) and actions:
+            print(f"  - next: {actions[0]}")
+    release_state = payload.get("release_state")
+    if isinstance(release_state, Mapping) and str(release_state.get("status") or "") not in ("", "not-inspected"):
+        print(f"- release state: `{release_state.get('status') or 'unknown'}`")
+        blockers = release_state.get("blockers")
+        if isinstance(blockers, list) and blockers:
+            print("  - blockers: " + ", ".join(str(item) for item in blockers[:8]))
     operator_wait = payload.get("operator_wait")
     wait_payload = operator_wait if isinstance(operator_wait, Mapping) else {}
     wait_id = str(wait_payload.get("id") or payload.get("operator_wait_id") or "")

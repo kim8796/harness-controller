@@ -19,6 +19,7 @@ Line count is a trigger, not the decision. The default runtime-module cap is 120
 - `scripts/harness_goal_gates.py`: completion gate definitions and trusted gate evidence validation.
 - `scripts/harness_product_audit.py`: product repository audit orchestration.
 - `scripts/harness_product_audit_support.py`: product audit helper rules, path scanners, and maintainability handoff checks.
+- `scripts/harness_product_setup_readiness.py`: gate-driven provider/env setup readiness without exposing secret values.
 - `scripts/harness_fleet.py`: multi-target status and compact global learning projection.
 - `scripts/harness_release.py`: release, deployment, and version receipt aggregation for target/fleet status.
 - `scripts/harness_guard.py`: local pre-commit/pre-push guard and controller release parity checks.

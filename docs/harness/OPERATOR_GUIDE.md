@@ -42,6 +42,25 @@ production product는 계속 사람이 운영하거나 AI가 유지보수할 수
 `dashboard`와 `status`는 운영자가 읽는 projection이다. 상태 변경 source of truth는 sidecar backlog, inbox, receipt, report다.
 `fleet status`는 여러 target의 readiness, active goal, backlog, watch, operator-wait, compact learning 상태를 한 화면에 모아 보여주는 read-only projection이다.
 
+## Product setup, version, release
+
+production goal이 Vercel, Supabase, OpenAI, native store 같은 provider를 요구하면 하네스는 active goal gate에서 필요한 setup readiness를 계산한다. 이 검사는 product `.env`, shell env, `.env.example`의 key 존재 여부만 보고 값은 출력하지 않는다. 빠진 값은 `watch --status`, `fleet status`, operator-wait, release state에 blocker와 next action으로 표시된다.
+
+target의 현재 버전/릴리스 상태는 read-only로 본다.
+
+```bash
+./harness target version my-app
+```
+
+작업 결과를 현재 product commit에 묶어 release candidate로 기록하거나, blocker가 없을 때 production release로 승격한다.
+
+```bash
+./harness target release my-app --candidate
+./harness target release my-app --promote
+```
+
+`--candidate`는 blocker가 없을 때 현재 product commit을 release candidate receipt로 남긴다. `--promote`는 같은 commit의 candidate가 먼저 있어야 production release receipt를 남긴다. pending goal gate, 빠진 provider setup, dirty product repo 같은 blocker가 있으면 둘 다 멈춘다. 둘 다 product repo 파일이나 provider secret을 수정하지 않는다. secret 값은 product `.env`, shell env, Vercel/Supabase/OpenAI 같은 provider secret UI에만 둔다.
+
 ## 실행
 
 기본 일회성 경로:

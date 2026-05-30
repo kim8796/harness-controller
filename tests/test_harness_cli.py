@@ -8,6 +8,7 @@ import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,6 +30,7 @@ def test_controller_release_check_and_ci_cover_goal_gate_surfaces() -> None:
         "scripts/harness_guard.py",
         "scripts/harness_product_audit.py",
         "scripts/harness_product_audit_support.py",
+        "scripts/harness_product_setup_readiness.py",
         "scripts/harness_release.py",
         "tests/test_harness_controller_sanitization.py",
         "tests/test_harness_fleet.py",
@@ -38,6 +40,7 @@ def test_controller_release_check_and_ci_cover_goal_gate_surfaces() -> None:
         "tests/test_harness_guard.py",
         "tests/test_harness_product_audit.py",
         "tests/test_harness_product_maintainability.py",
+        "tests/test_harness_product_setup_readiness.py",
         "tests/test_harness_release.py",
     }
     expected_pytest_paths = {
@@ -49,6 +52,7 @@ def test_controller_release_check_and_ci_cover_goal_gate_surfaces() -> None:
         "tests/test_harness_guard.py",
         "tests/test_harness_product_audit.py",
         "tests/test_harness_product_maintainability.py",
+        "tests/test_harness_product_setup_readiness.py",
         "tests/test_harness_release.py",
     }
 
@@ -116,6 +120,8 @@ def test_argparse_help_and_invalid_command_remain_advanced_reference(capsys) -> 
     output = capsys.readouterr().out
     assert "usage: harness target" in output
     assert "alias" in output
+    assert "version" in output
+    assert "release" in output
     assert "하네스 시작" not in output
 
     with pytest.raises(SystemExit) as install_help:
@@ -205,6 +211,241 @@ def test_fleet_status_json_reports_registered_targets(monkeypatch, tmp_path: Pat
     assert controller.as_posix() not in json.dumps(payload, ensure_ascii=False)
     assert product.as_posix() not in json.dumps(payload, ensure_ascii=False)
     assert not (product / "targets").exists()
+
+
+def test_target_version_reports_setup_readiness_blockers(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    record = module.harness_controller.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.0",
+    )
+    module.harness_goal.create_goal(
+        state_root=record.state_root,
+        target_id="demo",
+        text="배포 가능한 production Vercel Supabase OpenAI 채팅 서비스",
+    )
+
+    assert module.main(["target", "version", "demo", "--json"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["target_id"] == "demo"
+    assert "setup-readiness-missing" in payload["blockers"]
+    assert payload["setup_readiness"]["values_redacted"] is True
+    assert "OPENAI_API_KEY" in json.dumps(payload, ensure_ascii=False)
+
+
+def test_target_release_candidate_writes_sidecar_receipt(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    head = _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    module.harness_controller.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.0",
+    )
+
+    assert module.main(["target", "release", "demo", "--candidate", "--version", "v-test", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["release_type"] == "candidate"
+    assert payload["receipt_path"] == "releases/v-test.json"
+    receipt = controller / "targets" / "demo" / payload["receipt_path"]
+    assert receipt.exists()
+    receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
+    assert receipt_payload["payload"]["product_commit_sha"] == head
+    assert not (product / "targets").exists()
+
+
+def test_target_release_candidate_blocks_when_setup_missing(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    record = module.harness_controller.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.0",
+    )
+    module.harness_goal.create_goal(
+        state_root=record.state_root,
+        target_id="demo",
+        text="배포 가능한 production Vercel Supabase OpenAI 채팅 서비스",
+    )
+
+    assert module.main(["target", "release", "demo", "--candidate", "--version", "v-blocked", "--json"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["status"] == "blocked"
+    assert "setup-readiness-missing" in payload["blockers"]
+    assert not (controller / "targets" / "demo" / "releases" / "v-blocked.json").exists()
+
+
+def test_target_release_promote_blocks_when_setup_or_gates_pending(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    record = module.harness_controller.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.0",
+    )
+    module.harness_goal.create_goal(
+        state_root=record.state_root,
+        target_id="demo",
+        text="배포 가능한 production Vercel Supabase OpenAI 채팅 서비스",
+    )
+
+    assert module.main(["target", "release", "demo", "--promote", "--json"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["status"] == "blocked"
+    assert "setup-readiness-missing" in payload["blockers"]
+
+
+def test_target_release_promote_requires_current_candidate(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    module.harness_controller.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.0",
+    )
+
+    assert module.main(["target", "release", "demo", "--promote", "--json"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["status"] == "blocked"
+    assert payload["blockers"] == ["no-current-release-candidate"]
+
+
+def test_target_release_promotes_existing_current_candidate(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    module.harness_controller.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.0",
+    )
+
+    assert module.main(["target", "release", "demo", "--candidate", "--version", "v-candidate", "--json"]) == 0
+    capsys.readouterr()
+    assert module.main(["target", "release", "demo", "--promote", "--version", "v-production", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["release_type"] == "production"
+    assert payload["receipt_path"] == "releases/v-production.json"
+    receipt = controller / "targets" / "demo" / payload["receipt_path"]
+    receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
+    assert receipt_payload["payload"]["release_type"] == "production"
+    assert receipt_payload["payload"]["product_commit_sha"]
+    assert not (product / "targets").exists()
+
+
+def test_target_version_includes_release_verification_blockers(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    (product / "README.md").write_text("# Product\n\nchanged\n", encoding="utf-8")
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    module.harness_controller.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.0",
+    )
+
+    assert module.main(["target", "version", "demo", "--json"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+
+    assert "target-git-dirty" in payload["blockers"]
+
+
+def test_pending_publication_auto_merge_writes_version_receipt(monkeypatch, tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    record = module.harness_controller.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.0",
+    )
+
+    merge_result = SimpleNamespace(
+        status="merged",
+        branch="harness/demo/BL-done",
+        base="main",
+        pr_url="https://github.com/acme/demo/pull/7",
+        receipt_path=record.state_root / "runs" / "harness" / "merge" / "product-pr-merge-receipt.json",
+        evidence_path=record.state_root / "runs" / "harness" / "merge" / "generated-evidence.json",
+        message="merged",
+        merge_commit_sha="merge123",
+        local_head_before="before123",
+        local_head_after="after123",
+    )
+    monkeypatch.setattr(module.harness_publication, "pending_task_pr_merges", lambda **_kwargs: [
+        {
+            "goal_id": "goal-demo",
+            "backlog_id": "BL-done",
+            "run_id": "run-old",
+            "commit_sha": "abc1234",
+            "branch": "harness/demo/BL-done",
+            "base": "main",
+            "pr_url": "https://github.com/acme/demo/pull/7",
+        }
+    ])
+    monkeypatch.setattr(module.harness_publication, "merge_task_pr", lambda **_kwargs: merge_result)
+
+    results = module._auto_merge_pending_publications(record=record)
+
+    assert results[0]["status"] == "merged"
+    receipts = sorted((record.state_root / "versions").glob("*.json"))
+    assert len(receipts) == 1
+    payload = json.loads(receipts[0].read_text(encoding="utf-8"))
+    assert payload["payload"]["product_commit_sha"] == "after123"
+    assert payload["payload"]["backlog_id"] == "BL-done"
+    assert payload["payload"]["merge_commit_sha"] == "merge123"
 
 
 def test_goal_draft_and_goal_from_spec_cli_are_beginner_safe(monkeypatch, tmp_path: Path, capsys) -> None:

@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 from typing import Mapping
 
+import harness_product_setup_readiness
 from harness_product_audit_support import (
     GATE_TO_CAPABILITY,
     MAINTAINABILITY_GATE_ID,
@@ -218,6 +219,56 @@ def audit_product_repo(
         maintainability_failed, maintainability_findings = _maintainability_findings(repo, rel_to_text, source_by_rel)
         failed.update(maintainability_failed)
         findings.extend(maintainability_findings)
+        provider_gate_terms = {
+            "deployed_url": "vercel",
+            "production_e2e_smoke": "production",
+            "database_persistence": "supabase",
+            "auth_flow": "supabase",
+            "realtime_two_user_chat": "supabase",
+            "image_upload": "supabase",
+            "report_block": "supabase",
+            "ai_reply": "openai",
+        }
+        expected_terms = sorted({term for gate_id, term in provider_gate_terms.items() if gate_id in gates})
+        operations_text = (rel_to_text.get("docs/OPERATIONS.md", "") + "\n" + rel_to_text.get("docs/TESTING.md", "")).casefold()
+        missing_terms = [term for term in expected_terms if term not in operations_text]
+        if missing_terms:
+            failed.add(MAINTAINABILITY_GATE_ID)
+            findings.append(
+                _finding(
+                    finding_id="maintainability_ops_setup_guidance_missing",
+                    severity="blocker",
+                    impacted_gates=[MAINTAINABILITY_GATE_ID],
+                    summary="Production operations/testing docs must explain required provider setup, env, deploy, rollback, and smoke checks.",
+                    evidence=[
+                        {"path": "docs/OPERATIONS.md", "reason": "missing provider setup guidance: " + ", ".join(missing_terms)}
+                    ],
+                )
+            )
+
+    setup_report = harness_product_setup_readiness.build_setup_readiness_report(
+        product_root=repo,
+        goal_payload={"completion_gates": [{"id": gate_id} for gate_id in sorted(gates)]},
+    )
+    setup_failed = {str(item) for item in setup_report.get("missing_gate_ids", []) if str(item)}
+    if setup_failed:
+        failed.update(setup_failed)
+        findings.append(
+            _finding(
+                finding_id="product_setup_readiness_missing",
+                severity="blocker",
+                impacted_gates=sorted(setup_failed),
+                summary="Production setup is missing provider/env readiness required by one or more gates.",
+                evidence=[
+                    {
+                        "path": ".env or provider secret UI",
+                        "reason": str(action)[:180],
+                    }
+                    for action in setup_report.get("next_actions", [])
+                    if str(action)
+                ][:8],
+            )
+        )
 
     return {
         "status": "blocked" if failed else "ok",

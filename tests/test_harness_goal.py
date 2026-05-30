@@ -66,11 +66,11 @@ def _init_wired_production_product(path: Path) -> None:
         encoding="utf-8",
     )
     (path / "docs" / "OPERATIONS.md").write_text(
-        "# Operations\n\nOperators verify deployment health, logs, environment readiness, and rollback before release.\n",
+        "# Operations\n\nOperators verify Vercel deployment health, Supabase environment readiness, OpenAI runtime secrets, logs, and rollback before release.\n",
         encoding="utf-8",
     )
     (path / "docs" / "TESTING.md").write_text(
-        "# Testing\n\nRun `npm test` for smoke checks and `npm run build` before publishing production changes.\n",
+        "# Testing\n\nRun `npm test` for local smoke checks, `npm run build`, and production Vercel smoke with Supabase/OpenAI before publishing changes.\n",
         encoding="utf-8",
     )
     (path / "docs" / "DECISIONS.md").write_text(
@@ -79,6 +79,19 @@ def _init_wired_production_product(path: Path) -> None:
     )
     (path / ".env.example").write_text(
         "NEXT_PUBLIC_SUPABASE_URL=\nSUPABASE_SERVICE_ROLE_KEY=\nOPENAI_API_KEY=\n",
+        encoding="utf-8",
+    )
+    (path / ".env").write_text(
+        "\n".join(
+            [
+                "VERCEL_PROJECT_ID=project_123",
+                "NEXT_PUBLIC_APP_URL=https://chatapp.example.test",
+                "NEXT_PUBLIC_SUPABASE_URL=https://example.supabase.co",
+                "NEXT_PUBLIC_SUPABASE_ANON_KEY=anon-placeholder",
+                "SUPABASE_SERVICE_ROLE_KEY=service-placeholder",
+                "OPENAI_API_KEY=sk-test-placeholder",
+            ]
+        ),
         encoding="utf-8",
     )
     (path / "package.json").write_text(json.dumps({"scripts": {"test": "node --test", "build": "node --check src/app.js"}}), encoding="utf-8")
