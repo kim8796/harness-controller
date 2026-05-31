@@ -88,6 +88,7 @@ SECRET_LIKE_PRODUCT_QUOTED_LITERAL = re.compile(r"""(?P<quote>["'`])(?P<value>[^
 SECRET_LIKE_ENV_REFERENCE = re.compile(
     r"(?:process\.env|import\.meta\.env)(?:\.[A-Za-z_][A-Za-z0-9_]*|\[['\"][A-Za-z_][A-Za-z0-9_]*['\"]\])!?"
 )
+ENV_NAME_LITERAL = re.compile(r"^[A-Z][A-Z0-9_]{2,}$")
 SIDECAR_DIRS = (
     Path("reports"),
     Path("operator-inbox"),
@@ -1982,6 +1983,16 @@ def _product_secret_value_is_runtime_lookup(value: str) -> bool:
     return not re.search(r"(?:\|\||\?\?)\s*[\"'`]", text)
 
 
+def _product_secret_value_is_env_name_helper(value: str) -> bool:
+    text = value.strip().rstrip(",;)}").strip()
+    if not re.match(r"^[A-Za-z_$][A-Za-z0-9_$]*\s*\(", text):
+        return False
+    literals = [str(match.group("value") or "") for match in SECRET_LIKE_PRODUCT_QUOTED_LITERAL.finditer(text)]
+    if not literals:
+        return False
+    return all(ENV_NAME_LITERAL.fullmatch(literal.strip()) for literal in literals)
+
+
 def _product_secret_value_has_hardcoded_literal(value: str) -> bool:
     if SECRET_LIKE_PRODUCT_QUOTED_LITERAL.search(value):
         return True
@@ -2001,6 +2012,8 @@ def product_content_has_secret_literal(content: str) -> bool:
         if _product_secret_value_is_env_reference(value):
             continue
         if _product_secret_value_is_runtime_lookup(value):
+            continue
+        if _product_secret_value_is_env_name_helper(value):
             continue
         if _product_secret_value_has_hardcoded_literal(value):
             return True

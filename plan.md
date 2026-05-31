@@ -1,3 +1,20 @@
+# Correction: Env Name Helper Secret Scanner False Positive
+
+**Goal:** Fix the live `chatapp-test` long-watch failure where safe production E2E code was blocked as `product-diff-secret-like-content` because the scanner treated env variable names passed to helper functions as literal token values.
+
+**Root Cause Evidence:** `./harness watch --max-cycles 3 --no-telegram-drain` completed and merged deploy readiness PR #22, then selected `BL-20260530-224943-task-10-e2e` and stopped. Direct scanner instrumentation showed the only hard blocker was `adminToken: firstEnv(["PRODUCTION_SMOKE_ADMIN_TOKEN", "ADMIN_ACCESS_TOKEN"])`; those are env variable names, not secret values. Product diff remains uncommitted and must not be reverted while fixing the controller.
+
+**Patch Plan:**
+- Add a failing regression test in `tests/test_harness_controller.py` for `firstEnv([...])` / helper-call assignments containing only env key names.
+- Keep rejection for helper-call fallback literals that contain secret-like literal values.
+- Update `scripts/harness_controller.py` scanner helper logic so secret-like assignment values may be safe helper calls when every quoted string is an env-style name and there are no literal secret tokens.
+- Re-run the scanner against the current `chatapp-test` E2E diff and confirm blockers clear.
+
+**Verification:**
+- `python3 -m pytest tests/test_harness_controller.py -q`
+- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+- Resume the existing `chatapp-test` E2E diff through watch/commit/PR/merge after the controller fix.
+
 # Correction: Same-Transaction Pending Check Merge Retry
 
 **Goal:** Fix the debug-loop UX where `./harness watch --max-cycles 1 --no-telegram-drain` creates a PR, sees Vercel/GitHub checks pending for a few seconds, stops at `merge-pending`, and requires a separate retry even though the checks pass shortly after.

@@ -294,6 +294,8 @@ def test_product_diff_policy_allows_env_references_but_rejects_secret_literals(t
                 "const cookieToken = request.cookies.get(\"session_token\")?.value;",
                 "const secret = process.env.ABUSE_HASH_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY;",
                 "const fallbackSecret = process.env.PRIMARY_SECRET ?? process.env.SECONDARY_SECRET;",
+                'const adminConfig = { adminToken: firstEnv(["PRODUCTION_SMOKE_ADMIN_TOKEN", "ADMIN_ACCESS_TOKEN"]) };',
+                'const phoneConfig = { otpToken: requiredEnv(["PRODUCTION_SMOKE_OTP_A", "E2E_OTP_A"]) };',
             ]
         ),
         encoding="utf-8",
@@ -310,10 +312,16 @@ def test_product_diff_policy_allows_env_references_but_rejects_secret_literals(t
         'const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || "example-secret-value-12345" });\n',
         encoding="utf-8",
     )
+    helper_literal = product / "src" / "helper-literal.js"
+    helper_literal.write_text(
+        'const config = { adminToken: firstEnv(["PRODUCTION_SMOKE_ADMIN_TOKEN", "example-secret-value-12345"]) };\n',
+        encoding="utf-8",
+    )
 
     assert "product-diff-secret-like-content" in module.product_diff_policy_blockers(product, ["src/literal.js"])
     assert "product-diff-secret-like-content" in module.product_diff_policy_blockers(product, ["src/fallback.js"])
     assert "product-diff-secret-like-content" in module.product_diff_policy_blockers(product, ["src/generic-fallback.js"])
+    assert "product-diff-secret-like-content" in module.product_diff_policy_blockers(product, ["src/helper-literal.js"])
 
 
 def test_pending_backlog_product_pushes_accepts_state_publication_receipt(tmp_path: Path) -> None:
