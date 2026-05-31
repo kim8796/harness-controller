@@ -290,6 +290,10 @@ def test_product_diff_policy_allows_env_references_but_rejects_secret_literals(t
                 "const bracket = new Client({ secret: process.env[\"SUPABASE_SERVICE_ROLE_KEY\"] });",
                 "const browser = new Client({ token: import.meta.env.VITE_PUBLIC_SUPABASE_URL });",
                 "const nonNull = new Client({ credential: process.env.OPENAI_API_KEY! });",
+                "const token = request.headers.get(\"authorization\")?.replace(/^Bearer\\s+/i, \"\").trim();",
+                "const cookieToken = request.cookies.get(\"session_token\")?.value;",
+                "const secret = process.env.ABUSE_HASH_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY;",
+                "const fallbackSecret = process.env.PRIMARY_SECRET ?? process.env.SECONDARY_SECRET;",
             ]
         ),
         encoding="utf-8",
