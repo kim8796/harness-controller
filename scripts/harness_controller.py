@@ -1933,6 +1933,108 @@ def transition_sidecar_backlog(
     return applied_payload
 
 
+def complete_sidecar_backlog_with_controller_evidence(
+    *,
+    controller_root: Path,
+    record: TargetRecord,
+    backlog_ref: str,
+    run_id: str,
+    reason: str,
+    apply: bool = False,
+) -> dict[str, Any]:
+    reason_text = _single_line_metadata(reason)
+    if not reason_text:
+        raise ControllerError("backlog completion reason is required")
+    state_paths = record.state_paths(controller_root)
+    validate_sidecar_backlog_integrity(state_paths)
+    evidence, evidence_path = _load_transition_run_evidence(state_paths, run_id)
+    if str(evidence.get("operation") or "") != "goal-gate-verification":
+        raise ControllerError("controller evidence completion requires goal-gate-verification evidence")
+    if str(evidence.get("target_id") or "") != record.target_id:
+        raise ControllerError("controller evidence target_id does not match target")
+    if str(evidence.get("run_id") or "") != _safe_evidence_run_id(run_id):
+        raise ControllerError("controller evidence run_id does not match run")
+    item = _discover_sidecar_backlog_item(state_paths, backlog_ref)
+    if str(item.status) != "queued" or str(item.autonomy_execute) != "auto":
+        raise ControllerError("controller evidence completion requires queued Autonomy-Execute auto backlog")
+    source_rel = item.path
+    target_rel = Path("backlog") / "completed" / source_rel.name
+    metadata_updates = {
+        "Status": "completed",
+        "Completed-Run": _safe_evidence_run_id(run_id),
+        "Completion-Reason": reason_text,
+        "Product-Diff-Paths": "",
+        "Updated": datetime.now().strftime("%Y-%m-%d"),
+    }
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "target_id": record.target_id,
+        "status": "completed",
+        "applied": bool(apply),
+        "reason": reason_text,
+        "source_path": source_rel.as_posix(),
+        "target_path": target_rel.as_posix(),
+        "backlog_id": str(item.item_id),
+        "backlog_title": str(item.title),
+        "run_id": _safe_evidence_run_id(run_id),
+        "evidence_path": evidence_path.as_posix(),
+        "evidence_operation": str(evidence.get("operation") or ""),
+        "product_diff_paths": [],
+        "product_head": str(evidence.get("product_commit_sha") or ""),
+        "receipt_path": "",
+        "generated_evidence_path": "",
+    }
+    if not apply:
+        return payload
+
+    moved_rel = _move_backlog_item_if_needed(state_paths, source_rel, "completed")
+    moved_path = state_paths.state_root / moved_rel
+    _update_backlog_metadata(moved_path, metadata_updates)
+    run_dir = _allocate_transition_run_dir(state_paths)
+    applied_payload = dict(payload)
+    applied_payload.update(
+        {
+            "applied": True,
+            "target_path": moved_rel.as_posix(),
+            "receipt_path": (run_dir / "state-apply-receipt.json").as_posix(),
+            "generated_evidence_path": (run_dir / "generated-evidence.json").as_posix(),
+            "applied_at": datetime.now().isoformat(timespec="seconds"),
+            "metadata_updates": metadata_updates,
+        }
+    )
+    _write_sidecar_json(
+        state_paths.state_root,
+        run_dir / "state-apply-receipt.json",
+        applied_payload,
+        label="controller evidence backlog completion receipt",
+    )
+    _write_sidecar_json(
+        state_paths.state_root,
+        run_dir / "generated-evidence.json",
+        applied_payload,
+        label="controller evidence backlog completion generated evidence",
+    )
+    _write_sidecar_text(
+        state_paths.state_root,
+        run_dir / "report.md",
+        "\n".join(
+            [
+                "# Controller Evidence Backlog Completion",
+                "",
+                f"- Target: `{record.target_id}`",
+                f"- Backlog: `{item.item_id}`",
+                f"- Source evidence: `{evidence_path.relative_to(state_paths.state_root).as_posix()}`",
+                f"- Reason: `{reason_text}`",
+                "- Product commit/push: `none`",
+                "- Mutation scope: `controller sidecar backlog only`",
+                "",
+            ]
+        ),
+        label="controller evidence backlog completion report",
+    )
+    return applied_payload
+
+
 def _safe_product_diff_paths(paths: Sequence[str]) -> list[str]:
     cleaned: list[str] = []
     for raw in paths:

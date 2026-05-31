@@ -1835,6 +1835,108 @@ def test_run_autopilot_transaction_resumes_matching_dirty_evidence_without_rerun
     assert calls == ["transition:run-ai", "commit:run-ai", "publish:run-ai", "version"]
 
 
+def test_run_autopilot_transaction_routes_gate_verifier_backlog_without_implementer(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    state_root = controller / "targets" / "demo"
+    controller.mkdir()
+    product.mkdir()
+    (state_root / "backlog" / "queued").mkdir(parents=True)
+    backlog_path = state_root / "backlog" / "queued" / "BL-gates.md"
+    backlog_path.write_text(
+        "\n".join(
+            [
+                "ID: BL-gates",
+                "Title: Verify production gates",
+                "Status: queued",
+                "Autonomy-Execute: auto",
+                "Goal: goal-demo",
+                "",
+                "Goal-Gate-Evidence-Operation: goal-gate-verification",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    goal_dir = state_root / "goals" / "goal-demo"
+    goal_dir.mkdir(parents=True)
+    (goal_dir / "goal.json").write_text(
+        json.dumps(
+            {
+                "goal_id": "goal-demo",
+                "target_id": "demo",
+                "status": "active",
+                "title": "Deployable product",
+                "completion_gates": [{"id": "deployed_url"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    record = module.harness_controller.TargetRecord(
+        target_id="demo",
+        repo=product,
+        branch="main",
+        state_root=state_root,
+        controller_version="test",
+        created_at="",
+        updated_at="",
+        is_default=True,
+    )
+    item = SimpleNamespace(
+        item_id="BL-gates",
+        path=Path("backlog/queued/BL-gates.md"),
+    )
+    calls: list[str] = []
+
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module, "_target_next_auto_backlog_item", lambda _record: item)
+    monkeypatch.setattr(module, "_backlog_goal_id", lambda _record, _backlog_id: "goal-demo")
+
+    def fail_target_run(_args):
+        raise AssertionError("goal gate verification backlog must not run product implementer")
+
+    monkeypatch.setattr(module, "command_target_run", fail_target_run)
+
+    def fake_verify_goal_gates(**kwargs):
+        calls.append(f"verify:{kwargs['goal_id']}")
+        return {
+            "status": "blocked",
+            "run_id": "production-gate-verifier-test",
+            "product_commit_sha": "a" * 40,
+            "generated_evidence_path": "runs/harness/production-gate-verifier-test/generated-evidence.json",
+            "blocked_gate_ids": ["deployed_url"],
+            "operator_waits": [],
+        }
+
+    monkeypatch.setattr(module.harness_production_gate_verifier, "verify_goal_gates", fake_verify_goal_gates)
+    monkeypatch.setattr(
+        module.harness_controller,
+        "complete_sidecar_backlog_with_controller_evidence",
+        lambda **kwargs: calls.append(f"complete:{kwargs['run_id']}") or {"target_path": "backlog/completed/BL-gates.md"},
+    )
+    args = argparse.Namespace(
+        runner=None,
+        runner_model=None,
+        runner_reasoning_effort=None,
+        command_template=None,
+        auto_merge=True,
+    )
+
+    result = module._run_autopilot_transaction(record, args)
+
+    output = capsys.readouterr().out
+    assert "- gate verifier: `blocked`" in output
+    assert result.status == "gate-verified"
+    assert result.run_id == "production-gate-verifier-test"
+    assert result.backlog_id == "BL-gates"
+    assert calls == ["verify:goal-demo", "complete:production-gate-verifier-test"]
+
+
 def test_beginner_run_once_autopilot_uses_default_target_transaction(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_module()
     controller = tmp_path / "controller"
