@@ -19,6 +19,33 @@ def _load_module():
     return load_script_module("harness_cli", "scripts/harness_cli.py")
 
 
+def test_dependency_ready_backlog_items_skip_unmet_task_key_dependencies(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "target"
+    completed_path = state_root / "backlog" / "completed" / "BL-task-01.md"
+    queued_ready_path = state_root / "backlog" / "queued" / "BL-task-02.md"
+    queued_blocked_path = state_root / "backlog" / "queued" / "BL-task-03.md"
+    completed_path.parent.mkdir(parents=True)
+    queued_ready_path.parent.mkdir(parents=True)
+    completed_path.write_text(
+        "ID: BL-task-01\nStatus: completed\n\n## Notes\n\n- Task-Key: task-01\n",
+        encoding="utf-8",
+    )
+    queued_ready_path.write_text(
+        "ID: BL-task-02\nStatus: queued\nDepends-On: task-01\n",
+        encoding="utf-8",
+    )
+    queued_blocked_path.write_text(
+        "ID: BL-task-03\nStatus: queued\nDepends-On: task-99\n",
+        encoding="utf-8",
+    )
+    completed = SimpleNamespace(item_id="BL-task-01", status="completed", path=completed_path.relative_to(state_root))
+    ready = SimpleNamespace(item_id="BL-task-02", status="queued", path=queued_ready_path.relative_to(state_root))
+    blocked = SimpleNamespace(item_id="BL-task-03", status="queued", path=queued_blocked_path.relative_to(state_root))
+
+    assert module._dependency_ready_backlog_items(state_root, [ready, blocked], all_items=[completed, ready, blocked]) == [ready]
+
+
 def test_controller_release_check_and_ci_cover_goal_gate_surfaces() -> None:
     module = _load_module()
     expected_ruff_paths = {
@@ -1730,6 +1757,82 @@ def test_run_autopilot_transaction_includes_target_run_output_on_failure(monkeyp
     message = str(caught.value)
     assert "AI 구현 lane이 실패했습니다." in message
     assert "target-git-dirty" in message
+
+
+def test_run_autopilot_transaction_resumes_matching_dirty_evidence_without_rerunning_implementer(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    state_root = controller / "targets" / "demo"
+    record = module.harness_controller.TargetRecord(
+        target_id="demo",
+        repo=product,
+        branch="main",
+        state_root=state_root,
+        controller_version="test",
+        created_at="",
+        updated_at="",
+        is_default=True,
+    )
+    item = SimpleNamespace(item_id="BL-ai")
+    calls: list[str] = []
+    summary = {
+        "run_id": "run-ai",
+        "backlog_id": "BL-ai",
+        "backlog_title": "AI reply",
+    }
+
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module, "_target_next_auto_backlog_item", lambda _record: item)
+    monkeypatch.setattr(
+        module.harness_controller,
+        "find_resumable_target_implementation_evidence",
+        lambda **_kwargs: summary,
+    )
+
+    def fail_target_run(_args):
+        raise AssertionError("matching dirty evidence must resume without rerunning implementer")
+
+    monkeypatch.setattr(module, "command_target_run", fail_target_run)
+    monkeypatch.setattr(
+        module.harness_controller,
+        "transition_sidecar_backlog",
+        lambda **kwargs: calls.append(f"transition:{kwargs['run_id']}") or {"target_path": "backlog/completed/BL-ai.md"},
+    )
+    monkeypatch.setattr(
+        module.harness_controller,
+        "commit_sidecar_backlog_product_diff",
+        lambda **kwargs: calls.append(f"commit:{kwargs['run_id']}") or {"product_commit_sha": "abc1234"},
+    )
+    monkeypatch.setattr(module, "_backlog_goal_id", lambda _record, _backlog_id: "goal-demo")
+    monkeypatch.setattr(
+        module.harness_publication,
+        "publish_task_pr",
+        lambda **kwargs: calls.append(f"publish:{kwargs['run_id']}")
+        or SimpleNamespace(status="already-in-base", branch="harness/demo/BL-ai", pr_url="", message="already"),
+    )
+    monkeypatch.setattr(module, "_write_product_version_receipt", lambda **kwargs: calls.append("version"))
+    args = argparse.Namespace(
+        runner=None,
+        runner_model=None,
+        runner_reasoning_effort=None,
+        command_template=None,
+        auto_merge=True,
+    )
+
+    result = module._run_autopilot_transaction(record, args)
+
+    output = capsys.readouterr().out
+    assert "구현 재개" in output
+    assert result.status == "merged"
+    assert result.run_id == "run-ai"
+    assert calls == ["transition:run-ai", "commit:run-ai", "publish:run-ai", "version"]
 
 
 def test_beginner_run_once_autopilot_uses_default_target_transaction(monkeypatch, tmp_path: Path, capsys) -> None:

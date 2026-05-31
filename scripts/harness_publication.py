@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,8 @@ class PublicationError(RuntimeError):
 
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
+MERGEABLE_RETRY_ATTEMPTS = 3
+MERGEABLE_RETRY_DELAY_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -417,6 +420,35 @@ def _merge_status_for_blocked_message(message: str) -> str:
     return "merge-credential-blocked" if _looks_like_credential_error(message) else "merge-blocked"
 
 
+def _mergeability_is_pending(payload: Mapping[str, object]) -> bool:
+    return str(payload.get("mergeable") or "").upper() in {"", "UNKNOWN", "UNSTABLE"}
+
+
+def _refresh_unknown_mergeability(
+    *,
+    runner: CommandRunner,
+    command: Sequence[str],
+    target_repo: Path,
+    pr_payload: Mapping[str, object],
+) -> Mapping[str, object]:
+    if not _mergeability_is_pending(pr_payload):
+        return pr_payload
+    latest: Mapping[str, object] = pr_payload
+    for _attempt in range(MERGEABLE_RETRY_ATTEMPTS):
+        if MERGEABLE_RETRY_DELAY_SECONDS > 0:
+            time.sleep(MERGEABLE_RETRY_DELAY_SECONDS)
+        view = _run(runner, command, target_repo)
+        if view.returncode != 0:
+            return latest
+        parsed = _parse_pr_view(view.stdout)
+        if not parsed:
+            return latest
+        latest = parsed
+        if not _mergeability_is_pending(latest):
+            return latest
+    return latest
+
+
 def _git_stdout(runner: CommandRunner, command: Sequence[str], cwd: Path) -> str:
     result = _run(runner, command, cwd)
     return result.stdout.strip() if result.returncode == 0 else ""
@@ -533,6 +565,14 @@ def merge_task_pr(
         return _merge_result_from_payload(result_payload, receipt_path=receipt_path, evidence_path=evidence_path)
 
     checks_state, checks = _check_summary(pr_payload.get("statusCheckRollup"))
+    if checks_state not in {"pending", "failed"}:
+        pr_payload = _refresh_unknown_mergeability(
+            runner=runner,
+            command=_pr_view_command(pr_url),
+            target_repo=target_repo,
+            pr_payload=pr_payload,
+        )
+        checks_state, checks = _check_summary(pr_payload.get("statusCheckRollup"))
     common_extra = {"checks_state": checks_state, "checks": checks, "pr_state": str(pr_payload.get("state") or "")}
     pr_state = str(pr_payload.get("state") or "").upper()
     if str(pr_payload.get("headRefName") or "") != branch:

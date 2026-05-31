@@ -490,6 +490,88 @@ def test_external_rootcontext_backlog_binding_requires_canonical_selected_backlo
     assert not (product / "product-smoke-change.txt").exists()
 
 
+def test_external_rootcontext_backlog_binding_respects_dependency_readiness(tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    _init_git_repo(product)
+    controller_support = module._controller_support()
+    record = controller_support.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.5",
+    )
+    queued = record.state_root / "backlog" / "queued"
+    queued.mkdir(parents=True, exist_ok=True)
+    (queued / "BL-blocked-high.md").write_text(
+        "\n".join(
+            [
+                "ID: BL-blocked-high",
+                "Title: Blocked high priority task",
+                "Status: queued",
+                "Priority: P0",
+                "Autonomy-Execute: auto",
+                "Depends-On: task-missing",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (queued / "BL-ready-low.md").write_text(
+        "\n".join(
+            [
+                "ID: BL-ready-low",
+                "Title: Ready lower priority task",
+                "Status: queued",
+                "Priority: P3",
+                "Autonomy-Execute: auto",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    lock = controller_support.acquire_target_run_lock(controller_root=controller, record=record, owner="test")
+
+    try:
+        result = module.main(
+            [
+                "--root",
+                str(controller),
+                "--target-id",
+                "demo",
+                "--target-root",
+                str(product),
+                "--state-root",
+                str(record.state_root),
+                "--external-lock-owned",
+                "--external-lock-token",
+                lock.token,
+                "--external-product-execution",
+                "--external-backlog-id",
+                "BL-ready-low",
+                "--external-backlog-path",
+                "backlog/queued/BL-ready-low.md",
+                "--external-backlog-title",
+                "Ready lower priority task",
+                "run-once",
+                "--run-id",
+                "external-ready-low",
+                "--git-backup",
+                "off",
+            ]
+        )
+    finally:
+        controller_support.release_target_run_lock(lock)
+
+    assert result == 0
+    assert "status: completed" in capsys.readouterr().out
+    assert (product / "product-smoke-change.txt").exists()
+
+
 def test_external_rootcontext_rejects_unregistered_raw_paths(tmp_path: Path) -> None:
     module = _load_module()
     controller = tmp_path / "controller"

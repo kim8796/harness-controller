@@ -149,6 +149,32 @@ def test_native_store_setup_entries_include_pack_metadata(tmp_path: Path) -> Non
     assert entries["store_release_metadata"]["setup_pack_id"] == "store_release_metadata"
 
 
+def test_setup_readiness_prioritizes_web_runtime_actions_before_store_actions(tmp_path: Path) -> None:
+    module = _load_module()
+    product = tmp_path / "product"
+    product.mkdir()
+
+    report = module.build_setup_readiness_report(
+        product_root=product,
+        goal_payload={
+            "completion_gates": [
+                {"id": "store_release_readiness"},
+                {"id": "ios_native_build"},
+                {"id": "deployed_url"},
+                {"id": "database_persistence"},
+                {"id": "ai_reply"},
+            ]
+        },
+        environ={},
+    )
+
+    missing = report["missing_requirements"]
+    assert missing.index("production_app_url") < missing.index("apple_developer")
+    assert missing.index("supabase_server_key") < missing.index("apple_developer")
+    assert missing.index("openai_runtime") < missing.index("apple_developer")
+    assert "Vercel" in report["next_actions"][0] or "production URL" in report["next_actions"][0]
+
+
 def test_provider_decisions_filter_default_setup_requirements(tmp_path: Path) -> None:
     module = _load_module()
     product = tmp_path / "product"

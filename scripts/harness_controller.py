@@ -77,8 +77,12 @@ HARNESS_MARKER_PREFIXES = (
     "docs/harness/",
 )
 SECRET_LIKE_PRODUCT_PATH = re.compile(r"(?i)(api[_-]?key|credential|password|secret|signing[_-]?key|token)")
-SECRET_LIKE_PRODUCT_CONTENT = re.compile(
-    r"(?i)(api[_-]?key|credential|password|secret|signing[_-]?key|token)\s*[:=]\s*['\"]?[A-Za-z0-9_./+=-]{12,}"
+SECRET_LIKE_PRODUCT_ASSIGNMENT = re.compile(
+    r"(?i)(api[_-]?key|credential|password|secret|signing[_-]?key|token)\s*[:=]\s*"
+    r"(?P<value>[^,;)}\n]{12,})"
+)
+SECRET_LIKE_PRODUCT_LITERAL = re.compile(
+    r"(?i)(sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|bearer\s+[A-Za-z0-9._~+/=-]{12,}|eyJ[A-Za-z0-9._~-]{20,})"
 )
 SIDECAR_DIRS = (
     Path("reports"),
@@ -1333,6 +1337,70 @@ def find_target_implementation_evidence(
     return _target_implementation_evidence_summary(record, state_paths, selected_run_id, evidence_path, payload)
 
 
+def find_resumable_target_implementation_evidence(
+    *,
+    controller_root: Path,
+    record: TargetRecord,
+    backlog_id: str,
+) -> dict[str, Any] | None:
+    """Return prior implementation evidence only when the current dirty diff exactly matches it."""
+
+    safe_backlog_id = str(backlog_id or "").strip()
+    if not safe_backlog_id:
+        return None
+    state_paths = record.state_paths(controller_root)
+    runs_root = state_paths.state_root / "runs" / "harness"
+    if not runs_root.exists():
+        return None
+    try:
+        current_head = target_git_head(record.repo)
+        current_status = target_git_status_lines(record.repo)
+    except ControllerError:
+        return None
+    current_paths = target_status_paths(current_status)
+    if not current_paths:
+        return None
+    candidates: list[tuple[int, str, Path, dict[str, Any]]] = []
+    for evidence_path in runs_root.glob("*/generated-evidence.json"):
+        if evidence_path.is_symlink() or not evidence_path.is_file():
+            continue
+        if not _path_is_relative_to(evidence_path.resolve(strict=False), state_paths.state_root.resolve()):
+            continue
+        try:
+            payload = _read_json_file(evidence_path, label="implementation generated evidence")
+        except ControllerError:
+            continue
+        if not _target_implementation_evidence_matches(record, state_paths, payload):
+            continue
+        external_backlog = payload.get("external_backlog")
+        if not isinstance(external_backlog, Mapping) or str(external_backlog.get("id") or "") != safe_backlog_id:
+            continue
+        run_id = evidence_path.parent.name
+        summary = _target_implementation_evidence_summary(record, state_paths, run_id, evidence_path, payload)
+        if summary["backlog_status"] != "queued" or summary["matching_commit_receipt"]:
+            continue
+        if str(payload.get("product_head_after") or "") != current_head:
+            continue
+        expected_paths = [str(path) for path in payload.get("product_diff_paths") or [] if str(path)]
+        if not product_paths_match_expected(current_paths, expected_paths):
+            continue
+        try:
+            ensure_product_diff_policy(record.repo, expected_paths)
+            expected_fingerprint = str(payload.get("product_diff_fingerprint") or "")
+            if not expected_fingerprint:
+                continue
+            if product_diff_fingerprint(record.repo, expected_paths) != expected_fingerprint:
+                continue
+            mtime = evidence_path.stat().st_mtime_ns
+        except (ControllerError, OSError):
+            continue
+        candidates.append((mtime, run_id, evidence_path, payload))
+    if not candidates:
+        return None
+    _, selected_run_id, evidence_path, payload = sorted(candidates, key=lambda item: (item[0], item[1]))[-1]
+    return _target_implementation_evidence_summary(record, state_paths, selected_run_id, evidence_path, payload)
+
+
 def pending_backlog_product_pushes(*, controller_root: Path, record: TargetRecord) -> list[dict[str, str]]:
     """Return completed implementation runs with a local commit receipt but no push receipt."""
 
@@ -1884,9 +1952,33 @@ def _literal_git_pathspecs(paths: Sequence[str]) -> list[str]:
     return [f":(literal){path}" for path in paths]
 
 
+def _product_secret_value_is_env_reference(value: str) -> bool:
+    text = value.strip().strip(",;)}")
+    if text.endswith("!"):
+        text = text[:-1].strip()
+    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
+        text = text[1:-1].strip()
+    return bool(
+        re.fullmatch(r"(?:process\.env|import\.meta\.env)\.[A-Za-z_][A-Za-z0-9_]*", text)
+        or re.fullmatch(r"process\.env\[['\"][A-Za-z_][A-Za-z0-9_]*['\"]\]", text)
+    )
+
+
+def product_content_has_secret_literal(content: str) -> bool:
+    if SECRET_LIKE_PRODUCT_LITERAL.search(content):
+        return True
+    for match in SECRET_LIKE_PRODUCT_ASSIGNMENT.finditer(content):
+        value = str(match.group("value") or "")
+        if not _product_secret_value_is_env_reference(value):
+            return True
+    return False
+
+
 def product_diff_policy_blockers(target_root: Path, paths: Sequence[str]) -> list[str]:
     blockers: list[str] = []
     scan_paths: list[Path] = []
+    if not [str(path).strip() for path in paths if str(path).strip()]:
+        return blockers
     for rel in _safe_product_diff_paths(paths):
         path = Path(rel.rstrip("/"))
         scan_paths.append(path)
@@ -1906,7 +1998,7 @@ def product_diff_policy_blockers(target_root: Path, paths: Sequence[str]) -> lis
         normalized = path.as_posix().rstrip("/")
         if _is_harness_marker_path(path) and "product-diff-harness-state" not in blockers:
             blockers.append("product-diff-harness-state")
-        if any(part.startswith(".env") for part in path.parts) and "product-diff-env-file" not in blockers:
+        if any(part.startswith(".env") and part != ".env.example" for part in path.parts) and "product-diff-env-file" not in blockers:
             blockers.append("product-diff-env-file")
         if SECRET_LIKE_PRODUCT_PATH.search(normalized) and "product-diff-secret-like-path" not in blockers:
             blockers.append("product-diff-secret-like-path")
@@ -1917,7 +2009,7 @@ def product_diff_policy_blockers(target_root: Path, paths: Sequence[str]) -> lis
             try:
                 if candidate.stat().st_size <= 1024 * 1024:
                     content = candidate.read_text(encoding="utf-8", errors="ignore")
-                    if SECRET_LIKE_PRODUCT_CONTENT.search(content) and "product-diff-secret-like-content" not in blockers:
+                    if product_content_has_secret_literal(content) and "product-diff-secret-like-content" not in blockers:
                         blockers.append("product-diff-secret-like-content")
             except OSError:
                 continue

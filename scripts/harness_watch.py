@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -29,6 +30,7 @@ ERROR_CLASS: type[RuntimeError] = RuntimeError
 OPERATOR_WAIT_DEFAULT_SECONDS = 15 * 60
 OPERATOR_WAIT_POLL_SECONDS = 15
 WATCH_STATUS_GATE_LIMIT = 8
+TRANSACTION_STATUS_HEARTBEAT_SECONDS = 30.0
 
 _TRANSACTION_SETUP_WAIT_TEXT = re.compile(
     r"(?i)("
@@ -42,6 +44,10 @@ _TRANSACTION_SETUP_WAIT_TEXT = re.compile(
     r"(?:not\s+configured|configuration\s+required|required)"
     r")"
 )
+_TRANSACTION_POLICY_WAIT_TEXT = re.compile(
+    r"(?i)(product-diff-(?:secret-like-content|secret-like-path|env-file|harness-state|symlink|path-escape)|"
+    r"target product diff violates autopilot policy)"
+)
 _TRANSACTION_EXTERNAL_WAIT_TEXT = re.compile(
     r"(?i)("
     r"service\s+unavailable|temporarily\s+unavailable|timeout|timed\s+out|\b429\b|\b503\b|"
@@ -50,6 +56,21 @@ _TRANSACTION_EXTERNAL_WAIT_TEXT = re.compile(
     r"(?:unavailable|timeout|timed\s+out|\b429\b|\b503\b|rate[_ -]?limit(?:ed)?|too\s+many\s+requests|quota)"
     r")"
 )
+
+_SETUP_BLOCKABLE_GATE_IDS = {
+    "deployed_url",
+    "production_e2e_smoke",
+    "ios_native_build",
+    "android_native_build",
+    "store_release_readiness",
+}
+_SETUP_PREFLIGHT_TASK_KEYS = {
+    "task-09-deploy",
+    "task-10-e2e",
+    "task-12-native",
+    "task-13-store",
+    "task-verify-gates",
+}
 
 
 def _error(message: str) -> RuntimeError:
@@ -635,6 +656,8 @@ def _transaction_wait_class_from_blocker_text(
             error,
         )
     )
+    if _TRANSACTION_POLICY_WAIT_TEXT.search(text):
+        return "approval-wait"
     if _TRANSACTION_SETUP_WAIT_TEXT.search(text):
         return "setup-wait"
     if _TRANSACTION_EXTERNAL_WAIT_TEXT.search(text):
@@ -687,6 +710,201 @@ def _handle_transaction_operator_wait(
     print(f"- operator-wait: `{wait.get('id')}` deadline=`{wait.get('deadline_at')}`")
     print(f"- 다음 조치: {next_action}")
     return wait
+
+
+def _selected_backlog_text(record: harness_controller.TargetRecord, item: object) -> str:
+    relative = getattr(item, "path", Path())
+    path = record.state_root / relative
+    try:
+        if path.is_file() and not path.is_symlink():
+            return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    return ""
+
+
+def _selected_backlog_gate_ids(record: harness_controller.TargetRecord, item: object) -> list[str]:
+    text = _selected_backlog_text(record, item)
+    gate_ids: list[str] = []
+    for match in re.finditer(r"^-\s*Goal-Gate-ID:\s*(?P<value>\S+)\s*$", text, flags=re.MULTILINE):
+        gate_id = match.group("value").strip()
+        if gate_id and gate_id not in gate_ids:
+            gate_ids.append(gate_id)
+    for match in re.finditer(r"^Goal-Gate-ID:\s*(?P<value>\S+)\s*$", text, flags=re.MULTILINE):
+        gate_id = match.group("value").strip()
+        if gate_id and gate_id not in gate_ids:
+            gate_ids.append(gate_id)
+    return gate_ids
+
+
+def _selected_backlog_task_key(text: str) -> str:
+    for pattern in (r"^-\s*Task-Key:\s*(?P<value>\S+)\s*$", r"^Task-Key:\s*(?P<value>\S+)\s*$"):
+        match = re.search(pattern, text, flags=re.MULTILINE)
+        if match:
+            return match.group("value").strip()
+    return ""
+
+
+def _selected_backlog_needs_setup_before_implementation(text: str, gate_ids: Sequence[str]) -> bool:
+    task_key = _selected_backlog_task_key(text)
+    if task_key:
+        return task_key in _SETUP_PREFLIGHT_TASK_KEYS
+    if any(gate_id in {"production_e2e_smoke", "ios_native_build", "android_native_build", "store_release_readiness"} for gate_id in gate_ids):
+        return True
+    title_match = re.search(r"^Title:\s*(?P<value>.+)$", text, flags=re.MULTILINE)
+    title = (title_match.group("value") if title_match else "").casefold()
+    return any(term in title for term in ("deploy", "deployment", "e2e", "store", "native", "release"))
+
+
+def _selected_backlog_setup_wait(
+    runtime: WatchRuntime,
+    record: harness_controller.TargetRecord,
+    item: object,
+    *,
+    processed_count: int,
+    idle_count: int,
+) -> Mapping[str, object] | None:
+    text = _selected_backlog_text(record, item)
+    gate_ids = _selected_backlog_gate_ids(record, item)
+    if not gate_ids:
+        return None
+    if not _selected_backlog_needs_setup_before_implementation(text, gate_ids):
+        return None
+    setup_gate_ids = [gate_id for gate_id in gate_ids if gate_id in _SETUP_BLOCKABLE_GATE_IDS]
+    if not setup_gate_ids or len(setup_gate_ids) != len(gate_ids):
+        return None
+    goal_payload = watch_active_goal_payload(record)
+    setup_readiness = _watch_setup_readiness(record, goal_payload)
+    missing_gate_ids = {
+        str(gate_id)
+        for gate_id in setup_readiness.get("missing_gate_ids", [])
+        if str(gate_id)
+    } if isinstance(setup_readiness.get("missing_gate_ids"), list) else set()
+    if not missing_gate_ids.intersection(setup_gate_ids):
+        return None
+    next_actions = setup_readiness.get("next_actions")
+    next_action = (
+        str(next_actions[0])
+        if isinstance(next_actions, list) and next_actions
+        else "Set required production/provider setup, then rerun `./harness watch`."
+    )
+    backlog_id = str(getattr(item, "item_id", "") or "")
+    reason = "selected backlog requires missing setup for gates: " + ", ".join(setup_gate_ids)
+    wait = _create_or_update_operator_wait(
+        record,
+        wait_id=_operator_wait_id(wait_class="setup-wait", backlog_id=backlog_id, run_id="preflight"),
+        wait_class="setup-wait",
+        backlog_id=backlog_id,
+        run_id="",
+        reason=reason,
+        risk_summary="The selected production gate cannot be verified until provider setup exists.",
+        next_action=next_action,
+        allowed_replies=("resolved", "stop"),
+        resume_check="setup readiness for the selected gate passes",
+        resume_policy="recheck-gate-readiness",
+    )
+    runtime.write_watch_status(
+        record,
+        phase="operator-wait",
+        status="operator-wait",
+        selected_backlog_id=backlog_id,
+        transaction_status="setup-blocked",
+        pending_reason=reason,
+        processed_count=processed_count,
+        idle_count=idle_count,
+        next_action=next_action,
+        operator_wait=wait,
+    )
+    print("transaction operator-wait: `setup-wait`")
+    print(f"- 작업 항목: `{backlog_id}`")
+    print(f"- blocked gates: {', '.join(setup_gate_ids)}")
+    print(f"- operator-wait: `{wait.get('id')}` deadline=`{wait.get('deadline_at')}`")
+    print(f"- 다음 조치: {next_action}")
+    return wait
+
+
+def _transaction_evidence_run_ids(record: harness_controller.TargetRecord) -> set[str]:
+    reports_dir = record.state_root / "reports" / "harness-autonomy"
+    if not reports_dir.exists() or reports_dir.is_symlink() or not reports_dir.is_dir():
+        return set()
+    try:
+        return {path.name for path in reports_dir.iterdir() if path.is_dir() and not path.is_symlink()}
+    except OSError:
+        return set()
+
+
+def _implementation_running_status(
+    runtime: WatchRuntime,
+    record: harness_controller.TargetRecord,
+    *,
+    backlog_id: str,
+    processed_count: int,
+    idle_count: int,
+    baseline_run_ids: set[str],
+) -> None:
+    new_run_ids = sorted(_transaction_evidence_run_ids(record) - baseline_run_ids)
+    runtime.write_watch_status(
+        record,
+        phase="implementation-running",
+        status="running",
+        selected_backlog_id=backlog_id,
+        run_id=new_run_ids[-1] if new_run_ids else "",
+        processed_count=processed_count,
+        idle_count=idle_count,
+        next_action="implementation running; inspect `./harness watch --status`",
+    )
+
+
+def _start_implementation_status_heartbeat(
+    runtime: WatchRuntime,
+    record: harness_controller.TargetRecord,
+    *,
+    backlog_id: str,
+    processed_count: int,
+    idle_count: int,
+) -> tuple[threading.Event, threading.Thread]:
+    baseline_run_ids = _transaction_evidence_run_ids(record)
+    stop_event = threading.Event()
+
+    def _heartbeat() -> None:
+        while not stop_event.wait(TRANSACTION_STATUS_HEARTBEAT_SECONDS):
+            try:
+                _implementation_running_status(
+                    runtime,
+                    record,
+                    backlog_id=backlog_id,
+                    processed_count=processed_count,
+                    idle_count=idle_count,
+                    baseline_run_ids=baseline_run_ids,
+                )
+            except Exception:
+                continue
+
+    _implementation_running_status(
+        runtime,
+        record,
+        backlog_id=backlog_id,
+        processed_count=processed_count,
+        idle_count=idle_count,
+        baseline_run_ids=baseline_run_ids,
+    )
+    thread = threading.Thread(target=_heartbeat, name=f"harness-watch-{backlog_id}-heartbeat", daemon=True)
+    thread.start()
+    return stop_event, thread
+
+
+def _stop_implementation_status_heartbeat(stop_event: threading.Event, thread: threading.Thread) -> None:
+    stop_event.set()
+    thread.join()
+
+
+def _stop_implementation_status_heartbeat_if_running(
+    stop_event: threading.Event | None,
+    thread: threading.Thread | None,
+) -> tuple[None, None]:
+    if stop_event is not None and thread is not None:
+        _stop_implementation_status_heartbeat(stop_event, thread)
+    return None, None
 
 
 def watch_active_goal_id(record: harness_controller.TargetRecord) -> str:
@@ -1945,6 +2163,16 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
             return 0
 
         backlog_id = str(getattr(item, "item_id", ""))
+        if args.watch:
+            wait = _selected_backlog_setup_wait(
+                runtime,
+                record,
+                item,
+                processed_count=processed,
+                idle_count=idle_count,
+            )
+            if wait is not None:
+                return 2
         attempted += 1
         print(f"transaction 시작: `{backlog_id}`")
         if args.watch:
@@ -1991,9 +2219,28 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
             print("- 다음 조치: controller maintenance로 원인 수정 후 incident를 해결 처리하세요.")
             return 2
 
+        heartbeat_stop: threading.Event | None = None
+        heartbeat_thread: threading.Thread | None = None
         try:
+            if args.watch:
+                print("- implementation: Codex implementer 실행 중입니다. 상태는 `./harness watch --status`로 확인하세요.")
+                heartbeat_stop, heartbeat_thread = _start_implementation_status_heartbeat(
+                    runtime,
+                    record,
+                    backlog_id=backlog_id,
+                    processed_count=processed,
+                    idle_count=idle_count,
+                )
             outcome = runtime.run_autopilot_transaction(record, args)
+            heartbeat_stop, heartbeat_thread = _stop_implementation_status_heartbeat_if_running(
+                heartbeat_stop,
+                heartbeat_thread,
+            )
         except runtime.transaction_errors as exc:
+            heartbeat_stop, heartbeat_thread = _stop_implementation_status_heartbeat_if_running(
+                heartbeat_stop,
+                heartbeat_thread,
+            )
             incident_record = harness_incident.record_incident(
                 state_root=record.state_root,
                 target_id=record.target_id,
@@ -2089,6 +2336,9 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
             if args.watch and not bool(incident_record.get("hard_stop")):
                 continue
             return 2
+        finally:
+            if heartbeat_stop is not None and heartbeat_thread is not None:
+                _stop_implementation_status_heartbeat(heartbeat_stop, heartbeat_thread)
 
         processed += 1
         if outcome.status in {

@@ -157,7 +157,20 @@ SAFE_VALIDATION_COMMAND_PATTERNS = (
     re.compile(r"^cargo\s+(?:test|clippy|build)(?:\s|$)", re.IGNORECASE),
     re.compile(r"^ruff\s+check(?:\s|$)", re.IGNORECASE),
 )
-VALIDATION_SHELL_CONTROL_TOKENS = ("&&", "||", ";", "|", "$(", ">", "<")
+PACKAGE_SCRIPT_COMMAND_RE = re.compile(r"^(?:npm|pnpm|bun)\s+run\s+([A-Za-z0-9:_-]+)(?P<tail>.*)$", re.IGNORECASE)
+YARN_SCRIPT_COMMAND_RE = re.compile(r"^yarn\s+(?:run\s+)?([A-Za-z0-9:_-]+)(?P<tail>.*)$", re.IGNORECASE)
+PACKAGE_SCRIPT_NAME_DENY_RE = re.compile(
+    r"(?i)(^|[:_-])(?:deploy|publish|release|migrate|migration|db(?:[:_-]?(?:reset|drop|push|migrate)?)?)($|[:_-])"
+)
+SAFE_PACKAGE_SCRIPT_BODY_PATTERNS = (
+    re.compile(r"^node\s+(?:--check|--test)(?:\s|$)", re.IGNORECASE),
+    re.compile(r"^node\s+(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]*(?:readiness|check|validate|verify|test)[A-Za-z0-9_.-]*\.m?js(?:\s|$)", re.IGNORECASE),
+    re.compile(r"^next\s+build(?:\s|$)", re.IGNORECASE),
+    re.compile(r"^(?:vite|vitest|jest|playwright|eslint|tsc)(?:\s|$)", re.IGNORECASE),
+    re.compile(r"^ruff\s+check(?:\s|$)", re.IGNORECASE),
+    re.compile(r"^echo\s+[^;&|<>`]+$", re.IGNORECASE),
+)
+VALIDATION_SHELL_CONTROL_TOKENS = ("&&", "||", ";", "|", "$(", ">", "<", "\n", "\r", "&")
 PATH_LIKE_RE = re.compile(
     r"(?<![A-Za-z0-9_./-])"
     r"(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9][A-Za-z0-9_.-]*"
@@ -1070,36 +1083,77 @@ def _package_json_scripts(target_repo: Path | None) -> Mapping[str, object]:
 
 
 def _package_validation_script_name(command: str) -> str | None:
-    match = re.match(r"^(?:npm|pnpm|bun)\s+test(?:\s|$)", command, flags=re.IGNORECASE)
+    match = re.match(r"^(?:npm|pnpm|bun)\s+test(?P<tail>.*)$", command, flags=re.IGNORECASE)
     if match:
+        if str(match.group("tail") or "").strip():
+            return None
         return "test"
-    match = re.match(r"^yarn\s+test(?:\s|$)", command, flags=re.IGNORECASE)
+    match = re.match(r"^yarn\s+test(?P<tail>.*)$", command, flags=re.IGNORECASE)
     if match:
+        if str(match.group("tail") or "").strip():
+            return None
         return "test"
-    match = re.match(
-        r"^(?:npm|pnpm|yarn|bun)\s+run\s+(test|tests|lint|build|typecheck|check)(?:\s|$)",
-        command,
-        flags=re.IGNORECASE,
-    )
+    match = PACKAGE_SCRIPT_COMMAND_RE.match(command) or YARN_SCRIPT_COMMAND_RE.match(command)
     if match:
+        tail = str(match.group("tail") or "").strip()
+        if tail:
+            return None
         return match.group(1)
     return None
 
 
-def _package_script_body_risk(script_body: object) -> str | None:
+def _package_validation_command_has_forwarded_args(command: str) -> bool:
+    return bool(
+        re.match(r"^(?:npm|pnpm|bun)\s+run\s+[A-Za-z0-9:_-]+\s+.+$", command, flags=re.IGNORECASE)
+        or re.match(r"^yarn\s+(?:run\s+)?[A-Za-z0-9:_-]+\s+.+$", command, flags=re.IGNORECASE)
+        or re.match(r"^(?:npm|pnpm|bun)\s+test\s+.+$", command, flags=re.IGNORECASE)
+        or re.match(r"^yarn\s+test\s+.+$", command, flags=re.IGNORECASE)
+    )
+
+
+def _package_script_body_risk(
+    script_body: object,
+    *,
+    package_scripts: Mapping[str, object] | None = None,
+    script_name: str = "",
+    seen: frozenset[str] = frozenset(),
+) -> str | None:
+    if script_name and PACKAGE_SCRIPT_NAME_DENY_RE.search(script_name):
+        return f"package validation script name is not auto-safe: {script_name}"
     if not isinstance(script_body, str) or not script_body.strip():
         return "package validation script body is unavailable."
     body = script_body.strip()
-    for pattern in VALIDATION_DENY_PATTERNS:
-        if pattern.search(body):
-            return "package validation script contains destructive/deploy/env/DB/remote-write command."
-    if re.search(r"(?i)\b(?:npm|pnpm|bun)\s+(?:run\s+)?[A-Za-z0-9:_-]+\b", body) or re.search(
-        r"(?i)\byarn\s+(?:run\s+)?[A-Za-z0-9:_-]+\b",
-        body,
-    ):
-        return "package validation script delegates to another package script."
-    if re.search(r"(?i)\b(deploy|migrate|migration|kubectl|terraform|helm|workflow\s+run)\b", body):
-        return "package validation script contains mutation/deploy keywords."
+    if script_name:
+        if script_name in seen:
+            return f"package validation script cycle detected: {script_name}"
+        seen = frozenset((*seen, script_name))
+    body_without_safe_sequence = body.replace("&&", "")
+    if any(token in body for token in ("||", ";", "|", "$(", ">", "<", "\n", "\r", "`")) or "&" in body_without_safe_sequence:
+        return "package validation script contains unsafe shell control token."
+    segments = [segment.strip() for segment in body.split("&&")]
+    if not segments or any(not segment for segment in segments):
+        return "package validation script body is unavailable."
+    for segment in segments:
+        for pattern in VALIDATION_DENY_PATTERNS:
+            if pattern.search(segment):
+                return "package validation script contains destructive/deploy/env/DB/remote-write command."
+        nested_script = _package_validation_script_name(segment)
+        if nested_script is not None:
+            nested_scripts = package_scripts or {}
+            nested_risk = _package_script_body_risk(
+                nested_scripts.get(nested_script),
+                package_scripts=nested_scripts,
+                script_name=nested_script,
+                seen=seen,
+            )
+            if nested_risk is not None:
+                return f"package validation script delegates to unsafe package script `{nested_script}`: {nested_risk}"
+            continue
+        if any(pattern.match(segment) for pattern in SAFE_PACKAGE_SCRIPT_BODY_PATTERNS):
+            continue
+        if any(pattern.match(segment) for pattern in SAFE_VALIDATION_COMMAND_PATTERNS):
+            continue
+        return "package validation script contains command outside auto-safe validation allowlist."
     return None
 
 
@@ -1150,11 +1204,11 @@ def _infer_validation(*, file_scope: Sequence[str], target_repo: Path | None, re
         return explicit_commands
     scripts = _package_json_scripts(target_repo)
     commands: list[str] = []
-    if "lint" in scripts and _package_script_body_risk(scripts.get("lint")) is None:
+    if "lint" in scripts and _package_script_body_risk(scripts.get("lint"), package_scripts=scripts, script_name="lint") is None:
         commands.append("`npm run lint`")
-    if "test" in scripts and _package_script_body_risk(scripts.get("test")) is None:
+    if "test" in scripts and _package_script_body_risk(scripts.get("test"), package_scripts=scripts, script_name="test") is None:
         commands.append("`npm test`")
-    if "build" in scripts and _package_script_body_risk(scripts.get("build")) is None:
+    if "build" in scripts and _package_script_body_risk(scripts.get("build"), package_scripts=scripts, script_name="build") is None:
         commands.append("`npm run build`")
     if commands:
         return tuple(dict.fromkeys(commands))
@@ -1181,9 +1235,16 @@ def _validation_risk(command_item: str, *, package_scripts: Mapping[str, object]
             return "검증 명령에 destructive/deploy/env/DB/remote-write command가 포함되어 있습니다."
     script_name = _package_validation_script_name(command)
     if script_name is not None:
-        script_risk = _package_script_body_risk((package_scripts or {}).get(script_name))
+        script_risk = _package_script_body_risk(
+            (package_scripts or {}).get(script_name),
+            package_scripts=package_scripts,
+            script_name=script_name,
+        )
         if script_risk is not None:
             return "검증 명령의 package script가 auto-safe하지 않습니다: " + script_risk
+        return None
+    if _package_validation_command_has_forwarded_args(command):
+        return "검증 명령의 package script에 forwarded arguments가 포함되어 있습니다."
     if not any(pattern.match(command) for pattern in SAFE_VALIDATION_COMMAND_PATTERNS):
         return "검증 명령이 auto validation allowlist에 없습니다."
     if lowered.startswith(("curl ", "wget ")) and any(word in lowered for word in ("webhook", "deploy", "token", "secret")):
@@ -1437,7 +1498,7 @@ def _review_findings(model: Mapping[str, object]) -> tuple[tuple[str, ...], tupl
             risk_flags.append("파일 범위에 절대경로 또는 상위 경로가 포함되어 있습니다.")
         if _scope_contains_unsafe_wildcard(text):
             risk_flags.append(f"파일 범위에 안전하지 않은 wildcard가 포함되어 있습니다: {text}")
-        if text.startswith(".env") or ".env" in text:
+        if (text.startswith(".env") or ".env" in text) and text != ".env.example":
             risk_flags.append("파일 범위에 env/secret 경로가 포함되어 있습니다.")
         text_lower = text.lower()
         path_name_lower = Path(text).name.lower()

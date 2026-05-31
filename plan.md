@@ -1,137 +1,60 @@
-# Docs Help UX Simplification Implementation Plan
+# Correction: Gate-Blocked No-Diff Watch Continuity
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+**Goal:** Fix the live `chatapp-test` watch failure where a setup-blocked production E2E task produced no product diff and the controller surfaced `product diff paths are required` instead of a clear setup/operator wait or dependency-aware task choice.
 
-**Goal:** Make Harness beginner docs and help consistently explain the simple `install -> goal/from -> watch` flow, while clarifying multi-target, remove, version/release, provider setup, and production gate evidence behavior.
+**Root Cause Evidence:** `./harness watch --max-cycles 1 --no-telegram-drain` selected `BL-20260530-224943-task-10-e2e`, wrote `implementation-running`, then failed with `AI 구현 lane이 실패했습니다. error: product diff paths are required`. The product repo stayed clean. The failure comes from scanning product diff policy with an empty path list after a no-diff implementation result, and from selecting queued gate tasks without respecting unmet `Depends-On`/setup readiness.
 
-**Architecture:** This PR is documentation/help only. CLI behavior should not change except static beginner/help text and tests that lock it. Product repos, target sidecar state, provider env, and runtime behavior remain untouched.
+**Patch Plan:**
+- Add regression coverage that no-diff implementation results do not crash the product diff policy scanner.
+- Add regression coverage that `watch` turns setup-blocked selected gate tasks into `setup-wait` before invoking the implementer.
+- Make queued backlog selection dependency-aware for `Depends-On: task-*` and backlog-id dependencies so E2E/store tasks do not run before their prerequisite goal tasks are completed.
+- Keep product repo untouched; only controller code/tests change.
 
-**Tech Stack:** Markdown docs, Python argparse/help strings in `scripts/harness_cli.py`, pytest, ruff, full `harness_guard` pre-push.
+**Verification:**
+- `python3 -m pytest tests/test_harness_controller.py tests/test_harness_watch.py tests/test_harness_cli.py -q`
+- `./harness watch --max-cycles 1 --no-telegram-drain` after tests to confirm it now reports setup/dependency state instead of the old crash.
 
-Diet-Exception: docs/help PR11 export and CLI tests require temporary oversized scripts/harness_cli.py, scripts/harness_export.py, and tests/test_harness_cli.py growth; follow-up diet keeps version/release details out of beginner home.
+# Harness Watch Loop Continuity Fix Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans. Implement controller-only changes, review with separate agents, and repeat correction patches until blocker count is zero.
+
+**Goal:** Keep `./harness watch` moving through safe production-goal work by removing false positive blockers, allowing safe package validation scripts, improving watch status, and reducing transient PR merge stalls.
+
+**Architecture:** This PR only changes the controller. Product repo changes are not part of implementation. The existing `chatapp-test` dirty diff is used only after controller verification as a live smoke to confirm the fixed controller can resume the loop.
+
+**Tech Stack:** Python controller scripts, pytest, ruff, GitHub CLI integration tests via fakes, existing harness guard.
+
+Diet-Exception: scripts/harness_watch.py, scripts/harness_task_intake.py, scripts/harness_controller.py, and related tests/test_harness_watch.py regression tests require temporary growth for loop continuity false-positive fixes; follow-up code diet should extract only stable cohesive helpers after these blockers are proven fixed.
 
 ---
 
-## Scope
+## Tasks
 
-- Update root `README.md` and `docs/harness/START_HERE.md` so the first visible examples are production-grade, not MVP/prototype biased.
-- Update `docs/harness/OPERATOR_GUIDE.md` so provider/env setup, `fleet status`, `target remove`, and target version/release are easy to understand.
-- Update `docs/harness/PORTABILITY.md` only where it summarizes the beginner path and provider/goal behavior.
-- Update `scripts/harness_cli.py` static beginner help if it still omits remove/version/release/fleet/gate guidance.
-- Add tests that prevent regression to MVP-first wording and verify help/docs mention the simplified surfaces.
-- Do not add new commands.
-- Do not change runtime planning, gate, release, or target behavior.
+- [ ] Worker A: fix product diff secret scanning and transaction wait classification so env references pass, literal secrets stay blocked, and product-diff policy blockers are not reported as setup credential work.
+- [ ] Worker B: make task intake validation package-script aware, allow safe aggregate scripts such as `npm run validate`, keep destructive/deploy/env/DB/remote-write scripts blocked, allow exact `.env.example`, and remove planner wildcard scope for `capacitor.config.*`.
+- [ ] Worker C: improve watch observability and publication retry by writing `implementation-running` status during long transactions and polling GitHub `mergeable=UNKNOWN` briefly before returning `merge-pending`.
+- [ ] Worker D: sort setup readiness actions by practical execution priority: deployment, Supabase auth/db/realtime/storage, OpenAI/moderation, native, store.
+- [ ] Correction: if a prior implementation run left an uncommitted product diff that exactly matches its target/backlog/head/diff fingerprint evidence, let `watch` resume that evidence through complete/commit/PR instead of stopping at a generic dirty-repo wait. Unrelated dirty repos must still block.
+- [ ] Reviewers: security/secret leakage, loop continuity/manual-review regression, and publication/status/readiness regression.
 
-## Agent Roles
+## Tests
 
-- UX Docs Agent: review beginner flow wording and command count.
-- Provider/Goal Agent: review provider-vs-goal-spec wording and production gate explanation.
-- Multi-target/Release Agent: review fleet/version/release/remove explanation.
-- Regression/Export Agent: review tests and export/link behavior.
-- Security/Portability Agent: review that docs keep secrets in `.env`/provider UIs only and avoid product repo state pollution.
-
-## Correction Notes
-
-- Reviewer blockers found the beginner command surface was still too noisy, so the beginner home now keeps only `watch --status`, `fleet status`, and `target remove` as quick checks. Version/release stays discoverable through OPERATOR_GUIDE and target help.
-- Reviewer blockers found export bundle README drift, so the generated README template now carries provider priority, operator-wait, PR-merge-as-progress, and fake-success wording.
-- Reviewer blockers found conflicting MVP/prototype wording, so root START_HERE now says `MVP` alone does not downgrade a production goal.
-
-## Implementation Tasks
-
-### Task 1: Lock Help/Docs Expectations
-
-**Files:**
-- Modify: `tests/test_harness_cli.py`
-- Modify: `tests/test_harness_export.py` if existing doc-link tests need new assertions
-
-- [x] Add or update tests so bare `./harness` / `./harness help` mention:
-  - `./harness install /path/to/product`
-  - `./harness goal from <goal-spec.md> screenshots/`
-  - `./harness watch`
-  - `./harness fleet status`
-  - `./harness target remove my-app`
-- [x] Add tests that root README and `docs/harness/START_HERE.md` do not use MVP as the default beginner goal example.
-- [x] Add tests that docs state production goals are not completed by PR merge alone and require gate evidence.
-- [x] Run the targeted tests and confirm they fail before documentation/help changes if expectations are not yet met.
-
-### Task 2: Beginner Help Text
-
-**Files:**
-- Modify: `scripts/harness_cli.py`
-- Test: `tests/test_harness_cli.py`
-
-- [x] Keep beginner help short.
-- [x] Keep the first path as:
-  - `./harness install /path/to/product`
-  - `./harness goal "이 프로젝트를 배포 가능한 완성도 있는 제품으로 만든다"`
-  - `./harness watch`
-- [x] Add one short line for detailed goals:
-  - `./harness goal from <goal-spec.md> screenshots/`
-- [x] Add one short line for multi-project status and removal:
-  - `./harness fleet status`
-  - `./harness target remove my-app`
-- [x] Mention `target version/release` as advanced release tracking, not a required beginner step.
-- [x] Avoid adding extra options to the beginner flow.
-
-### Task 3: Start Here And README
-
-**Files:**
-- Modify: `README.md`
-- Modify: `docs/harness/START_HERE.md`
-
-- [x] Replace MVP default examples with production-grade product wording.
-- [x] Make `goal from goal-spec.md screenshots/` the concise document/image path example.
-- [x] Explain relative paths briefly: paths are resolved from current directory, selected target product repo, target sidecar, then controller root.
-- [x] Explain that stack/provider in the goal spec wins; only missing/unspecified stacks use Harness recommendations.
-- [x] Explain provider/env missing behavior: operator-wait/readiness, no secret values in chat/docs.
-- [x] Explain production completion: PR merge is progress evidence; final completion requires gate receipts/evidence.
-- [x] Keep `do` as a helper, not the main path.
-
-### Task 4: Operator Guide And Portability
-
-**Files:**
-- Modify: `docs/harness/OPERATOR_GUIDE.md`
-- Modify: `docs/harness/PORTABILITY.md`
-
-- [x] Clarify `fleet status` as the read-only multi-target overview.
-- [x] Clarify `target remove` archives controller sidecar registration only and never deletes local git/product repo files.
-- [x] Clarify `target version` is read-only status and `target release --candidate/--promote` writes controller sidecar receipts only.
-- [x] Update candidate wording: candidate can be recorded with blockers, but production promotion remains blocked until current production deployment plus gate evidence exists.
-- [x] Clarify provider setup is derived from goal capabilities/provider decisions and that goal-spec stack choices take priority over recommendations.
-- [x] Keep Telegram/operator-wait as notification/readiness flow, not a secret input channel.
-
-### Task 5: Verification And Review
-
-**Files:**
-- Modify as needed only for tests/docs/help.
-
-- [x] Run focused lint:
-  - `python3 -m ruff check scripts/harness_cli.py tests/test_harness_cli.py tests/test_harness_export.py`
-- [x] Run focused tests:
-  - `python3 -m pytest tests/test_harness_cli.py tests/test_harness_export.py -q`
-- [x] Run full guard:
+- [ ] Add failing tests first for env-reference secret scanner false positive, product-diff policy wait classification, safe `npm run validate` recursion, dangerous script rejection, `.env.example` scope, watch heartbeat status, mergeable retry, and setup readiness priority.
+- [ ] Implement minimum code to pass those tests.
+- [ ] Run focused verification:
+  - `python3 -m pytest tests/test_harness_controller.py tests/test_harness_incident.py tests/test_harness_task_intake.py tests/test_harness_goal.py tests/test_harness_watch.py tests/test_harness_publication.py tests/test_harness_product_setup_readiness.py -q`
+- [ ] Run full guard:
   - `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
-- [x] Dispatch review agents for:
-  - beginner UX
-  - provider/production gate wording
-  - regression/export links
-- [x] If any reviewer or guard finds a blocker, write correction notes here, patch, rerun focused tests, rerun review, and repeat until blocker count is zero.
+- [ ] Run live smoke after controller tests:
+  - `./harness watch --max-cycles 1 --no-telegram-drain`
 
-## Acceptance Criteria
+## Acceptance
 
-- Beginner docs and help consistently show `install -> goal/from -> watch` as the main flow.
-- The default examples no longer say “MVP” as the target outcome.
-- Detailed spec/image usage is shown as `./harness goal from goal-spec.md screenshots/`.
-- Multi-project management is discoverable through `fleet status`.
-- Target removal is discoverable and clearly sidecar-only.
-- Version/release management is discoverable and clearly controller-receipt-only.
-- Docs state that goal spec provider/stack decisions take priority over Harness recommendations.
-- Docs state that missing provider/env setup becomes readiness/operator-wait, not goal completion or secret collection.
-- Docs state that production goals are not completed by PR merge alone.
-- Focused tests, full guard, PR CI pass, and PR is merged before moving to the next roadmap item.
-
-## Verification Notes
-
-- Focused lint passed: `python3 -m ruff check scripts/harness_cli.py scripts/harness_export.py tests/test_harness_cli.py tests/test_harness_export.py`
-- Focused tests passed: `python3 -m pytest tests/test_harness_cli.py tests/test_harness_export.py -q` => 219 passed.
-- Full guard passed after Diet-Exception correction: `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`; focused pytest 219 passed and controller sanitizer self-test 869 passed.
+- `apiKey: process.env.OPENAI_API_KEY` and equivalent env references no longer block product commit.
+- Literal secrets, env fallback literals, `.env*` runtime files, and secret-like paths still block.
+- Safe package validation scripts in `package.json` can auto queue; dangerous or unknown scripts cannot.
+- `watch --status` shows an active long-running transaction instead of stale `transaction-selected/run none`.
+- GitHub mergeability calculation lag is retried briefly in the same watch.
+- Setup readiness guides the operator toward web/runtime blockers before app store blockers.
+- Product repo is untouched during controller implementation; any product mutation happens only during the final live smoke.
+- A failed watch retry can resume the matching uncommitted implementation evidence for the same backlog without rerunning the implementer.

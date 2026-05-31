@@ -238,6 +238,7 @@ def test_production_roadmap_tasks_are_gate_derived_and_traceable(tmp_path: Path)
         assert task["attachment_refs"] == [payload["attachments"][0]["path"]]
         assert "gate_ids" in task
         assert "expected_evidence" in task
+        assert "capacitor.config.*" not in task.get("file_scope", [])
         for gate_id in task["gate_ids"]:
             expected = next(item for item in task["expected_evidence"] if item["gate_id"] == gate_id)
             assert expected["operation"] == "goal-gate-verification"
@@ -410,6 +411,11 @@ def test_goal_service_level_native_store_goal_adds_native_gates(tmp_path: Path) 
     assert payload["goal_contract"]["product_standard"] == "production_native"
     gate_ids = {gate["id"] for gate in payload["completion_gates"]}
     assert {"native_strategy", "ios_native_build", "android_native_build", "store_release_readiness"}.issubset(gate_ids)
+    roadmap = json.loads(goal.roadmap_json.read_text(encoding="utf-8"))
+    native_task = next(task for task in roadmap["tasks"] if task["task_key"].endswith("-native"))
+    assert "capacitor.config.*" not in native_task["file_scope"]
+    assert "capacitor.config.ts" in native_task["file_scope"]
+    assert "capacitor.config.json" in native_task["file_scope"]
 
 
 def test_new_production_goal_markdown_shows_gates_pending(tmp_path: Path) -> None:
@@ -1862,6 +1868,49 @@ def test_goal_refill_creates_fallback_when_existing_tasks_are_manual_only(tmp_pa
     body = queued[0].read_text(encoding="utf-8")
     assert "목표 실행 계약 보정" in body
     assert f"Goal: {goal.goal_id}" in body
+
+
+def test_goal_refill_regenerates_missing_manual_packet_from_roadmap(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "game"
+    product = tmp_path / "product"
+    product.mkdir()
+    _init_product(product)
+    goal = module.create_goal(state_root=state_root, target_id="game", text="로컬 프로토타입만 완성도 있게 만든다")
+    roadmap = json.loads(goal.roadmap_json.read_text(encoding="utf-8"))
+    roadmap_task = roadmap["tasks"][0]
+    stale_packet_id = "task-20260531-stale-manual"
+    (state_root / "backlog" / "drafts" / stale_packet_id).mkdir(parents=True)
+    progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    progress["tasks"] = [
+        {
+            "task_key": roadmap_task["task_key"],
+            "packet_id": stale_packet_id,
+            "auto_eligible": False,
+            "open_questions": [],
+            "risk_flags": ["검증 명령이 auto validation allowlist에 없습니다."],
+            "queued_backlog_path": "",
+            "backlog_id": "",
+        }
+    ]
+    goal.progress_json.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
+
+    result = module.refill_goal_tasks(state_root=state_root, target_id="game", target_repo=product, goal=goal)
+
+    assert result is not None
+    assert result.created == 0
+    assert result.queued == 1
+    assert result.message == "manual-review goal tasks rechecked and queued"
+    queued = tuple((state_root / "backlog" / "queued").glob("*.md"))
+    assert len(queued) == 1
+    body = queued[0].read_text(encoding="utf-8")
+    assert roadmap_task["title"] in body
+    assert "목표 실행 계약 보정" not in body
+    progress_after = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    task_after = progress_after["tasks"][0]
+    assert task_after["task_key"] == roadmap_task["task_key"]
+    assert task_after["packet_id"] != stale_packet_id
+    assert task_after["backlog_id"].startswith("BL-")
 
 
 def test_goal_refill_creates_fallback_when_existing_linked_backlog_is_not_executable(tmp_path: Path) -> None:
