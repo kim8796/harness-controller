@@ -30,6 +30,7 @@ import harness_goal
 import harness_incident
 import harness_loop
 import harness_product_setup_readiness
+import harness_production_gate_verifier
 import harness_publication
 import harness_profiles
 import harness_release
@@ -728,6 +729,17 @@ def _backlog_task_key(text: str) -> str:
         if match:
             return match.group("value").strip()
     return ""
+
+
+def _backlog_is_goal_gate_verification_task(text: str) -> bool:
+    if re.search(
+        r"^Goal-Gate-Evidence-Operation:\s*goal-gate-verification\s*$",
+        text,
+        flags=re.MULTILINE,
+    ):
+        return True
+    task_key = _backlog_task_key(text)
+    return task_key == "task-verify-gates"
 
 
 def _completed_dependency_refs(state_root: Path, items: Sequence[object]) -> set[str]:
@@ -2262,6 +2274,87 @@ def _backlog_goal_id(record: harness_controller.TargetRecord, backlog_id: str) -
     return "unlinked"
 
 
+def _goal_payload_for_backlog(
+    record: harness_controller.TargetRecord,
+    goal_id: str,
+) -> dict[str, object]:
+    resolved_goal_id = str(goal_id or "").strip()
+    candidates: list[Path] = []
+    if resolved_goal_id and resolved_goal_id != "unlinked":
+        candidates.append(record.state_root / "goals" / resolved_goal_id / "goal.json")
+    try:
+        active = harness_goal.load_active_goal(record.state_root)
+    except harness_goal.GoalError:
+        active = None
+    if active is not None:
+        candidates.append(active.goal_json)
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        payload_goal_id = str(payload.get("goal_id") or "").strip()
+        if resolved_goal_id and resolved_goal_id != "unlinked" and payload_goal_id != resolved_goal_id:
+            continue
+        return payload
+    raise HarnessCliError(f"goal gate verifier backlog has no readable goal payload: {resolved_goal_id or 'unlinked'}")
+
+
+def _run_goal_gate_verification_transaction(
+    record: harness_controller.TargetRecord,
+    backlog_id: str,
+) -> AutopilotTransaction:
+    goal_id = _backlog_goal_id(record, backlog_id)
+    goal_payload = _goal_payload_for_backlog(record, goal_id)
+    result = harness_production_gate_verifier.verify_goal_gates(
+        product_root=record.repo,
+        state_root=record.state_root,
+        target_id=record.target_id,
+        goal_id=str(goal_payload.get("goal_id") or goal_id),
+        goal_payload=goal_payload,
+        write_operator_waits=True,
+    )
+    run_id = str(result.get("run_id") or "")
+    if not run_id:
+        raise HarnessCliError("goal gate verifier did not return a run id")
+    completion = harness_controller.complete_sidecar_backlog_with_controller_evidence(
+        controller_root=repo_root(),
+        record=record,
+        backlog_ref=backlog_id,
+        run_id=run_id,
+        reason="goal gate verifier evidence generated",
+        apply=True,
+    )
+    status = str(result.get("status") or "blocked")
+    blocked_gate_ids = [
+        str(item)
+        for item in result.get("blocked_gate_ids", [])
+        if str(item)
+    ] if isinstance(result.get("blocked_gate_ids"), list) else []
+    print(f"- gate verifier: `{status}`")
+    if blocked_gate_ids:
+        print(f"- blocked gates: `{', '.join(blocked_gate_ids)}`")
+    evidence_path = str(result.get("generated_evidence_path") or "")
+    if evidence_path:
+        print(f"- gate verifier evidence: `{evidence_path}`")
+    print(f"- 완료 처리: `{completion['target_path']}`")
+    product_sha = str(result.get("product_commit_sha") or "")
+    return AutopilotTransaction(
+        "gate-verified",
+        run_id,
+        backlog_id,
+        product_sha,
+        product_sha,
+        f"goal gate verifier {status}",
+    )
+
+
 def _write_product_version_receipt(
     *,
     record: harness_controller.TargetRecord,
@@ -2309,6 +2402,9 @@ def _implementation_failure_message(output: str) -> str:
 def _run_autopilot_transaction(record: harness_controller.TargetRecord, args: argparse.Namespace) -> AutopilotTransaction:
     selected_item = _target_next_auto_backlog_item(record)
     selected_backlog_id = str(getattr(selected_item, "item_id", "") or "")
+    selected_text = _backlog_item_text(record.state_root, selected_item)
+    if _backlog_is_goal_gate_verification_task(selected_text):
+        return _run_goal_gate_verification_transaction(record, selected_backlog_id)
     summary = harness_controller.find_resumable_target_implementation_evidence(
         controller_root=repo_root(),
         record=record,

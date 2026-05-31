@@ -863,6 +863,75 @@ def test_command_run_marks_status_implementation_running_before_transaction(tmp_
     assert observed == {"phase": "implementation-running", "status": "running"}
 
 
+def test_command_run_marks_status_gate_verifier_running_for_gate_backlog(tmp_path) -> None:
+    module = _load_module()
+    module.ERROR_CLASS = RuntimeError
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    state_root = controller / "targets" / "demo"
+    backlog_path = state_root / "backlog" / "queued" / "BL-gates.md"
+    backlog_path.parent.mkdir(parents=True)
+    backlog_path.write_text(
+        "ID: BL-gates\nStatus: queued\nGoal-Gate-Evidence-Operation: goal-gate-verification\n",
+        encoding="utf-8",
+    )
+    product.mkdir(parents=True)
+    record = SimpleNamespace(target_id="demo", repo=product, branch="main", state_root=state_root)
+    item = SimpleNamespace(item_id="BL-gates", path=backlog_path.relative_to(state_root))
+    observed: dict[str, str] = {}
+
+    def fail_after_observing_status(_record, _args):
+        payload = json.loads((state_root / "watch" / "latest.json").read_text(encoding="utf-8"))
+        observed["phase"] = str(payload.get("phase") or "")
+        observed["next_action"] = str(payload.get("next_action") or "")
+        raise RuntimeError("gate verifier failed")
+
+    runtime = SimpleNamespace(
+        repo_root=lambda: controller,
+        default_target=lambda _root: record,
+        target_executable_backlog_items=lambda _record: [item],
+        target_next_auto_backlog_item=lambda _record: item,
+        drain_telegram_relay_for_record=lambda _record: {},
+        process_operator_task_inbox=lambda _record: {},
+        refill_goal_if_idle=lambda _record: None,
+        pending_backlog_product_pushes=lambda **_kwargs: [],
+        github_credentials_ready=lambda **_kwargs: True,
+        write_watch_status=module.write_watch_status,
+        watch_active_goal_id=lambda _record: "goal-demo",
+        print_watch_status=lambda _record: 0,
+        record_autopilot_doctor_diagnosis=lambda **_kwargs: {"path": "doctor.json"},
+        append_autopilot_memory=lambda *_args, **_kwargs: state_root / "memory.json",
+        record_autopilot_incident=lambda **_kwargs: {"signature": "sig-product", "count": 1},
+        target_open_incident_blocker=lambda _record, _backlog_id: None,
+        block_sidecar_backlog_for_incident=lambda **_kwargs: (True, "blocked.md"),
+        run_autopilot_transaction=fail_after_observing_status,
+        print_beginner_transaction_error=lambda exc: None,
+        backlog_goal_id=lambda _record, _backlog_id: "goal-demo",
+        run_target_sidecar_maintenance=lambda _record: {},
+        materialize_controller_repair_task=lambda **_kwargs: state_root / "repair.md",
+        sleep=lambda _seconds: None,
+        finish_push_caution="push caution",
+        autopilot_incident_threshold=2,
+        controller_errors=(RuntimeError,),
+        discover_errors=(RuntimeError,),
+        transaction_errors=(RuntimeError,),
+    )
+    args = argparse.Namespace(
+        extra=[],
+        once=False,
+        watch=True,
+        max_cycles=1,
+        idle_seconds=1,
+        stop_on_idle=False,
+        drain_telegram=False,
+        auto_maintenance=False,
+    )
+
+    assert module.command_run(args, runtime) == 2
+    assert observed["phase"] == "gate-verifier-running"
+    assert "gate verifier running" in observed["next_action"]
+
+
 def test_command_run_stops_heartbeat_before_terminal_failure_status(tmp_path) -> None:
     module = _load_module()
     module.ERROR_CLASS = RuntimeError
@@ -1153,6 +1222,20 @@ def test_selected_backlog_setup_wait_allows_architecture_implementation(tmp_path
     wait = module._selected_backlog_setup_wait(runtime, record, item, processed_count=0, idle_count=0)
 
     assert wait is None
+
+
+def test_selected_backlog_goal_gate_verification_detection() -> None:
+    module = _load_module()
+
+    assert module._selected_backlog_is_goal_gate_verification_task(
+        "ID: BL-gates\nGoal-Gate-Evidence-Operation: goal-gate-verification\n"
+    )
+    assert module._selected_backlog_is_goal_gate_verification_task(
+        "ID: BL-gates\n\n## Notes\n\n- Task-Key: task-verify-gates\n"
+    )
+    assert not module._selected_backlog_is_goal_gate_verification_task(
+        "ID: BL-app\n\n## Notes\n\n- Task-Key: task-06-ai\n"
+    )
 
 
 def test_command_run_retries_pending_pr_merge_before_selecting_new_task(tmp_path, capsys) -> None:

@@ -447,6 +447,77 @@ def test_pending_backlog_product_pushes_accepts_state_publication_receipt(tmp_pa
     assert module.pending_backlog_product_pushes(controller_root=controller, record=record) == []
 
 
+def test_complete_sidecar_backlog_with_controller_evidence_allows_gate_verifier_run(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_git_repo(product)
+    record = module.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="test",
+    )
+    state_root = controller / "targets" / "demo"
+    queued = state_root / "backlog" / "queued" / "BL-gates.md"
+    queued.parent.mkdir(parents=True, exist_ok=True)
+    queued.write_text(
+        "\n".join(
+            [
+                "ID: BL-gates",
+                "Title: Verify production gates",
+                "Status: queued",
+                "Autonomy-Execute: auto",
+                "",
+                "Goal-Gate-Evidence-Operation: goal-gate-verification",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    run_id = "production-gate-verifier-test"
+    run_dir = state_root / "runs" / "harness" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "operation": "goal-gate-verification",
+                "status": "blocked",
+                "target_id": "demo",
+                "goal_id": "goal-demo",
+                "run_id": run_id,
+                "product_commit_sha": "a" * 40,
+                "completion_gates": [],
+                "values_redacted": True,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    payload = module.complete_sidecar_backlog_with_controller_evidence(
+        controller_root=controller,
+        record=record,
+        backlog_ref="BL-gates",
+        run_id=run_id,
+        reason="goal gate verifier evidence generated",
+        apply=True,
+    )
+
+    completed = state_root / "backlog" / "completed" / "BL-gates.md"
+    assert payload["target_path"] == "backlog/completed/BL-gates.md"
+    assert completed.exists()
+    assert not queued.exists()
+    completed_text = completed.read_text(encoding="utf-8")
+    assert "Status: completed" in completed_text
+    assert "Completed-Run: production-gate-verifier-test" in completed_text
+    assert "Product-Diff-Paths:" in completed_text
+    assert Path(payload["receipt_path"]).exists()
+    assert (product / "README.md").read_text(encoding="utf-8") == "# Product\n"
+
+
 def test_find_resumable_target_implementation_evidence_matches_current_dirty_diff(tmp_path: Path) -> None:
     module = _load_module()
     controller = tmp_path / "controller"

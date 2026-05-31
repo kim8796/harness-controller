@@ -745,6 +745,16 @@ def _selected_backlog_task_key(text: str) -> str:
     return ""
 
 
+def _selected_backlog_is_goal_gate_verification_task(text: str) -> bool:
+    if re.search(
+        r"^Goal-Gate-Evidence-Operation:\s*goal-gate-verification\s*$",
+        text,
+        flags=re.MULTILINE,
+    ):
+        return True
+    return _selected_backlog_task_key(text) == "task-verify-gates"
+
+
 def _selected_backlog_needs_setup_before_implementation(text: str, gate_ids: Sequence[str]) -> bool:
     task_key = _selected_backlog_task_key(text)
     if task_key:
@@ -841,17 +851,19 @@ def _implementation_running_status(
     processed_count: int,
     idle_count: int,
     baseline_run_ids: set[str],
+    phase: str = "implementation-running",
+    next_action: str = "implementation running; inspect `./harness watch --status`",
 ) -> None:
     new_run_ids = sorted(_transaction_evidence_run_ids(record) - baseline_run_ids)
     runtime.write_watch_status(
         record,
-        phase="implementation-running",
+        phase=phase,
         status="running",
         selected_backlog_id=backlog_id,
         run_id=new_run_ids[-1] if new_run_ids else "",
         processed_count=processed_count,
         idle_count=idle_count,
-        next_action="implementation running; inspect `./harness watch --status`",
+        next_action=next_action,
     )
 
 
@@ -862,6 +874,8 @@ def _start_implementation_status_heartbeat(
     backlog_id: str,
     processed_count: int,
     idle_count: int,
+    phase: str = "implementation-running",
+    next_action: str = "implementation running; inspect `./harness watch --status`",
 ) -> tuple[threading.Event, threading.Thread]:
     baseline_run_ids = _transaction_evidence_run_ids(record)
     stop_event = threading.Event()
@@ -876,6 +890,8 @@ def _start_implementation_status_heartbeat(
                     processed_count=processed_count,
                     idle_count=idle_count,
                     baseline_run_ids=baseline_run_ids,
+                    phase=phase,
+                    next_action=next_action,
                 )
             except Exception:
                 continue
@@ -887,6 +903,8 @@ def _start_implementation_status_heartbeat(
         processed_count=processed_count,
         idle_count=idle_count,
         baseline_run_ids=baseline_run_ids,
+        phase=phase,
+        next_action=next_action,
     )
     thread = threading.Thread(target=_heartbeat, name=f"harness-watch-{backlog_id}-heartbeat", daemon=True)
     thread.start()
@@ -2223,13 +2241,23 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
         heartbeat_thread: threading.Thread | None = None
         try:
             if args.watch:
-                print("- implementation: Codex implementer 실행 중입니다. 상태는 `./harness watch --status`로 확인하세요.")
+                selected_text = _selected_backlog_text(record, item)
+                if _selected_backlog_is_goal_gate_verification_task(selected_text):
+                    transaction_phase = "gate-verifier-running"
+                    transaction_next_action = "goal gate verifier running; inspect `./harness watch --status`"
+                    print("- gate verifier: controller evidence verifier 실행 중입니다. 상태는 `./harness watch --status`로 확인하세요.")
+                else:
+                    transaction_phase = "implementation-running"
+                    transaction_next_action = "implementation running; inspect `./harness watch --status`"
+                    print("- implementation: Codex implementer 실행 중입니다. 상태는 `./harness watch --status`로 확인하세요.")
                 heartbeat_stop, heartbeat_thread = _start_implementation_status_heartbeat(
                     runtime,
                     record,
                     backlog_id=backlog_id,
                     processed_count=processed,
                     idle_count=idle_count,
+                    phase=transaction_phase,
+                    next_action=transaction_next_action,
                 )
             outcome = runtime.run_autopilot_transaction(record, args)
             heartbeat_stop, heartbeat_thread = _stop_implementation_status_heartbeat_if_running(

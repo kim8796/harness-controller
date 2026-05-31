@@ -1,3 +1,25 @@
+# Correction: Gate Verification Backlog Must Not Require Product Diff
+
+**Goal:** Fix the live long-watch failure where a generated `task-verify-gates` backlog produced no product diff, then the controller treated that as an implementation failure instead of running the controller-owned production gate verifier and recording sidecar evidence/operator-wait.
+
+**Root Cause Evidence:** `./harness watch --max-cycles 3 --no-telegram-drain` completed and merged `task-12-native` and `task-13-store`, then planner refill generated `BL-20260531-202659-task-verify-gates`. The backlog explicitly declares `Goal-Gate-Evidence-Operation: goal-gate-verification`, but `_run_autopilot_transaction()` sent it through the product implementer path. The verifier run created no product diff by design, so the target gate returned `target-no-product-diff, external-state-plumbing-failed`.
+
+**Patch Plan:**
+- Add a regression test proving gate-verification backlog does not call `command_target_run` and instead invokes `harness_production_gate_verifier.verify_goal_gates`.
+- Add a controller helper to complete queued sidecar backlog from trusted controller evidence without requiring product diff, limited to `operation=goal-gate-verification`.
+- Update `_run_autopilot_transaction()` to detect gate-verification backlog metadata, run the verifier, complete the backlog with sidecar evidence, and return a non-failing transaction status.
+- Keep operator-wait generation for missing provider setup; do not mark production gates passed without receipts.
+- Product repo remains untouched during controller implementation.
+
+**Verification:**
+- `python3 -m pytest tests/test_harness_cli.py tests/test_harness_controller.py tests/test_harness_watch.py -q`
+- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+- Re-run `./harness watch --max-cycles 1 --no-telegram-drain` to confirm the existing verify-gates backlog no longer fails as no-diff.
+
+**Correction Loop Observation:** The live smoke confirmed the verifier path worked, but watch still printed the generic "Codex implementer running" line before controller-only verification. Patch the watch heartbeat/output label to `gate-verifier-running` for these backlog items so status reflects the actual controller verifier path.
+
+**CI Correction:** GitHub Ubuntu starter smoke exposed a pre-existing test fragility: tests monkeypatched the shared `time.sleep` module, which can break `subprocess` internals on Linux. Scope those assertions to the watch runtime sleep callback instead.
+
 # Correction: Env Name Helper Secret Scanner False Positive
 
 **Goal:** Fix the live `chatapp-test` long-watch failure where safe production E2E code was blocked as `product-diff-secret-like-content` because the scanner treated env variable names passed to helper functions as literal token values.

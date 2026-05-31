@@ -19,6 +19,16 @@ def _load_module():
     return load_script_module("harness_cli", "scripts/harness_cli.py")
 
 
+def _patch_watch_runtime_sleep(module, monkeypatch, sleep) -> None:
+    original_runtime = module._watch_runtime
+
+    def patched_runtime():
+        runtime = original_runtime()
+        return replace(runtime, sleep=sleep)
+
+    monkeypatch.setattr(module, "_watch_runtime", patched_runtime)
+
+
 def test_dependency_ready_backlog_items_skip_unmet_task_key_dependencies(tmp_path: Path) -> None:
     module = _load_module()
     state_root = tmp_path / "target"
@@ -1221,7 +1231,7 @@ def test_watch_preserves_manual_review_only_status(monkeypatch, tmp_path: Path, 
     assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
     assert module.main(["goal", "manual-review only smoke"]) == 0
     record = module.harness_controller.default_target(controller)
-    monkeypatch.setattr(module.time, "sleep", lambda _seconds: pytest.fail("stop-on-idle must not sleep"))
+    _patch_watch_runtime_sleep(module, monkeypatch, lambda _seconds: pytest.fail("stop-on-idle must not sleep"))
 
     def fake_refill(_record):
         return {
@@ -1260,7 +1270,7 @@ def test_watch_existing_non_executable_goal_tasks_are_explicit(monkeypatch, tmp_
 
     assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
     assert module.main(["goal", "로컬 프로토타입만 existing generated manual-review smoke"]) == 0
-    monkeypatch.setattr(module.time, "sleep", lambda _seconds: pytest.fail("stop-on-idle must not sleep"))
+    _patch_watch_runtime_sleep(module, monkeypatch, lambda _seconds: pytest.fail("stop-on-idle must not sleep"))
     record = module.harness_controller.default_target(controller)
     goal = module.harness_goal.load_active_goal(record.state_root)
     progress = {
@@ -1835,6 +1845,108 @@ def test_run_autopilot_transaction_resumes_matching_dirty_evidence_without_rerun
     assert calls == ["transition:run-ai", "commit:run-ai", "publish:run-ai", "version"]
 
 
+def test_run_autopilot_transaction_routes_gate_verifier_backlog_without_implementer(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    state_root = controller / "targets" / "demo"
+    controller.mkdir()
+    product.mkdir()
+    (state_root / "backlog" / "queued").mkdir(parents=True)
+    backlog_path = state_root / "backlog" / "queued" / "BL-gates.md"
+    backlog_path.write_text(
+        "\n".join(
+            [
+                "ID: BL-gates",
+                "Title: Verify production gates",
+                "Status: queued",
+                "Autonomy-Execute: auto",
+                "Goal: goal-demo",
+                "",
+                "Goal-Gate-Evidence-Operation: goal-gate-verification",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    goal_dir = state_root / "goals" / "goal-demo"
+    goal_dir.mkdir(parents=True)
+    (goal_dir / "goal.json").write_text(
+        json.dumps(
+            {
+                "goal_id": "goal-demo",
+                "target_id": "demo",
+                "status": "active",
+                "title": "Deployable product",
+                "completion_gates": [{"id": "deployed_url"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    record = module.harness_controller.TargetRecord(
+        target_id="demo",
+        repo=product,
+        branch="main",
+        state_root=state_root,
+        controller_version="test",
+        created_at="",
+        updated_at="",
+        is_default=True,
+    )
+    item = SimpleNamespace(
+        item_id="BL-gates",
+        path=Path("backlog/queued/BL-gates.md"),
+    )
+    calls: list[str] = []
+
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module, "_target_next_auto_backlog_item", lambda _record: item)
+    monkeypatch.setattr(module, "_backlog_goal_id", lambda _record, _backlog_id: "goal-demo")
+
+    def fail_target_run(_args):
+        raise AssertionError("goal gate verification backlog must not run product implementer")
+
+    monkeypatch.setattr(module, "command_target_run", fail_target_run)
+
+    def fake_verify_goal_gates(**kwargs):
+        calls.append(f"verify:{kwargs['goal_id']}")
+        return {
+            "status": "blocked",
+            "run_id": "production-gate-verifier-test",
+            "product_commit_sha": "a" * 40,
+            "generated_evidence_path": "runs/harness/production-gate-verifier-test/generated-evidence.json",
+            "blocked_gate_ids": ["deployed_url"],
+            "operator_waits": [],
+        }
+
+    monkeypatch.setattr(module.harness_production_gate_verifier, "verify_goal_gates", fake_verify_goal_gates)
+    monkeypatch.setattr(
+        module.harness_controller,
+        "complete_sidecar_backlog_with_controller_evidence",
+        lambda **kwargs: calls.append(f"complete:{kwargs['run_id']}") or {"target_path": "backlog/completed/BL-gates.md"},
+    )
+    args = argparse.Namespace(
+        runner=None,
+        runner_model=None,
+        runner_reasoning_effort=None,
+        command_template=None,
+        auto_merge=True,
+    )
+
+    result = module._run_autopilot_transaction(record, args)
+
+    output = capsys.readouterr().out
+    assert "- gate verifier: `blocked`" in output
+    assert result.status == "gate-verified"
+    assert result.run_id == "production-gate-verifier-test"
+    assert result.backlog_id == "BL-gates"
+    assert calls == ["verify:goal-demo", "complete:production-gate-verifier-test"]
+
+
 def test_beginner_run_once_autopilot_uses_default_target_transaction(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_module()
     controller = tmp_path / "controller"
@@ -1972,7 +2084,7 @@ def test_beginner_run_default_drains_queue_and_exits_when_empty(monkeypatch, tmp
     monkeypatch.setattr(module.harness_controller, "default_target", lambda root: record)
     monkeypatch.setattr(module, "_target_executable_backlog_items", lambda _record: [queue[0]])
     monkeypatch.setattr(module, "_target_next_auto_backlog_item", lambda _record: queue.pop(0))
-    monkeypatch.setattr(module.time, "sleep", fail_sleep)
+    _patch_watch_runtime_sleep(module, monkeypatch, fail_sleep)
     monkeypatch.setattr(
         module,
         "_run_autopilot_transaction",
@@ -2017,7 +2129,7 @@ def test_beginner_run_default_is_bounded_to_initial_queue_size(monkeypatch, tmp_
     monkeypatch.setattr(module.harness_controller, "default_target", lambda root: record)
     monkeypatch.setattr(module, "_target_executable_backlog_items", lambda _record: [first])
     monkeypatch.setattr(module, "_target_next_auto_backlog_item", lambda _record: live_queue.pop(0))
-    monkeypatch.setattr(module.time, "sleep", fail_sleep)
+    _patch_watch_runtime_sleep(module, monkeypatch, fail_sleep)
     monkeypatch.setattr(
         module,
         "_run_autopilot_transaction",
@@ -2057,7 +2169,7 @@ def test_beginner_run_default_empty_queue_exits_without_sleep(monkeypatch, tmp_p
     monkeypatch.setattr(module, "repo_root", lambda: controller)
     monkeypatch.setattr(module.harness_controller, "default_target", lambda root: record)
     monkeypatch.setattr(module, "_target_next_auto_backlog_item", lambda _record: None)
-    monkeypatch.setattr(module.time, "sleep", fail_sleep)
+    _patch_watch_runtime_sleep(module, monkeypatch, fail_sleep)
 
     assert module.main(["run"]) == 0
     output = capsys.readouterr().out
@@ -2260,7 +2372,7 @@ def test_watch_operator_wait_timeout_writes_status_without_sleep(monkeypatch, tm
     )
     monkeypatch.setattr(module, "_github_credentials_ready", lambda **kwargs: False)
     monkeypatch.setattr(module.harness_watch, "OPERATOR_WAIT_DEFAULT_SECONDS", 0)
-    monkeypatch.setattr(module.time, "sleep", fail_sleep)
+    _patch_watch_runtime_sleep(module, monkeypatch, fail_sleep)
     monkeypatch.setattr(
         module,
         "_target_next_auto_backlog_item",
@@ -2305,7 +2417,7 @@ def test_watch_bounded_credential_operator_wait_does_not_poll(monkeypatch, tmp_p
         lambda **kwargs: [{"run_id": "run-old", "backlog_id": "BL-old", "status": "credential-blocked"}],
     )
     monkeypatch.setattr(module, "_github_credentials_ready", lambda **kwargs: False)
-    monkeypatch.setattr(module.time, "sleep", fail_sleep)
+    _patch_watch_runtime_sleep(module, monkeypatch, fail_sleep)
     monkeypatch.setattr(
         module,
         "_target_next_auto_backlog_item",
