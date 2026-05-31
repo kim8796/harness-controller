@@ -2170,6 +2170,20 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                     )
                     print("watch 종료: stop-on-idle, 실행할 작업이 없습니다.")
                     return 0
+                if max_cycles:
+                    runtime.write_watch_status(
+                        record,
+                        phase="max-cycles-idle-no-progress",
+                        status="stopped",
+                        active_goal_id=active_goal_id,
+                        pending_reason=pending_reason,
+                        processed_count=processed,
+                        idle_count=idle_count,
+                        next_action=next_action,
+                        operator_wait=idle_operator_wait,
+                    )
+                    print(f"watch 종료: max-cycles={max_cycles}, 처리 가능한 backlog가 없어 {processed}개 처리 후 종료합니다.")
+                    return 0
                 print(f"- watch 대기: {idle_seconds}초 후 다시 확인합니다.")
                 runtime.sleep(idle_seconds)
                 continue
