@@ -18,6 +18,8 @@
 
 **Correction Loop Observation:** The live smoke confirmed the verifier path worked, but watch still printed the generic "Codex implementer running" line before controller-only verification. Patch the watch heartbeat/output label to `gate-verifier-running` for these backlog items so status reflects the actual controller verifier path.
 
+**CI Correction:** GitHub Ubuntu starter smoke exposed a pre-existing test fragility: tests monkeypatched the shared `time.sleep` module, which can break `subprocess` internals on Linux. Scope those assertions to the watch runtime sleep callback instead.
+
 # Correction: Env Name Helper Secret Scanner False Positive
 
 **Goal:** Fix the live `chatapp-test` long-watch failure where safe production E2E code was blocked as `product-diff-secret-like-content` because the scanner treated env variable names passed to helper functions as literal token values.
