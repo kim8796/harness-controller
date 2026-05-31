@@ -1,3 +1,22 @@
+# Correction: Product Secret Scanner Runtime Reference False Positive
+
+**Goal:** Fix the live `chatapp-test` watch failure where safe runtime auth/profile code was blocked as `product-diff-secret-like-content`.
+
+**Root Cause Evidence:** `./harness watch --max-cycles 1 --no-telegram-drain` implemented `BL-20260531-134716-task-02-auth`, then stopped before commit/PR with `product-diff-secret-like-content`. Direct inspection showed two false positives:
+- `token = request.headers.get("authorization")` was treated as a hardcoded secret because the assignment key is `token`.
+- `secret = process.env.ABUSE_HASH_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY` was treated as a hardcoded secret even though both sides are env references.
+
+**Patch Plan:**
+- Add failing regression tests in `tests/test_harness_controller.py` for header/cookie runtime lookups and env-reference fallback chains.
+- Keep tests proving literal secrets, env fallback literals, runtime `.env*` files, and secret-like paths still block.
+- Update `scripts/harness_controller.py` scanner helpers so secret-like assignments block hardcoded values but allow runtime lookups and env-reference chains.
+- Do not mutate or revert the current `chatapp-test` product diff while fixing the controller.
+
+**Verification:**
+- `python3 -m pytest tests/test_harness_controller.py -q`
+- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+- Re-run the product diff policy check against the current `chatapp-test` auth diff and confirm no scanner blocker remains.
+
 # Correction: Gate-Blocked No-Diff Watch Continuity
 
 **Goal:** Fix the live `chatapp-test` watch failure where a setup-blocked production E2E task produced no product diff and the controller surfaced `product diff paths are required` instead of a clear setup/operator wait or dependency-aware task choice.

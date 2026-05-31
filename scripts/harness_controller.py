@@ -79,10 +79,14 @@ HARNESS_MARKER_PREFIXES = (
 SECRET_LIKE_PRODUCT_PATH = re.compile(r"(?i)(api[_-]?key|credential|password|secret|signing[_-]?key|token)")
 SECRET_LIKE_PRODUCT_ASSIGNMENT = re.compile(
     r"(?i)(api[_-]?key|credential|password|secret|signing[_-]?key|token)\s*[:=]\s*"
-    r"(?P<value>[^,;)}\n]{12,})"
+    r"(?P<value>[^\n;]{12,})"
 )
 SECRET_LIKE_PRODUCT_LITERAL = re.compile(
     r"(?i)(sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|bearer\s+[A-Za-z0-9._~+/=-]{12,}|eyJ[A-Za-z0-9._~-]{20,})"
+)
+SECRET_LIKE_PRODUCT_QUOTED_LITERAL = re.compile(r"""(?P<quote>["'`])(?P<value>[^"'`\n]{12,})(?P=quote)""")
+SECRET_LIKE_ENV_REFERENCE = re.compile(
+    r"(?:process\.env|import\.meta\.env)(?:\.[A-Za-z_][A-Za-z0-9_]*|\[['\"][A-Za-z_][A-Za-z0-9_]*['\"]\])!?"
 )
 SIDECAR_DIRS = (
     Path("reports"),
@@ -1953,14 +1957,39 @@ def _literal_git_pathspecs(paths: Sequence[str]) -> list[str]:
 
 
 def _product_secret_value_is_env_reference(value: str) -> bool:
-    text = value.strip().strip(",;)}")
-    if text.endswith("!"):
-        text = text[:-1].strip()
-    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
-        text = text[1:-1].strip()
+    parts = re.split(r"\s*(?:\|\||\?\?)\s*", value.strip())
+    if not parts:
+        return False
+    for part in parts:
+        text = part.strip().rstrip(",;)}").strip()
+        if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
+            text = text[1:-1].strip()
+        if not SECRET_LIKE_ENV_REFERENCE.fullmatch(text):
+            return False
+    return True
+
+
+def _product_secret_value_is_runtime_lookup(value: str) -> bool:
+    text = value.strip()
+    safe_lookup = (
+        "request.headers.get(",
+        "headers.get(",
+        "request.cookies.get(",
+        "cookies.get(",
+    )
+    if not text.startswith(safe_lookup):
+        return False
+    return not re.search(r"(?:\|\||\?\?)\s*[\"'`]", text)
+
+
+def _product_secret_value_has_hardcoded_literal(value: str) -> bool:
+    if SECRET_LIKE_PRODUCT_QUOTED_LITERAL.search(value):
+        return True
+    text = value.strip().rstrip(",;)}").strip()
     return bool(
-        re.fullmatch(r"(?:process\.env|import\.meta\.env)\.[A-Za-z_][A-Za-z0-9_]*", text)
-        or re.fullmatch(r"process\.env\[['\"][A-Za-z_][A-Za-z0-9_]*['\"]\]", text)
+        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{11,}", text)
+        and re.search(r"(?i)(secret|token|key|password|credential)", text)
+        and re.search(r"[-_]", text)
     )
 
 
@@ -1969,7 +1998,11 @@ def product_content_has_secret_literal(content: str) -> bool:
         return True
     for match in SECRET_LIKE_PRODUCT_ASSIGNMENT.finditer(content):
         value = str(match.group("value") or "")
-        if not _product_secret_value_is_env_reference(value):
+        if _product_secret_value_is_env_reference(value):
+            continue
+        if _product_secret_value_is_runtime_lookup(value):
+            continue
+        if _product_secret_value_has_hardcoded_literal(value):
             return True
     return False
 
