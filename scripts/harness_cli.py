@@ -692,9 +692,74 @@ def _select_executable_backlog_plan(state_paths: harness_controller.StatePaths):
     harness_controller.validate_sidecar_backlog_integrity(state_paths)
     items = harness_loop.discover_backlog_items(state_paths.state_root)
     executable_items = [item for item in items if item.status == "queued" and item.autonomy_execute == "auto"]
+    executable_items = _dependency_ready_backlog_items(state_paths.state_root, executable_items, all_items=items)
     if not executable_items:
         return None
     return harness_loop.select_next_backlog_item(executable_items)
+
+
+def _backlog_item_text(state_root: Path, item: object) -> str:
+    relative = getattr(item, "path", Path())
+    path = state_root / relative
+    try:
+        if path.is_file() and not path.is_symlink():
+            return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    return ""
+
+
+def _backlog_metadata_values(text: str, field: str) -> tuple[str, ...]:
+    match = re.search(rf"^{re.escape(field)}:\s*(?P<value>.+?)\s*$", text, flags=re.MULTILINE)
+    if not match:
+        return ()
+    value = match.group("value").strip()
+    if not value or value.lower() in {"n/a", "none", "없음"}:
+        return ()
+    return tuple(part.strip() for part in re.split(r"[, ]+", value) if part.strip())
+
+
+def _backlog_task_key(text: str) -> str:
+    for pattern in (
+        r"^Task-Key:\s*(?P<value>\S+)\s*$",
+        r"^-\s*Task-Key:\s*(?P<value>\S+)\s*$",
+    ):
+        match = re.search(pattern, text, flags=re.MULTILINE)
+        if match:
+            return match.group("value").strip()
+    return ""
+
+
+def _completed_dependency_refs(state_root: Path, items: Sequence[object]) -> set[str]:
+    refs: set[str] = set()
+    for item in items:
+        if str(getattr(item, "status", "")) != "completed":
+            continue
+        item_id = str(getattr(item, "item_id", "") or "").strip()
+        if item_id:
+            refs.add(item_id)
+        text = _backlog_item_text(state_root, item)
+        task_key = _backlog_task_key(text)
+        if task_key:
+            refs.add(task_key)
+    return refs
+
+
+def _dependency_ready_backlog_items(
+    state_root: Path,
+    items: Sequence[object],
+    *,
+    all_items: Sequence[object] | None = None,
+) -> list[object]:
+    completed_refs = _completed_dependency_refs(state_root, all_items or items)
+    ready: list[object] = []
+    for item in items:
+        text = _backlog_item_text(state_root, item)
+        dependencies = _backlog_metadata_values(text, "Depends-On")
+        if dependencies and any(dep not in completed_refs for dep in dependencies):
+            continue
+        ready.append(item)
+    return ready
 
 
 def _backlog_plan_payload(item) -> dict[str, str]:
@@ -1985,7 +2050,8 @@ def _target_executable_backlog_items(record: harness_controller.TargetRecord) ->
     state_paths = record.state_paths(repo_root())
     harness_controller.validate_sidecar_backlog_integrity(state_paths)
     items = harness_loop.discover_backlog_items(state_paths.state_root)
-    return [item for item in items if item.status == "queued" and item.autonomy_execute == "auto"]
+    executable_items = [item for item in items if item.status == "queued" and item.autonomy_execute == "auto"]
+    return _dependency_ready_backlog_items(state_paths.state_root, executable_items, all_items=items)
 
 
 def _target_evidence_paths(record: harness_controller.TargetRecord) -> set[Path]:
@@ -2237,41 +2303,52 @@ def _implementation_failure_message(output: str) -> str:
 
 
 def _run_autopilot_transaction(record: harness_controller.TargetRecord, args: argparse.Namespace) -> AutopilotTransaction:
-    before_evidence = _target_evidence_paths(record)
-    buffer = io.StringIO()
-    with contextlib.redirect_stdout(buffer):
-        rc = command_target_run(
-            argparse.Namespace(
-                target=record.target_id,
-                once=False,
-                plan_once=False,
-                execute_once=False,
-                execute_backlog_once=False,
-                implement_backlog_once=True,
-                runner=args.runner,
-                runner_model=args.runner_model,
-                runner_reasoning_effort=args.runner_reasoning_effort,
-                command_template=args.command_template,
-                commit=False,
-                push=False,
-            )
-        )
-    implementation_output = buffer.getvalue().strip()
-    if rc != 0:
-        if implementation_output:
-            print(implementation_output)
-        raise HarnessCliError(_implementation_failure_message(implementation_output))
-    new_evidence = sorted(_target_evidence_paths(record) - before_evidence)
-    if len(new_evidence) != 1:
-        if implementation_output:
-            print(implementation_output)
-        raise HarnessCliError("구현 run id를 정확히 특정하지 못했습니다.")
-    run_id = new_evidence[0].parent.name
-    summary = harness_controller.find_target_implementation_evidence(
+    selected_item = _target_next_auto_backlog_item(record)
+    selected_backlog_id = str(getattr(selected_item, "item_id", "") or "")
+    summary = harness_controller.find_resumable_target_implementation_evidence(
         controller_root=repo_root(),
         record=record,
-        run_id=run_id,
+        backlog_id=selected_backlog_id,
     )
+    if summary:
+        run_id = str(summary.get("run_id") or "")
+        print(f"- 구현 재개: 기존 uncommitted diff가 `{run_id}` evidence와 일치합니다.")
+    else:
+        before_evidence = _target_evidence_paths(record)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            rc = command_target_run(
+                argparse.Namespace(
+                    target=record.target_id,
+                    once=False,
+                    plan_once=False,
+                    execute_once=False,
+                    execute_backlog_once=False,
+                    implement_backlog_once=True,
+                    runner=args.runner,
+                    runner_model=args.runner_model,
+                    runner_reasoning_effort=args.runner_reasoning_effort,
+                    command_template=args.command_template,
+                    commit=False,
+                    push=False,
+                )
+            )
+        implementation_output = buffer.getvalue().strip()
+        if rc != 0:
+            if implementation_output:
+                print(implementation_output)
+            raise HarnessCliError(_implementation_failure_message(implementation_output))
+        new_evidence = sorted(_target_evidence_paths(record) - before_evidence)
+        if len(new_evidence) != 1:
+            if implementation_output:
+                print(implementation_output)
+            raise HarnessCliError("구현 run id를 정확히 특정하지 못했습니다.")
+        run_id = new_evidence[0].parent.name
+        summary = harness_controller.find_target_implementation_evidence(
+            controller_root=repo_root(),
+            record=record,
+            run_id=run_id,
+        )
     backlog_id = str(summary.get("backlog_id") or "")
     backlog_title = str(summary.get("backlog_title") or "")
     print(f"- 구현 완료: `{run_id}`")

@@ -157,6 +157,8 @@ _RESUME_POLICY_BY_WAIT_CLASS = {
 }
 
 _APPROVAL_WAIT_PATTERNS = (
+    r"\bproduct-diff-(?:secret-like-content|secret-like-path|env-file|harness-state|symlink|path-escape)\b",
+    r"\btarget product diff violates autopilot policy\b",
     r"\bdestructive\b",
     r"\bsecurity\b",
     r"\bscope\b",

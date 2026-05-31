@@ -124,6 +124,20 @@ def test_classify_external_incident_approval_wait_is_not_repairable() -> None:
         assert classification.resume_policy == "resume-after-explicit-approval"
 
 
+def test_classify_product_diff_policy_blocker_as_approval_wait() -> None:
+    module = _load_module()
+
+    classification = module.classify_external_incident(
+        stage="transaction",
+        error="target product diff violates autopilot policy: product-diff-secret-like-content",
+    )
+
+    assert classification.incident_class == "operator-approval"
+    assert classification.operator_actionable is True
+    assert classification.wait_class == "approval-wait"
+    assert classification.resume_policy == "resume-after-explicit-approval"
+
+
 def test_record_external_incident_materializes_controller_repair_task(tmp_path: Path) -> None:
     module = _load_module()
     state_root = tmp_path / "targets" / "demo"

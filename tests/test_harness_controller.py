@@ -269,6 +269,49 @@ def test_product_diff_policy_scans_directory_contents_and_rejects_pathspec_magic
         module.product_diff_policy_blockers(product, [":(glob)client/*"])
 
 
+def test_product_diff_policy_empty_paths_are_noop(tmp_path: Path) -> None:
+    module = _load_module()
+    product = tmp_path / "product"
+    _init_git_repo(product)
+
+    assert module.product_diff_policy_blockers(product, []) == []
+
+
+def test_product_diff_policy_allows_env_references_but_rejects_secret_literals(tmp_path: Path) -> None:
+    module = _load_module()
+    product = tmp_path / "product"
+    _init_git_repo(product)
+    (product / "src").mkdir()
+    safe = product / "src" / "safe.js"
+    safe.write_text(
+        "\n".join(
+            [
+                "const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });",
+                "const bracket = new Client({ secret: process.env[\"SUPABASE_SERVICE_ROLE_KEY\"] });",
+                "const browser = new Client({ token: import.meta.env.VITE_PUBLIC_SUPABASE_URL });",
+                "const nonNull = new Client({ credential: process.env.OPENAI_API_KEY! });",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert module.product_diff_policy_blockers(product, ["src/safe.js"]) == []
+
+    literal = product / "src" / "literal.js"
+    literal.write_text('const client = new OpenAI({ apiKey: "sk-live-secret-value-12345" });\n', encoding="utf-8")
+    fallback = product / "src" / "fallback.js"
+    fallback.write_text('const key = process.env.OPENAI_API_KEY || "sk-live-secret-value-12345";\n', encoding="utf-8")
+    generic_fallback = product / "src" / "generic-fallback.js"
+    generic_fallback.write_text(
+        'const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || "example-secret-value-12345" });\n',
+        encoding="utf-8",
+    )
+
+    assert "product-diff-secret-like-content" in module.product_diff_policy_blockers(product, ["src/literal.js"])
+    assert "product-diff-secret-like-content" in module.product_diff_policy_blockers(product, ["src/fallback.js"])
+    assert "product-diff-secret-like-content" in module.product_diff_policy_blockers(product, ["src/generic-fallback.js"])
+
+
 def test_pending_backlog_product_pushes_accepts_state_publication_receipt(tmp_path: Path) -> None:
     module = _load_module()
     controller = tmp_path / "controller"
@@ -390,6 +433,241 @@ def test_pending_backlog_product_pushes_accepts_state_publication_receipt(tmp_pa
     )
 
     assert module.pending_backlog_product_pushes(controller_root=controller, record=record) == []
+
+
+def test_find_resumable_target_implementation_evidence_matches_current_dirty_diff(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_git_repo(product)
+    (product / "src").mkdir()
+    (product / "src" / "ai.js").write_text("export const apiKey = undefined;\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "add", "src/ai.js"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    head = module.target_git_head(product)
+    record = module.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.32",
+    )
+    state_root = controller / "targets" / "demo"
+    queued = state_root / "backlog" / "queued" / "BL-ai.md"
+    queued.parent.mkdir(parents=True, exist_ok=True)
+    queued.write_text(
+        "\n".join(["ID: BL-ai", "Title: AI reply", "Status: queued", "Autonomy-Execute: auto", ""]),
+        encoding="utf-8",
+    )
+    (product / "src" / "ai.js").write_text("export const apiKey = process.env.OPENAI_API_KEY;\n", encoding="utf-8")
+    fingerprint = module.product_diff_fingerprint(product, ["src/ai.js"])
+    run_dir = state_root / "runs" / "harness" / "run-ai"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "status": "pass",
+                "root_context": {"target_id": "demo", "state_root": state_root.as_posix()},
+                "product_execution": "enabled",
+                "product_implementation": "enabled",
+                "product_commit": "disabled",
+                "product_push": "disabled",
+                "lane_execution": "backlog-implementation",
+                "product_head_before": head,
+                "product_head_after": head,
+                "external_backlog": {"id": "BL-ai", "path": "backlog/queued/BL-ai.md", "title": "AI reply"},
+                "product_diff_paths": ["src/ai.js"],
+                "product_diff_fingerprint": fingerprint,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    summary = module.find_resumable_target_implementation_evidence(
+        controller_root=controller,
+        record=record,
+        backlog_id="BL-ai",
+    )
+
+    assert summary is not None
+    assert summary["run_id"] == "run-ai"
+    assert summary["product_diff_paths"] == ["src/ai.js"]
+    assert module.find_resumable_target_implementation_evidence(
+        controller_root=controller,
+        record=record,
+        backlog_id="BL-other",
+    ) is None
+
+
+def test_find_resumable_target_implementation_evidence_rejects_changed_diff(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_git_repo(product)
+    (product / "src").mkdir()
+    (product / "src" / "ai.js").write_text("export const apiKey = undefined;\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "add", "src/ai.js"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    head = module.target_git_head(product)
+    record = module.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.32",
+    )
+    state_root = controller / "targets" / "demo"
+    queued = state_root / "backlog" / "queued" / "BL-ai.md"
+    queued.parent.mkdir(parents=True, exist_ok=True)
+    queued.write_text("ID: BL-ai\nStatus: queued\nAutonomy-Execute: auto\n\n", encoding="utf-8")
+    ai_path = product / "src" / "ai.js"
+    ai_path.write_text("export const apiKey = process.env.OPENAI_API_KEY;\n", encoding="utf-8")
+    fingerprint = module.product_diff_fingerprint(product, ["src/ai.js"])
+    ai_path.write_text("export const apiKey = process.env.OPENAI_API_KEY;\nexport const changed = true;\n", encoding="utf-8")
+    run_dir = state_root / "runs" / "harness" / "run-ai"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "status": "pass",
+                "root_context": {"target_id": "demo", "state_root": state_root.as_posix()},
+                "product_execution": "enabled",
+                "product_implementation": "enabled",
+                "product_commit": "disabled",
+                "product_push": "disabled",
+                "lane_execution": "backlog-implementation",
+                "product_head_before": head,
+                "product_head_after": head,
+                "external_backlog": {"id": "BL-ai", "path": "backlog/queued/BL-ai.md"},
+                "product_diff_paths": ["src/ai.js"],
+                "product_diff_fingerprint": fingerprint,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert module.find_resumable_target_implementation_evidence(
+        controller_root=controller,
+        record=record,
+        backlog_id="BL-ai",
+    ) is None
+
+
+def test_find_resumable_target_implementation_evidence_rejects_missing_fingerprint(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_git_repo(product)
+    (product / "src").mkdir()
+    (product / "src" / "ai.js").write_text("export const apiKey = undefined;\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "add", "src/ai.js"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    head = module.target_git_head(product)
+    record = module.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.32",
+    )
+    state_root = controller / "targets" / "demo"
+    queued = state_root / "backlog" / "queued" / "BL-ai.md"
+    queued.parent.mkdir(parents=True, exist_ok=True)
+    queued.write_text("ID: BL-ai\nStatus: queued\nAutonomy-Execute: auto\n\n", encoding="utf-8")
+    (product / "src" / "ai.js").write_text("export const apiKey = process.env.OPENAI_API_KEY;\n", encoding="utf-8")
+    run_dir = state_root / "runs" / "harness" / "run-ai"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "status": "pass",
+                "root_context": {"target_id": "demo", "state_root": state_root.as_posix()},
+                "product_execution": "enabled",
+                "product_implementation": "enabled",
+                "product_commit": "disabled",
+                "product_push": "disabled",
+                "lane_execution": "backlog-implementation",
+                "product_head_before": head,
+                "product_head_after": head,
+                "external_backlog": {"id": "BL-ai", "path": "backlog/queued/BL-ai.md"},
+                "product_diff_paths": ["src/ai.js"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert module.find_resumable_target_implementation_evidence(
+        controller_root=controller,
+        record=record,
+        backlog_id="BL-ai",
+    ) is None
+
+
+def test_find_resumable_target_implementation_evidence_rejects_head_mismatch(tmp_path: Path) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_git_repo(product)
+    (product / "src").mkdir()
+    (product / "src" / "ai.js").write_text("export const apiKey = undefined;\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "add", "src/ai.js"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    stale_head = module.target_git_head(product)
+    (product / "README.md").write_text("# Product\n\nSecond commit\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: second commit"], cwd=product, check=True, env=_git_env())
+    record = module.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="1.8.32",
+    )
+    state_root = controller / "targets" / "demo"
+    queued = state_root / "backlog" / "queued" / "BL-ai.md"
+    queued.parent.mkdir(parents=True, exist_ok=True)
+    queued.write_text("ID: BL-ai\nStatus: queued\nAutonomy-Execute: auto\n\n", encoding="utf-8")
+    (product / "src" / "ai.js").write_text("export const apiKey = process.env.OPENAI_API_KEY;\n", encoding="utf-8")
+    fingerprint = module.product_diff_fingerprint(product, ["src/ai.js"])
+    run_dir = state_root / "runs" / "harness" / "run-ai"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "status": "pass",
+                "root_context": {"target_id": "demo", "state_root": state_root.as_posix()},
+                "product_execution": "enabled",
+                "product_implementation": "enabled",
+                "product_commit": "disabled",
+                "product_push": "disabled",
+                "lane_execution": "backlog-implementation",
+                "product_head_before": stale_head,
+                "product_head_after": stale_head,
+                "external_backlog": {"id": "BL-ai", "path": "backlog/queued/BL-ai.md"},
+                "product_diff_paths": ["src/ai.js"],
+                "product_diff_fingerprint": fingerprint,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert module.find_resumable_target_implementation_evidence(
+        controller_root=controller,
+        record=record,
+        backlog_id="BL-ai",
+    ) is None
 
 
 def test_commit_product_backlog_diff_stages_expected_deletion(tmp_path: Path) -> None:

@@ -24,6 +24,30 @@ SECRET_VALUE_RE = re.compile(
 
 
 GATE_REQUIREMENTS: dict[str, tuple[dict[str, object], ...]] = harness_capability_registry.setup_requirements_by_gate()
+CAPABILITY_PRIORITY = {
+    "deployment": 10,
+    "auth": 20,
+    "db_persistence": 21,
+    "realtime": 22,
+    "storage": 23,
+    "ai": 30,
+    "moderation": 31,
+    "ios_native": 40,
+    "android_native": 41,
+    "store_release": 50,
+}
+SETUP_REQUIREMENT_PRIORITY = {
+    "production_app_url": 10,
+    "vercel_project": 11,
+    "supabase_browser_client": 20,
+    "supabase_server_key": 21,
+    "supabase_realtime": 22,
+    "supabase_moderation_storage": 23,
+    "openai_runtime": 30,
+    "apple_developer": 40,
+    "google_play_console": 41,
+    "store_release_metadata": 50,
+}
 
 
 def _parse_dotenv_line(line: str) -> tuple[str, str] | None:
@@ -146,6 +170,16 @@ def _requirement_map_for_gates(gates: set[str], provider_decisions: Mapping[str,
     return requirements
 
 
+def _requirement_priority(requirement: Mapping[str, object]) -> tuple[int, str]:
+    req_id = str(requirement.get("id") or "")
+    if req_id in SETUP_REQUIREMENT_PRIORITY:
+        return SETUP_REQUIREMENT_PRIORITY[req_id], req_id
+    capability_ids = [str(item) for item in requirement.get("capability_ids") or () if str(item)]
+    capability_id = str(requirement.get("capability_id") or "")
+    priorities = [CAPABILITY_PRIORITY[item] for item in (*capability_ids, capability_id) if item in CAPABILITY_PRIORITY]
+    return min(priorities or [99]), req_id
+
+
 def _group_state(group: Sequence[str], values: Mapping[str, str], documented: set[str]) -> dict[str, object]:
     keys = tuple(str(key) for key in group)
     present = [key for key in keys if bool(values.get(key))]
@@ -195,7 +229,7 @@ def build_setup_readiness_report(
     entries: list[dict[str, object]] = []
     missing_gate_ids: set[str] = set()
     missing_requirements: list[str] = []
-    for req_id, requirement in sorted(requirements.items()):
+    for req_id, requirement in sorted(requirements.items(), key=lambda item: _requirement_priority(item[1])):
         groups = [_group_state(group, values, documented) for group in requirement.get("groups", ())]
         optional_groups = [_group_state(group, values, documented) for group in requirement.get("optional_groups", ())]
         missing_groups = [group for group in groups if group["state"] == "missing"]
@@ -233,7 +267,7 @@ def build_setup_readiness_report(
         "required_gate_ids": sorted(gates),
         "provider_decisions_respected": bool(provider_decisions),
         "missing_gate_ids": sorted(missing_gate_ids),
-        "missing_requirements": sorted(missing_requirements),
+            "missing_requirements": missing_requirements,
         "entries": entries,
         "next_actions": next_actions,
         "values_redacted": True,

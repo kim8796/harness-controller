@@ -8461,6 +8461,7 @@ def _external_backlog_contract_payload(context: AutonomyRootContext, record: Any
                 for candidate in items
                 if str(candidate.status) == "queued" and str(candidate.autonomy_execute) == "auto"
             ]
+            executable_items = _external_dependency_ready_backlog_items(context.state_root, executable_items, all_items=items)
             selected = loop.select_next_backlog_item(executable_items) if executable_items else None
             if selected is None or selected.path != relative or str(selected.item_id) != context.external_backlog_id:
                 raise AutonomyError("external backlog must match canonical selected sidecar backlog")
@@ -8473,6 +8474,67 @@ def _external_backlog_contract_payload(context: AutonomyRootContext, record: Any
                 "autonomy_execute": str(item.autonomy_execute),
             }
     raise AutonomyError("external backlog path was not discovered by canonical backlog parser")
+
+
+def _external_backlog_item_text(state_root: Path, item: Any) -> str:
+    path = state_root / getattr(item, "path", Path())
+    try:
+        if path.is_file() and not path.is_symlink():
+            return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    return ""
+
+
+def _external_backlog_metadata_values(text: str, field: str) -> tuple[str, ...]:
+    match = re.search(rf"^{re.escape(field)}:\s*(?P<value>.+?)\s*$", text, flags=re.MULTILINE)
+    if not match:
+        return ()
+    value = match.group("value").strip()
+    if not value or value.lower() in {"n/a", "none", "없음"}:
+        return ()
+    return tuple(part.strip() for part in re.split(r"[, ]+", value) if part.strip())
+
+
+def _external_backlog_task_key(text: str) -> str:
+    for pattern in (
+        r"^Task-Key:\s*(?P<value>\S+)\s*$",
+        r"^-\s*Task-Key:\s*(?P<value>\S+)\s*$",
+    ):
+        match = re.search(pattern, text, flags=re.MULTILINE)
+        if match:
+            return match.group("value").strip()
+    return ""
+
+
+def _external_completed_dependency_refs(state_root: Path, items: Sequence[Any]) -> set[str]:
+    refs: set[str] = set()
+    for item in items:
+        if str(getattr(item, "status", "")) != "completed":
+            continue
+        item_id = str(getattr(item, "item_id", "") or "").strip()
+        if item_id:
+            refs.add(item_id)
+        task_key = _external_backlog_task_key(_external_backlog_item_text(state_root, item))
+        if task_key:
+            refs.add(task_key)
+    return refs
+
+
+def _external_dependency_ready_backlog_items(
+    state_root: Path,
+    items: Sequence[Any],
+    *,
+    all_items: Sequence[Any] | None = None,
+) -> list[Any]:
+    completed_refs = _external_completed_dependency_refs(state_root, all_items or items)
+    ready: list[Any] = []
+    for item in items:
+        dependencies = _external_backlog_metadata_values(_external_backlog_item_text(state_root, item), "Depends-On")
+        if dependencies and any(dependency not in completed_refs for dependency in dependencies):
+            continue
+        ready.append(item)
+    return ready
 
 
 def build_external_product_implementation_prompt(

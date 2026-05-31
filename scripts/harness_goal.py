@@ -1517,7 +1517,18 @@ def _native_goal_specs(title: str, spec_context: str) -> list[tuple[str, str, st
             "native",
             "Native app packaging",
             f"웹 production 앱을 기준으로 iOS/Android 네이티브 포팅 전략과 build path를 만든다: {title}.{spec_context}",
-            ["README.md", "package.json", "src/**", "ios/**", "android/**", "capacitor.config.*", "app.json", "eas.json", "docs/**"],
+            [
+                "README.md",
+                "package.json",
+                "src/**",
+                "ios/**",
+                "android/**",
+                "capacitor.config.ts",
+                "capacitor.config.json",
+                "app.json",
+                "eas.json",
+                "docs/**",
+            ],
         ),
         (
             "store",
@@ -2012,6 +2023,7 @@ def _copy_task_metadata(item: dict[str, object], task: Mapping[str, object]) -> 
         "reusable_lesson_hints",
         "service_level",
         "product_standard",
+        "depends_on",
     ):
         value = task.get(key)
         if value in (None, "", (), []):
@@ -2023,6 +2035,184 @@ def _copy_task_metadata(item: dict[str, object], task: Mapping[str, object]) -> 
         else:
             item[key] = value
     return item
+
+
+def _roadmap_depends_by_task_key(goal_dir: Path) -> dict[str, list[str]]:
+    return {
+        task_key: [str(item).strip() for item in task.get("depends_on") or () if str(item).strip()]
+        for task_key, task in _roadmap_tasks_by_task_key(goal_dir).items()
+    }
+
+
+def _roadmap_tasks_by_task_key(goal_dir: Path) -> dict[str, dict[str, object]]:
+    roadmap_path = goal_dir / "roadmap.json"
+    try:
+        roadmap = _read_json(roadmap_path)
+    except GoalError:
+        return {}
+    tasks = roadmap.get("tasks") if isinstance(roadmap.get("tasks"), list) else []
+    by_key: dict[str, dict[str, object]] = {}
+    for task in tasks:
+        if not isinstance(task, Mapping):
+            continue
+        task_key = str(task.get("task_key") or "").strip()
+        if not task_key:
+            continue
+        by_key[task_key] = dict(task)
+    return by_key
+
+
+def _legacy_goal_task_file_scope(values: object) -> list[str]:
+    normalized: list[str] = []
+    raw_values = (values,) if isinstance(values, str) else (values or ())
+    for value in raw_values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        if text == "capacitor.config.*":
+            normalized.extend(("capacitor.config.ts", "capacitor.config.json"))
+            continue
+        normalized.append(text)
+    return list(dict.fromkeys(normalized))
+
+
+def _goal_task_from_roadmap_defaults(
+    *,
+    task: Mapping[str, object],
+    roadmap_task: Mapping[str, object],
+    roadmap_depends: Mapping[str, Sequence[str]],
+) -> dict[str, object]:
+    merged = dict(roadmap_task)
+    bookkeeping = {
+        "packet_id",
+        "auto_eligible",
+        "open_questions",
+        "risk_flags",
+        "review_path",
+        "queued_backlog_path",
+        "backlog_id",
+        "backlog_status",
+    }
+    for key, value in task.items():
+        if key in bookkeeping or value in (None, "", (), []):
+            continue
+        merged.setdefault(key, value)
+    task_key = str(merged.get("task_key") or task.get("task_key") or "").strip()
+    if task_key:
+        merged["task_key"] = task_key
+    depends_on = [str(item).strip() for item in merged.get("depends_on") or () if str(item).strip()]
+    if not depends_on and task_key:
+        depends_on = [str(item).strip() for item in roadmap_depends.get(task_key, ()) if str(item).strip()]
+    if depends_on:
+        merged["depends_on"] = depends_on
+    if "file_scope" in merged:
+        merged["file_scope"] = _legacy_goal_task_file_scope(merged.get("file_scope"))
+    return merged
+
+
+def _missing_task_packet_request(state_root: Path, packet_id: str) -> bool:
+    if not packet_id:
+        return True
+    try:
+        safe_packet_id = harness_task_intake.validate_packet_id(packet_id)
+    except Exception:
+        return True
+    packet_dir = state_root / "backlog" / "drafts" / safe_packet_id
+    return not (packet_dir / "request.md").is_file()
+
+
+def _retry_manual_goal_tasks(
+    *,
+    state_root: Path,
+    target_id: str,
+    target_repo: Path,
+    goal: GoalRecord,
+    goal_payload: Mapping[str, object],
+    tasks: list[Mapping[str, object]],
+) -> tuple[list[Mapping[str, object]], int, int]:
+    plan_id = str(goal_payload.get("active_plan_id") or "")
+    roadmap_tasks = _roadmap_tasks_by_task_key(goal.goal_dir)
+    roadmap_depends = _roadmap_depends_by_task_key(goal.goal_dir)
+    updated: list[Mapping[str, object]] = []
+    queued_count = 0
+    manual_review_count = 0
+    changed = False
+    for raw_task in tasks:
+        task = dict(raw_task)
+        task_key = str(task.get("task_key") or "").strip()
+        depends_on = [str(item).strip() for item in task.get("depends_on") or () if str(item).strip()]
+        if not depends_on and task_key:
+            depends_on = roadmap_depends.get(task_key, [])
+            if depends_on:
+                task["depends_on"] = list(depends_on)
+                changed = True
+        if str(task.get("backlog_id") or ""):
+            updated.append(task)
+            continue
+        packet_id = str(task.get("packet_id") or "").strip()
+        roadmap_task = roadmap_tasks.get(task_key, {})
+        regenerate_from_roadmap = bool(roadmap_task) and _missing_task_packet_request(state_root, packet_id)
+        review = None
+        if packet_id and not regenerate_from_roadmap:
+            try:
+                review = harness_task_intake.review_packet(
+                    state_root=state_root,
+                    packet_id=packet_id,
+                    expected_target_id=target_id,
+                    target_repo=target_repo,
+                )
+            except Exception:
+                regenerate_from_roadmap = bool(roadmap_task)
+        if regenerate_from_roadmap:
+            regenerated = _queue_task(
+                state_root=state_root,
+                target_id=target_id,
+                target_repo=target_repo,
+                goal=goal,
+                plan_id=plan_id,
+                task=_goal_task_from_roadmap_defaults(
+                    task=task,
+                    roadmap_task=roadmap_task,
+                    roadmap_depends=roadmap_depends,
+                ),
+            )
+            if regenerated.get("queued_backlog_path"):
+                queued_count += 1
+            else:
+                manual_review_count += 1
+            updated.append(regenerated)
+            changed = True
+            continue
+        if review is None:
+            manual_review_count += 1
+            updated.append(task)
+            continue
+        task["auto_eligible"] = bool(review.auto_eligible)
+        task["open_questions"] = list(review.open_questions)
+        task["risk_flags"] = list(review.risk_flags)
+        task["review_path"] = review.review_path.as_posix()
+        if not review.auto_eligible:
+            manual_review_count += 1
+            updated.append(task)
+            changed = True
+            continue
+        queued = harness_task_intake.queue_packet(
+            state_root=state_root,
+            packet_id=packet_id,
+            auto=True,
+            expected_target_id=target_id,
+            target_repo=target_repo,
+            goal_id=goal.goal_id,
+            milestone_id=str(task.get("milestone_id") or ""),
+            planner_plan_id=plan_id,
+            depends_on=tuple(depends_on),
+        )
+        task["queued_backlog_path"] = queued.backlog_path.as_posix()
+        task["backlog_id"] = queued.backlog_id
+        queued_count += 1
+        changed = True
+        updated.append(task)
+    return (updated if changed else tasks), queued_count, manual_review_count
 
 
 def _queue_task(
@@ -2243,6 +2433,18 @@ def _goal_executable_progress_tasks(state_root: Path, tasks: Sequence[Mapping[st
     except harness_loop.LoopError:
         return []
     items_by_id = {item.item_id: item for item in backlog_items}
+    completed_refs: set[str] = set()
+    for task in tasks:
+        backlog_id = str(task.get("backlog_id") or "")
+        if not backlog_id:
+            continue
+        discovered = items_by_id.get(backlog_id)
+        if discovered is None or discovered.status != "completed":
+            continue
+        completed_refs.add(backlog_id)
+        task_key = str(task.get("task_key") or "").strip()
+        if task_key:
+            completed_refs.add(task_key)
     executable: list[Mapping[str, object]] = []
     for task in tasks:
         backlog_id = str(task.get("backlog_id") or "")
@@ -2250,6 +2452,9 @@ def _goal_executable_progress_tasks(state_root: Path, tasks: Sequence[Mapping[st
             continue
         discovered = items_by_id.get(backlog_id)
         if discovered is None:
+            continue
+        dependencies = [str(item).strip() for item in task.get("depends_on") or () if str(item).strip()]
+        if dependencies and any(dependency not in completed_refs for dependency in dependencies):
             continue
         if discovered.status == "queued" and discovered.autonomy_execute == "auto":
             executable.append(task)
@@ -2287,6 +2492,60 @@ def refill_goal_tasks(
     existing_tasks = [item for item in progress.get("tasks") or [] if isinstance(item, Mapping)]
     if existing_tasks:
         goal_payload = _read_json(active.goal_json)
+        retried_tasks, retried_queued, retried_manual = _retry_manual_goal_tasks(
+            state_root=state_root,
+            target_id=target_id,
+            target_repo=target_repo,
+            goal=active,
+            goal_payload=goal_payload,
+            tasks=existing_tasks,
+        )
+        if retried_queued:
+            now = utc_timestamp()
+            progress["tasks"] = retried_tasks
+            progress["updated_at"] = now
+            progress.setdefault("events", []).append(
+                {
+                    "event": "goal-manual-task-retry",
+                    "created_at": now,
+                    "queued": retried_queued,
+                    "manual_review": retried_manual,
+                }
+            )
+            _write_json(active.progress_json, progress)
+            linked = [str(entry.get("backlog_id")) for entry in retried_tasks if str(entry.get("backlog_id") or "")]
+            goal_payload["linked_backlog_ids"] = linked
+            goal_payload["updated_at"] = now
+            _write_json(active.goal_json, goal_payload)
+            report_path = active.goal_dir / "queue-report.json"
+            _write_json(
+                report_path,
+                {
+                    "schema_version": GOAL_SCHEMA_VERSION,
+                    "goal_id": active.goal_id,
+                    "target_id": target_id,
+                    "plan_id": str(goal_payload.get("active_plan_id") or ""),
+                    "created_at": now,
+                    "tasks": retried_tasks,
+                    "queued": retried_queued,
+                    "manual_review": retried_manual,
+                    "retry_manual_tasks": True,
+                },
+            )
+            completed_count = int(progress.get("completed_count") or 0)
+            _write_goal_markdown(active.goal_dir / "goal.md", goal_payload, queued=len(linked), completed=completed_count)
+            return GoalRefillResult(
+                goal_id=active.goal_id,
+                plan_id=str(goal_payload.get("active_plan_id") or ""),
+                created=0,
+                queued=retried_queued,
+                manual_review=retried_manual,
+                completed=False,
+                queue_report_path=report_path,
+                generated_backlog_ids=tuple(linked),
+                message="manual-review goal tasks rechecked and queued",
+            )
+        existing_tasks = retried_tasks
         if goal_payload.get("publication_blocked_backlog_ids"):
             return GoalRefillResult(
                 goal_id=active.goal_id,

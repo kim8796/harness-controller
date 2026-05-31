@@ -242,6 +242,125 @@ def test_task_review_rejects_package_script_body_mutation(tmp_path: Path) -> Non
     assert "package script" in " ".join(review.risk_flags)
 
 
+def test_task_review_allows_safe_package_validation_aggregates(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    product = tmp_path / "product"
+    product.mkdir()
+    (product / "package.json").write_text(
+        module.json.dumps(
+            {
+                "scripts": {
+                    "validate": "npm run check && npm test && npm run build",
+                    "check": "node --check src/app.js",
+                    "test": "node --test",
+                    "build": "next build",
+                    "production:readiness": "node scripts/production-readiness.mjs",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-safe-aggregate")
+    request.write_text(_safe_request().replace("`git diff -- README.md`", "`npm run validate`"), encoding="utf-8")
+
+    review = module.review_packet(state_root=state_root, packet_id="task-safe-aggregate", target_repo=product)
+
+    assert review.auto_eligible is True
+    assert review.risk_flags == ()
+
+    readiness = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-safe-readiness")
+    readiness.write_text(_safe_request().replace("`git diff -- README.md`", "`npm run production:readiness`"), encoding="utf-8")
+    readiness_review = module.review_packet(state_root=state_root, packet_id="task-safe-readiness", target_repo=product)
+    assert readiness_review.auto_eligible is True
+
+
+@pytest.mark.parametrize(
+    ("scripts", "expected"),
+    [
+        ({"validate": "npm run deploy", "deploy": "vercel deploy --prod"}, "deploy"),
+        ({"validate": "npm run db:reset", "db:reset": "supabase db reset"}, "destructive"),
+        ({"validate": "OPENAI_API_KEY=sk-live-secret-value npm test"}, "secret"),
+        ({"validate": "npm run validate"}, "cycle"),
+        ({"validate": "next build & sh deploy.sh"}, "ampersand"),
+        ({"validate": "next build\nsh deploy.sh"}, "newline"),
+    ],
+)
+def test_task_review_rejects_unsafe_package_validation_aggregates(
+    tmp_path: Path,
+    scripts: dict[str, str],
+    expected: str,
+) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    product = tmp_path / "product"
+    product.mkdir()
+    (product / "package.json").write_text(module.json.dumps({"scripts": scripts}), encoding="utf-8")
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id=f"task-unsafe-{expected}")
+    request.write_text(_safe_request().replace("`git diff -- README.md`", "`npm run validate`"), encoding="utf-8")
+
+    review = module.review_packet(state_root=state_root, packet_id=f"task-unsafe-{expected}", target_repo=product)
+
+    assert review.auto_eligible is False
+    assert review.risk_flags
+
+
+def test_task_review_rejects_package_validation_forwarded_args(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    product = tmp_path / "product"
+    product.mkdir()
+    (product / "package.json").write_text(
+        module.json.dumps({"scripts": {"validate": "node scripts/validate.mjs"}}),
+        encoding="utf-8",
+    )
+    request = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-forwarded-args")
+    request.write_text(
+        _safe_request().replace("`git diff -- README.md`", "`npm run validate -- --deploy`"),
+        encoding="utf-8",
+    )
+
+    review = module.review_packet(state_root=state_root, packet_id="task-forwarded-args", target_repo=product)
+
+    assert review.auto_eligible is False
+    assert "arguments" in " ".join(review.risk_flags)
+
+    npm_test = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-forwarded-npm-test")
+    npm_test.write_text(
+        _safe_request().replace("`git diff -- README.md`", "`npm test -- --deploy`"),
+        encoding="utf-8",
+    )
+    npm_test_review = module.review_packet(state_root=state_root, packet_id="task-forwarded-npm-test", target_repo=product)
+    assert npm_test_review.auto_eligible is False
+    assert "arguments" in " ".join(npm_test_review.risk_flags)
+
+    yarn_test = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-forwarded-yarn-test")
+    yarn_test.write_text(
+        _safe_request().replace("`git diff -- README.md`", "`yarn test --deploy`"),
+        encoding="utf-8",
+    )
+    yarn_test_review = module.review_packet(state_root=state_root, packet_id="task-forwarded-yarn-test", target_repo=product)
+    assert yarn_test_review.auto_eligible is False
+    assert "arguments" in " ".join(yarn_test_review.risk_flags)
+
+
+def test_task_review_allows_exact_env_example_scope_but_rejects_runtime_env(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    env_example = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-env-example")
+    env_example.write_text(_safe_request().replace("## File Scope\n- README.md", "## File Scope\n- .env.example"), encoding="utf-8")
+
+    review = module.review_packet(state_root=state_root, packet_id="task-env-example")
+
+    assert review.auto_eligible is True
+
+    env_runtime = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-env-runtime")
+    env_runtime.write_text(_safe_request().replace("## File Scope\n- README.md", "## File Scope\n- .env.local"), encoding="utf-8")
+    runtime_review = module.review_packet(state_root=state_root, packet_id="task-env-runtime")
+    assert runtime_review.auto_eligible is False
+    assert "금지 범위" in " ".join(runtime_review.risk_flags)
+
+
 @pytest.mark.parametrize(
     ("scripts", "validation"),
     [
