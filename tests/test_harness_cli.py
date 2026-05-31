@@ -1022,7 +1022,7 @@ def test_watch_public_flow_refills_and_runs_goal_task(monkeypatch, tmp_path: Pat
     calls: list[str] = []
 
     assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
-    assert module.main(["goal", "README 기반 제품을 정리한다"]) == 0
+    assert module.main(["goal", "로컬 프로토타입만 README 기반 제품을 정리한다"]) == 0
     capsys.readouterr()
 
     def fake_transaction(_record, _args):

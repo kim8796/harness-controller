@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,7 @@ GOAL_SCHEMA_VERSION = 2
 GOALS_DIR = Path("goals")
 ACTIVE_GOAL_FILE = GOALS_DIR / "active-goal.json"
 GOAL_DRAFTS_DIR = GOALS_DIR / "drafts"
+GATE_VERIFIER_BLOCK_COOLDOWN_SECONDS = 15 * 60
 MAX_GOAL_SPEC_BYTES = 512_000
 MAX_GOAL_ATTACHMENT_BYTES = 10_000_000
 MAX_GOAL_ATTACHMENTS = 50
@@ -2121,6 +2123,10 @@ def _missing_task_packet_request(state_root: Path, packet_id: str) -> bool:
     return not (packet_dir / "request.md").is_file()
 
 
+def _is_gate_verification_progress_task(task: Mapping[str, object]) -> bool:
+    return bool(str(task.get("gate_verification_created_at") or "")) or str(task.get("task_key") or "") == "task-verify-gates"
+
+
 def _retry_manual_goal_tasks(
     *,
     state_root: Path,
@@ -2307,6 +2313,46 @@ def _goal_publication_success_backlog_ids(*, state_root: Path, target_id: str, g
     return success
 
 
+def _latest_gate_verifier_blocks_pending_gates(
+    *,
+    state_root: Path,
+    target_id: str,
+    goal_id: str,
+    target_repo: Path,
+    pending_gate_ids: Sequence[str],
+) -> bool:
+    current_head = _product_head_sha(target_repo)
+    if current_head is None or not pending_gate_ids:
+        return False
+    runs_root = state_root / "runs" / "harness"
+    if not runs_root.exists() or runs_root.is_symlink():
+        return False
+    pending = {str(item) for item in pending_gate_ids if str(item)}
+    for path in sorted(runs_root.glob("production-gate-verifier-*/generated-evidence.json"), reverse=True):
+        if path.is_symlink():
+            continue
+        try:
+            payload = _read_json(path)
+        except GoalError:
+            continue
+        if str(payload.get("operation") or "") != harness_goal_gates.REQUIRED_GATE_OPERATION:
+            continue
+        if str(payload.get("target_id") or "") != target_id or str(payload.get("goal_id") or "") != goal_id:
+            continue
+        if str(payload.get("product_commit_sha") or "") != current_head:
+            continue
+        try:
+            if time.time() - path.stat().st_mtime > GATE_VERIFIER_BLOCK_COOLDOWN_SECONDS:
+                return False
+        except OSError:
+            return False
+        if str(payload.get("status") or "").strip().lower() != "blocked":
+            return False
+        blocked = {str(item) for item in payload.get("blocked_gate_ids") or [] if str(item)}
+        return pending.issubset(blocked) if blocked else True
+    return False
+
+
 def refresh_progress(*, state_root: Path, goal: GoalRecord) -> dict[str, object]:
     progress = _read_json(goal.progress_json)
     items = harness_loop.discover_backlog_items(state_root)
@@ -2343,7 +2389,12 @@ def refresh_progress(*, state_root: Path, goal: GoalRecord) -> dict[str, object]
         target_id=goal.target_id,
         goal_id=goal.goal_id,
     )
-    publication_blocked = [backlog_id for backlog_id in completed_backlog_ids if backlog_id not in published]
+    publication_required_completed = [
+        str(task.get("backlog_id"))
+        for task in tasks
+        if str(task.get("backlog_id") or "") in completed_backlog_ids and not _is_gate_verification_progress_task(task)
+    ]
+    publication_blocked = [backlog_id for backlog_id in publication_required_completed if backlog_id not in published]
     if publication_blocked:
         goal_payload["publication_blocked_backlog_ids"] = publication_blocked
         if goal_payload.get("status") == "completed":
@@ -2565,11 +2616,30 @@ def refill_goal_tasks(
             for item in gate_status.get("pending_gate_ids", [])
             if str(item)
         ] if isinstance(gate_status, Mapping) and isinstance(gate_status.get("pending_gate_ids"), list) else []
-        has_gate_verification_task = any(
-            str(item.get("gate_verification_created_at") or "") or str(item.get("task_key") or "") == "task-verify-gates"
+        has_open_gate_verification_task = any(
+            _is_gate_verification_progress_task(item)
+            and str(item.get("backlog_status") or "").strip().lower() not in {"completed", "blocked"}
             for item in existing_tasks
         )
-        if not executable and pending_gate_ids and not has_gate_verification_task:
+        if not executable and pending_gate_ids and not has_open_gate_verification_task:
+            if _latest_gate_verifier_blocks_pending_gates(
+                state_root=state_root,
+                target_id=target_id,
+                goal_id=active.goal_id,
+                target_repo=target_repo,
+                pending_gate_ids=pending_gate_ids,
+            ):
+                return GoalRefillResult(
+                    goal_id=active.goal_id,
+                    plan_id=str(goal_payload.get("active_plan_id") or ""),
+                    created=0,
+                    queued=0,
+                    manual_review=1,
+                    completed=False,
+                    queue_report_path=active.goal_dir / "queue-report.json",
+                    generated_backlog_ids=tuple(str(item.get("backlog_id")) for item in existing_tasks if str(item.get("backlog_id") or "")),
+                    message="goal gate verifier blocked pending gates",
+                )
             completion_gates = goal_payload.get("completion_gates") if isinstance(goal_payload.get("completion_gates"), list) else []
             product_audit = goal_payload.get("product_audit") if isinstance(goal_payload.get("product_audit"), Mapping) else {}
             audit_findings = product_audit.get("findings") if isinstance(product_audit, Mapping) else []

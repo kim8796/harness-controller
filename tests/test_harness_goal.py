@@ -1683,8 +1683,7 @@ def test_goal_refill_creates_gate_verification_task_when_production_gates_remain
 
     result = module.refill_goal_tasks(state_root=state_root, target_id="chatapp", target_repo=product, goal=goal)
 
-    assert result is not None
-    assert result.created == 1
+    assert result is not None and result.created == 1
     assert result.message == "goal gate verification task generated"
     progress_after = json.loads(goal.progress_json.read_text(encoding="utf-8"))
     gate_tasks = [task for task in progress_after["tasks"] if task.get("task_key") == "task-verify-gates"]

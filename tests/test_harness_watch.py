@@ -459,6 +459,76 @@ def test_command_run_true_idle_preserves_gate_operator_wait_status(tmp_path, cap
     assert "OPENAI_API_KEY=" not in text
 
 
+def test_command_watch_max_cycles_exits_after_no_progress_idle(tmp_path, capsys) -> None:
+    module = _load_module()
+    module.ERROR_CLASS = RuntimeError
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    state_root = controller / "targets" / "demo"
+    state_root.mkdir(parents=True)
+    product.mkdir(parents=True)
+    record = SimpleNamespace(target_id="demo", repo=product, branch="main", state_root=state_root)
+    runtime = SimpleNamespace(
+        repo_root=lambda: controller,
+        default_target=lambda _root: record,
+        target_executable_backlog_items=lambda _record: [],
+        target_next_auto_backlog_item=lambda _record: None,
+        drain_telegram_relay_for_record=lambda _record: {},
+        process_operator_task_inbox=lambda _record: {},
+        refill_goal_if_idle=lambda _record: {
+            "goal_id": "goal-demo",
+            "plan_id": "plan-demo",
+            "queued": 0,
+            "manual_review": 0,
+            "completed": False,
+            "message": "goal already has generated tasks",
+        },
+        pending_backlog_product_pushes=lambda **_kwargs: [],
+        auto_merge_pending_publications=None,
+        github_credentials_ready=lambda **_kwargs: True,
+        write_watch_status=module.write_watch_status,
+        watch_active_goal_id=lambda _record: "goal-demo",
+        print_watch_status=lambda _record: 0,
+        record_autopilot_doctor_diagnosis=lambda **_kwargs: {"path": "doctor.json"},
+        append_autopilot_memory=lambda *_args, **_kwargs: state_root / "memory.json",
+        record_autopilot_incident=lambda **_kwargs: {"signature": "sig", "count": 1},
+        target_open_incident_blocker=lambda _record, _backlog_id: None,
+        block_sidecar_backlog_for_incident=lambda **_kwargs: (True, "blocked.md"),
+        run_autopilot_transaction=lambda _record, _args: None,
+        print_beginner_transaction_error=lambda exc: print(f"transaction error: {exc}"),
+        backlog_goal_id=lambda _record, _backlog_id: "goal-demo",
+        run_target_sidecar_maintenance=lambda _record: {},
+        incident_record_incident=lambda **_kwargs: {},
+        materialize_controller_repair_task=lambda **_kwargs: state_root / "repair.md",
+        sleep=lambda _seconds: (_ for _ in ()).throw(AssertionError("bounded watch should not sleep on idle")),
+        finish_push_caution="push caution",
+        autopilot_incident_threshold=2,
+        controller_errors=(RuntimeError,),
+        discover_errors=(RuntimeError,),
+        transaction_errors=(RuntimeError,),
+    )
+    args = argparse.Namespace(
+        extra=[],
+        once=False,
+        watch=True,
+        max_cycles=3,
+        idle_seconds=60,
+        stop_on_idle=False,
+        drain_telegram=False,
+        auto_maintenance=False,
+        auto_merge=True,
+    )
+
+    assert module.command_run(args, runtime) == 0
+
+    output = capsys.readouterr().out
+    status = json.loads((state_root / "watch" / "latest.json").read_text(encoding="utf-8"))
+    assert status["phase"] == "max-cycles-idle-no-progress"
+    assert status["status"] == "stopped"
+    assert status["processed_count"] == 0
+    assert "watch 종료: max-cycles=3, 처리 가능한 backlog가 없어 0개 처리 후 종료합니다." in output
+
+
 def test_watch_status_release_state_reports_dirty_product_without_product_mutation(tmp_path, monkeypatch) -> None:
     module = _load_module()
     module.ERROR_CLASS = RuntimeError
