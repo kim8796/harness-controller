@@ -1852,6 +1852,8 @@ def _auto_merge_pending_publications(
             branch=str(item.get("branch") or ""),
             base_branch=str(item.get("base") or record.branch),
             pr_url=str(item.get("pr_url") or ""),
+            pending_check_retry_attempts=harness_publication.PENDING_CHECK_RETRY_ATTEMPTS,
+            pending_check_retry_delay_seconds=harness_publication.PENDING_CHECK_RETRY_DELAY_SECONDS,
         )
         if result.status == "merged":
             _write_product_version_receipt(
@@ -1962,6 +1964,8 @@ def _retry_pending_publication(
             branch=publication.branch,
             base_branch=record.branch,
             pr_url=publication.pr_url,
+            pending_check_retry_attempts=harness_publication.PENDING_CHECK_RETRY_ATTEMPTS,
+            pending_check_retry_delay_seconds=harness_publication.PENDING_CHECK_RETRY_DELAY_SECONDS,
         )
         result.update(
             {
@@ -2430,6 +2434,8 @@ def _run_autopilot_transaction(record: harness_controller.TargetRecord, args: ar
                 branch=publication.branch,
                 base_branch=record.branch,
                 pr_url=publication.pr_url,
+                pending_check_retry_attempts=harness_publication.PENDING_CHECK_RETRY_ATTEMPTS,
+                pending_check_retry_delay_seconds=harness_publication.PENDING_CHECK_RETRY_DELAY_SECONDS,
             )
             print(f"- product PR merge: `{merge.status}`")
             if merge.merge_commit_sha:

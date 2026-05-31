@@ -723,6 +723,81 @@ def test_merge_task_pr_blocks_pending_checks_without_merging(tmp_path: Path) -> 
     assert ("gh", "pr", "merge", pr_url, "--merge", "--delete-branch") not in [call[0] for call in runner.calls]
 
 
+def test_merge_task_pr_retries_pending_checks_when_enabled(tmp_path: Path) -> None:
+    module = _load_module()
+    repo = tmp_path / "product"
+    state_root = tmp_path / "targets" / "demo"
+    repo.mkdir(parents=True)
+    branch = module.task_branch_name("demo", "BL-demo")
+    pr_url = "https://github.com/acme/product/pull/7"
+    view_command = module._pr_view_command(pr_url)
+    merge_command = ("gh", "pr", "merge", pr_url, "--merge", "--delete-branch")
+    runner = OrderedRunner(
+        {
+            view_command: [
+                _ok(
+                    view_command,
+                    stdout=_pr_payload(
+                        branch=branch,
+                        commits=["abc1234"],
+                        checks=[{"name": "ci", "status": "IN_PROGRESS", "conclusion": ""}],
+                    ),
+                ),
+                _ok(
+                    view_command,
+                    stdout=_pr_payload(
+                        branch=branch,
+                        commits=["abc1234"],
+                        checks=[{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+                    ),
+                ),
+                _ok(
+                    view_command,
+                    stdout=_pr_payload(
+                        branch=branch,
+                        state="MERGED",
+                        commits=["abc1234"],
+                        checks=[{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+                        merge_commit="merge1234",
+                    ),
+                ),
+            ],
+            merge_command: [_ok(merge_command)],
+            ("git", "rev-parse", "HEAD"): [
+                _ok(("git", "rev-parse", "HEAD"), stdout="abc1234\n"),
+                _ok(("git", "rev-parse", "HEAD"), stdout="merge1234\n"),
+            ],
+            ("git", "rev-parse", "--abbrev-ref", "HEAD"): [
+                _ok(("git", "rev-parse", "--abbrev-ref", "HEAD"), stdout="main\n")
+            ],
+            ("git", "fetch", "--prune", "origin"): [_ok(("git", "fetch", "--prune", "origin"))],
+            ("git", "merge", "--ff-only", "origin/main"): [_ok(("git", "merge", "--ff-only", "origin/main"))],
+        }
+    )
+
+    result = module.merge_task_pr(
+        controller_root=tmp_path,
+        state_root=state_root,
+        target_repo=repo,
+        target_id="demo",
+        goal_id="goal-1",
+        backlog_id="BL-demo",
+        run_id="run-1",
+        commit_sha="abc1234",
+        branch=branch,
+        base_branch="main",
+        pr_url=pr_url,
+        runner=runner,
+        pending_check_retry_attempts=1,
+        pending_check_retry_delay_seconds=0,
+    )
+
+    payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
+    assert result.status == "merged"
+    assert payload["checks_state"] == "passed"
+    assert [call[0] for call in runner.calls][:3] == [view_command, view_command, merge_command]
+
+
 def test_merge_task_pr_rejects_wrong_head_branch(tmp_path: Path) -> None:
     module = _load_module()
     repo = tmp_path / "product"
