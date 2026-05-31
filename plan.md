@@ -1,3 +1,20 @@
+# Correction: Same-Transaction Pending Check Merge Retry
+
+**Goal:** Fix the debug-loop UX where `./harness watch --max-cycles 1 --no-telegram-drain` creates a PR, sees Vercel/GitHub checks pending for a few seconds, stops at `merge-pending`, and requires a separate retry even though the checks pass shortly after.
+
+**Root Cause Evidence:** During the 3-cycle `chatapp-test` smoke, PRs #19, #20, and #21 all reached commit/PR creation correctly, but each stopped as `merge-pending` while Vercel was still deploying. Manual waiting plus `harness_publication.merge_task_pr(...)` merged each PR successfully. `scripts/harness_publication.py` already retries `mergeable=UNKNOWN`, but it immediately returns `merge-pending` for pending checks.
+
+**Patch Plan:**
+- Add a focused publication regression test where the first PR view has a pending check and the second view has a passed check; expected result is same-call merge when retry parameters are enabled.
+- Keep the existing default unit-test behavior: without retry parameters, pending checks still return `merge-pending` without sleeping.
+- Add bounded pending-check retry support to `harness_publication.merge_task_pr`.
+- Pass the bounded retry from watch/CLI merge paths so normal watch and one-cycle debug can absorb short CI/Vercel delays.
+- Do not mutate product repos while implementing this controller fix.
+
+**Verification:**
+- `python3 -m pytest tests/test_harness_publication.py tests/test_harness_cli.py -q`
+- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+
 # Correction: Product Secret Scanner Runtime Reference False Positive
 
 **Goal:** Fix the live `chatapp-test` watch failure where safe runtime auth/profile code was blocked as `product-diff-secret-like-content`.

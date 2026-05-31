@@ -19,6 +19,8 @@ class PublicationError(RuntimeError):
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 MERGEABLE_RETRY_ATTEMPTS = 3
 MERGEABLE_RETRY_DELAY_SECONDS = 5.0
+PENDING_CHECK_RETRY_ATTEMPTS = 9
+PENDING_CHECK_RETRY_DELAY_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -449,6 +451,35 @@ def _refresh_unknown_mergeability(
     return latest
 
 
+def _refresh_pending_checks(
+    *,
+    runner: CommandRunner,
+    command: Sequence[str],
+    target_repo: Path,
+    pr_payload: Mapping[str, object],
+    attempts: int,
+    delay_seconds: float,
+) -> Mapping[str, object]:
+    latest: Mapping[str, object] = pr_payload
+    checks_state, _checks = _check_summary(latest.get("statusCheckRollup"))
+    if checks_state != "pending":
+        return latest
+    for _attempt in range(max(0, attempts)):
+        if delay_seconds > 0:
+            time.sleep(delay_seconds)
+        view = _run(runner, command, target_repo)
+        if view.returncode != 0:
+            return latest
+        parsed = _parse_pr_view(view.stdout)
+        if not parsed:
+            return latest
+        latest = parsed
+        checks_state, _checks = _check_summary(latest.get("statusCheckRollup"))
+        if checks_state != "pending":
+            return latest
+    return latest
+
+
 def _git_stdout(runner: CommandRunner, command: Sequence[str], cwd: Path) -> str:
     result = _run(runner, command, cwd)
     return result.stdout.strip() if result.returncode == 0 else ""
@@ -518,6 +549,8 @@ def merge_task_pr(
     base_branch: str,
     pr_url: str,
     runner: CommandRunner = default_runner,
+    pending_check_retry_attempts: int = 0,
+    pending_check_retry_delay_seconds: float = PENDING_CHECK_RETRY_DELAY_SECONDS,
 ) -> MergeResult:
     run_dir = _allocate_merge_dir(state_root, backlog_id)
     receipt_path = run_dir / "product-pr-merge-receipt.json"
@@ -565,6 +598,16 @@ def merge_task_pr(
         return _merge_result_from_payload(result_payload, receipt_path=receipt_path, evidence_path=evidence_path)
 
     checks_state, checks = _check_summary(pr_payload.get("statusCheckRollup"))
+    if checks_state == "pending" and pending_check_retry_attempts > 0:
+        pr_payload = _refresh_pending_checks(
+            runner=runner,
+            command=_pr_view_command(pr_url),
+            target_repo=target_repo,
+            pr_payload=pr_payload,
+            attempts=pending_check_retry_attempts,
+            delay_seconds=pending_check_retry_delay_seconds,
+        )
+        checks_state, checks = _check_summary(pr_payload.get("statusCheckRollup"))
     if checks_state not in {"pending", "failed"}:
         pr_payload = _refresh_unknown_mergeability(
             runner=runner,
