@@ -1363,6 +1363,48 @@ def test_goal_refill_waits_when_existing_task_publication_is_blocked(tmp_path: P
     assert not tuple((state_root / "backlog" / "queued").glob("*.md"))
 
 
+def test_goal_progress_counts_backlog_product_push_as_publication_success(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    goal = module.create_goal(
+        state_root=state_root,
+        target_id="chatapp",
+        text="배포 가능한 채팅 서비스",
+        now="2026-05-29T00:00:00Z",
+    )
+    progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    progress["tasks"] = [{"task_key": "task-01-docs", "backlog_id": "BL-chatapp-docs"}]
+    goal.progress_json.write_text(json.dumps(progress), encoding="utf-8")
+    completed = state_root / "backlog" / "completed" / "BL-chatapp-docs.md"
+    completed.parent.mkdir(parents=True, exist_ok=True)
+    completed.write_text(
+        "\n".join(["ID: BL-chatapp-docs", "Status: completed", f"Goal: {goal.goal_id}", ""]),
+        encoding="utf-8",
+    )
+    receipt_dir = state_root / "runs" / "harness" / "external-20260529-000000-backlog-push-BL-chatapp-docs"
+    receipt_dir.mkdir(parents=True)
+    (receipt_dir / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "operation": "backlog-product-push",
+                "applied": True,
+                "status": "pass",
+                "target_id": "chatapp",
+                "backlog_id": "BL-chatapp-docs",
+                "product_push": "enabled",
+                "product_push_sha": "abc123",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    module.refresh_progress(state_root=state_root, goal=goal)
+
+    goal_payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    assert "publication_blocked_backlog_ids" not in goal_payload
+
+
 def test_goal_from_spec_expands_multiple_files_and_directory_images(tmp_path: Path) -> None:
     module = _load_module()
     state_root = tmp_path / "targets" / "game"

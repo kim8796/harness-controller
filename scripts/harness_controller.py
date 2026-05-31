@@ -1168,11 +1168,13 @@ def target_status_paths(status_lines: Sequence[str]) -> list[str]:
             path = line.split("\t")[-1]
         else:
             path = line[3:] if len(line) >= 4 else line
+        status_paths = [path]
         if " -> " in path:
-            path = path.split(" -> ", 1)[1]
-        path = path.strip().rstrip("/")
-        if path:
-            paths.append(path)
+            status_paths = list(path.split(" -> ", 1))
+        for status_path in status_paths:
+            normalized = status_path.strip().rstrip("/")
+            if normalized:
+                paths.append(normalized)
     return list(dict.fromkeys(paths))
 
 
@@ -2247,7 +2249,7 @@ def commit_product_backlog_diff(target_root: Path, *, paths: Sequence[str], mess
     if add_result.returncode != 0:
         detail = (add_result.stderr or add_result.stdout).strip()
         raise ControllerError(f"target backlog product staging failed: {detail}")
-    staged_result = git(["diff", "--cached", "--name-only", "--", *literal_pathspecs], cwd=target_root)
+    staged_result = git(["diff", "--cached", "--no-renames", "--name-only", "--", *literal_pathspecs], cwd=target_root)
     if staged_result.returncode != 0:
         detail = (staged_result.stderr or staged_result.stdout).strip()
         raise ControllerError(f"target backlog product staged diff read failed: {detail}")
@@ -2718,7 +2720,7 @@ def product_diff_smoke_partial_rollback_commands(target_root: Path) -> list[str]
 
 
 def product_diff_smoke_commit_diff_lines(target_root: Path, commit: str = "HEAD") -> list[str]:
-    result = git(["diff-tree", "--no-commit-id", "--name-status", "-r", commit], cwd=target_root)
+    result = git(["diff-tree", "--no-commit-id", "--no-renames", "--name-status", "-r", commit], cwd=target_root)
     if result.returncode != 0:
         raise ControllerError("target git commit diff read failed")
     return [line.rstrip() for line in result.stdout.splitlines() if line.rstrip()]

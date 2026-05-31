@@ -2127,6 +2127,10 @@ def _is_gate_verification_progress_task(task: Mapping[str, object]) -> bool:
     return bool(str(task.get("gate_verification_created_at") or "")) or str(task.get("task_key") or "") == "task-verify-gates"
 
 
+def _is_gate_correction_progress_task(task: Mapping[str, object]) -> bool:
+    return bool(str(task.get("gate_correction_created_at") or "")) or str(task.get("task_key") or "") == "task-repair-gates"
+
+
 def _retry_manual_goal_tasks(
     *,
     state_root: Path,
@@ -2285,6 +2289,7 @@ def _goal_publication_success_backlog_ids(*, state_root: Path, target_id: str, g
     if runs_root.exists() and not runs_root.is_symlink():
         candidates.extend(path for path in runs_root.glob("external-*-backlog-pr-*/generated-evidence.json") if path.is_file())
         candidates.extend(path for path in runs_root.glob("external-*-backlog-pr-merge-*/generated-evidence.json") if path.is_file())
+        candidates.extend(path for path in runs_root.glob("external-*-backlog-push-*/generated-evidence.json") if path.is_file())
     publication_root = state_root / "state" / "publication"
     if publication_root.exists() and not publication_root.is_symlink():
         candidates.extend(path for path in publication_root.glob("*.json") if path.is_file())
@@ -2309,6 +2314,8 @@ def _goal_publication_success_backlog_ids(*, state_root: Path, target_id: str, g
         if operation == "backlog-product-pr-merge" and applied and status == "merged":
             success.add(backlog_id)
         if operation == "backlog-product-pr" and applied and status in {"created", "updated", "published", "already-in-base"}:
+            success.add(backlog_id)
+        if operation == "backlog-product-push" and applied and status == "pass":
             success.add(backlog_id)
     return success
 
@@ -2621,6 +2628,11 @@ def refill_goal_tasks(
             and str(item.get("backlog_status") or "").strip().lower() not in {"completed", "blocked"}
             for item in existing_tasks
         )
+        has_open_gate_correction_task = any(
+            _is_gate_correction_progress_task(item)
+            and str(item.get("backlog_status") or "").strip().lower() not in {"completed", "blocked"}
+            for item in existing_tasks
+        )
         if not executable and pending_gate_ids and not has_open_gate_verification_task:
             if _latest_gate_verifier_blocks_pending_gates(
                 state_root=state_root,
@@ -2629,6 +2641,132 @@ def refill_goal_tasks(
                 target_repo=target_repo,
                 pending_gate_ids=pending_gate_ids,
             ):
+                if not has_open_gate_correction_task:
+                    completion_gates = goal_payload.get("completion_gates") if isinstance(goal_payload.get("completion_gates"), list) else []
+                    product_audit = goal_payload.get("product_audit") if isinstance(goal_payload.get("product_audit"), Mapping) else {}
+                    audit_findings = product_audit.get("findings") if isinstance(product_audit, Mapping) else []
+                    audit_summaries = [
+                        str(finding.get("summary") or finding.get("id") or "").strip()
+                        for finding in audit_findings
+                        if isinstance(finding, Mapping) and str(finding.get("summary") or finding.get("id") or "").strip()
+                    ][:5]
+                    plan_id = str(goal_payload.get("active_plan_id") or "") or str(
+                        build_roadmap(state_root=state_root, target_id=target_id, target_repo=target_repo, goal=active)["plan_id"]
+                    )
+                    correction_task = {
+                        "task_key": "task-repair-gates",
+                        "title": "blocked production gate 보정",
+                        "summary": (
+                            "최근 production gate verifier가 같은 product commit에서 blocked evidence를 남겼다. "
+                            "반복 검증 대신 실제 제품 코드/테스트/문서/설정 연결을 보정해 다음 verifier가 통과하거나 "
+                            "구체적인 operator-wait로 수렴하게 한다: "
+                            + ", ".join(pending_gate_ids)
+                            + (". 우선 해결할 product audit blocker: " + " / ".join(audit_summaries) if audit_summaries else "")
+                        ),
+                        "acceptance": [
+                            "각 blocked gate는 실제 product 코드, provider-backed flow, 테스트, 또는 운영 문서 보정으로 다뤄진다.",
+                            *[f"Product audit blocker를 해결한다: {summary}" for summary in audit_summaries],
+                            "localStorage, seed, mock, README-only, screenshot-only 증거를 production pass로 사용하지 않는다.",
+                            "credential/env/provider/store 권한이 없으면 fake success가 아니라 명확한 setup/operator blocker를 남긴다.",
+                            "다음 watch cycle의 gate verifier가 새로운 passed/blocked evidence를 만들 수 있어야 한다.",
+                        ],
+                        "file_scope": [
+                            "src/**",
+                            "app/**",
+                            "pages/**",
+                            "components/**",
+                            "lib/**",
+                            "tests/**",
+                            "supabase/**",
+                            "docs/**",
+                            "ios/**",
+                            "android/**",
+                            "capacitor.config.ts",
+                            "capacitor.config.json",
+                            "app.json",
+                            "eas.json",
+                            "README.md",
+                            "package.json",
+                        ],
+                        "forbidden_scope": [],
+                        "validation": ["`npm test`", "`npm run build`"],
+                        "manual_checks": [
+                            "production/provider credential이 없으면 operator-wait로 남긴다.",
+                            *[f"Audit finding: {summary}" for summary in audit_summaries],
+                        ],
+                        "priority": "P1",
+                        "labels": ["product", "goal-driven", "production", "gate-correction"],
+                        "goal_id": active.goal_id,
+                        "milestone_id": "gate-correction",
+                        "depends_on": [str(item.get("backlog_id")) for item in existing_tasks if str(item.get("backlog_id") or "")],
+                        "goal_spec_path": str(goal_payload.get("spec_path") or ""),
+                        "attachment_manifest_path": str(goal_payload.get("attachment_manifest_path") or ""),
+                        "traceability_path": str(goal_payload.get("traceability_path") or ""),
+                        "spec_refs": [str(goal_payload.get("spec_path") or "")] if str(goal_payload.get("spec_path") or "") else [],
+                        "attachment_refs": _attachment_refs_from_goal_payload(goal_payload),
+                        "attachment_count": len(goal_payload.get("attachments")) if isinstance(goal_payload.get("attachments"), list) else 0,
+                        "gate_ids": pending_gate_ids,
+                        "expected_evidence": _expected_evidence_for_gate_ids(pending_gate_ids, completion_gates),
+                    }
+                    item = _queue_task(
+                        state_root=state_root,
+                        target_id=target_id,
+                        target_repo=target_repo,
+                        goal=active,
+                        plan_id=plan_id,
+                        task=correction_task,
+                    )
+                    now = utc_timestamp()
+                    item["gate_correction_created_at"] = now
+                    item["pending_gate_ids"] = pending_gate_ids
+                    progress = _read_json(active.progress_json)
+                    tasks = [entry for entry in progress.get("tasks") or [] if isinstance(entry, Mapping)]
+                    tasks.append(item)
+                    progress["tasks"] = tasks
+                    progress["updated_at"] = now
+                    progress.setdefault("events", []).append(
+                        {
+                            "event": "goal-gate-correction-task",
+                            "created_at": now,
+                            "pending_gate_ids": pending_gate_ids,
+                            "queued": 1 if item.get("queued_backlog_path") else 0,
+                        }
+                    )
+                    _write_json(active.progress_json, progress)
+                    goal_payload = _read_json(active.goal_json)
+                    linked = [str(entry.get("backlog_id")) for entry in tasks if str(entry.get("backlog_id") or "")]
+                    goal_payload["linked_backlog_ids"] = linked
+                    goal_payload["updated_at"] = now
+                    _write_json(active.goal_json, goal_payload)
+                    report_path = active.goal_dir / "queue-report.json"
+                    _write_json(
+                        report_path,
+                        {
+                            "schema_version": GOAL_SCHEMA_VERSION,
+                            "goal_id": active.goal_id,
+                            "target_id": target_id,
+                            "plan_id": plan_id,
+                            "created_at": now,
+                            "tasks": tasks,
+                            "queued": 1 if item.get("queued_backlog_path") else 0,
+                            "manual_review": 0 if item.get("queued_backlog_path") else 1,
+                            "gate_correction": True,
+                            "pending_gate_ids": pending_gate_ids,
+                        },
+                    )
+                    completed_count = int(progress.get("completed_count") or 0)
+                    _write_goal_markdown(active.goal_dir / "goal.md", goal_payload, queued=len(linked), completed=completed_count)
+                    return GoalRefillResult(
+                        goal_id=active.goal_id,
+                        plan_id=plan_id,
+                        created=1,
+                        queued=1 if item.get("queued_backlog_path") else 0,
+                        manual_review=0 if item.get("queued_backlog_path") else 1,
+                        completed=False,
+                        queue_report_path=report_path,
+                        generated_backlog_ids=tuple(str(entry.get("backlog_id")) for entry in tasks if str(entry.get("backlog_id") or "")),
+                        message="goal gate correction task generated",
+                    )
                 return GoalRefillResult(
                     goal_id=active.goal_id,
                     plan_id=str(goal_payload.get("active_plan_id") or ""),

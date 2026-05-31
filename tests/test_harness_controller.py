@@ -232,6 +232,7 @@ def test_target_status_paths_normalizes_untracked_directory_slashes() -> None:
     assert module.target_status_paths([" M README.md", "?? client/", "R  old/name.js -> public/"]) == [
         "README.md",
         "client",
+        "old/name.js",
         "public",
     ]
 
@@ -759,6 +760,7 @@ def test_commit_product_backlog_diff_stages_expected_deletion(tmp_path: Path) ->
     _init_git_repo(product)
     subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=product, check=True, env=_git_env())
     subprocess.run(["git", "config", "user.email", "harness-test@example.invalid"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "config", "diff.renames", "true"], cwd=product, check=True, env=_git_env())
     subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
     subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
 
@@ -793,6 +795,37 @@ def test_commit_product_backlog_diff_uses_literal_pathspecs_for_bracket_paths(tm
     assert commit_sha
     assert module.target_git_status_lines(product) == []
     assert module.product_diff_smoke_commit_diff_lines(product) == ["A\tapp/users/[id]/page.tsx"]
+
+
+def test_commit_product_backlog_diff_preserves_delete_add_evidence_when_git_detects_rename(tmp_path: Path) -> None:
+    module = _load_module()
+    product = tmp_path / "product"
+    _init_git_repo(product)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "config", "user.email", "harness-test@example.invalid"], cwd=product, check=True, env=_git_env())
+    smoke_dir = product / "tests" / "e2e"
+    smoke_dir.mkdir(parents=True)
+    old_path = smoke_dir / "production-smoke.spec.js"
+    new_path = smoke_dir / "screenshot-flow.spec.js"
+    old_path.write_text("test('loads chat app screenshot flow', async () => {});\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md", "tests/e2e/production-smoke.spec.js"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+
+    old_path.unlink()
+    new_path.write_text("test('loads chat app screenshot flow', async () => {});\n", encoding="utf-8")
+
+    commit_sha = module.commit_product_backlog_diff(
+        product,
+        paths=["tests/e2e/production-smoke.spec.js", "tests/e2e/screenshot-flow.spec.js"],
+        message="test: rename screenshot smoke evidence",
+    )
+
+    assert commit_sha
+    assert module.target_git_status_lines(product) == []
+    assert module.product_diff_smoke_commit_diff_lines(product) == [
+        "D\ttests/e2e/production-smoke.spec.js",
+        "A\ttests/e2e/screenshot-flow.spec.js",
+    ]
 
 
 def test_commit_product_backlog_diff_uses_harness_identity_env(monkeypatch, tmp_path: Path) -> None:

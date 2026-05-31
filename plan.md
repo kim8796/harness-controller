@@ -1,71 +1,34 @@
-# Watch Pending Gate Continuity Implementation Plan
+# Gate Verifier Actionable Refill Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:systematic-debugging and superpowers:subagent-driven-development. Keep product repo writes inside watch smoke only; controller implementation must not mutate product repo directly.
 
-**Goal:** Make bounded `./harness watch --max-cycles N` continue or exit clearly when an active production goal has pending gates but no executable backlog.
+**Goal:** When production gates remain blocked, `./harness watch` must not stop at repeated verifier evidence. It should create an actionable correction task for the blocked gates, then bounded watch can process that task or report a concrete setup/operator blocker.
 
-**Architecture:** Fix the controller source of truth in `harness_goal.refill_goal_tasks()` so completed gate-verification tasks do not suppress new gate/correction work when gates are still pending. Add a bounded-watch idle exit so debug runs do not sleep forever after no progress. Keep product repos untouched.
+**Architecture:** Keep gate verification strict. A blocked `goal-gate-verification` receipt is not success; it is input to planner refill. `harness_goal.refill_goal_tasks()` should generate a gate-correction backlog when the current product commit has recent blocked verifier evidence and no executable backlog. Avoid tight verifier hot-loops and keep normal long watch behavior unchanged.
 
-**Tech Stack:** Python stdlib, existing harness sidecar JSON/Markdown, pytest.
+**Tech Stack:** Python stdlib, existing task intake, sidecar backlog/progress, pytest.
 
-Diet-Exception: watch goal tests require temporary regression coverage for pending gate continuity
+Diet-Exception: gate continuity controller tests require focused regression coverage for blocked verifier correction refill
 
----
+## Tasks
 
-### Task 1: Reproduce Completed Gate Task Suppression
+- [x] Inspect current blocked verifier evidence and product goal status.
+- [x] Add regression coverage: current-commit blocked verifier creates a `task-repair-gates` correction task instead of another verifier or idle-only state.
+- [x] Implement a single open gate-correction task guard to avoid duplicates.
+- [x] Ensure correction task includes pending gate ids, product audit findings, setup readiness expectations, spec/attachment refs, and safe validation.
+- [x] Keep `--max-cycles` idle exit intact when a recent correction task already exists but cannot run.
+- [x] Correction: add regression coverage for delete+add diffs that Git reports as renames after staging.
+- [x] Correction: compare staged/commit paths with rename detection disabled so implementation evidence remains authoritative.
+- [x] Correction: count applied `backlog-product-push` receipts as publication success so finish recovery clears goal publication blockers.
+- [x] Correction: preserve both source and destination paths when parsing Git rename status.
+- [x] Run focused tests and pre-push guard.
+- [x] Rerun `./harness watch --max-cycles 3 --no-telegram-drain` on `chatapp-test`.
+- [x] Confirm no test/dev server remains and product repo is clean or expected.
 
-**Files:**
-- Modify: `tests/test_harness_goal.py`
+## Review Checklist
 
-- [x] Add a regression test where a production goal has a completed `task-verify-gates`, pending gate status, no queued backlog, and successful publication evidence for all linked work.
-- [x] Assert `refill_goal_tasks()` creates a new queued gate-verification task instead of returning `goal already has generated tasks`.
-- [x] Run `python3 -m pytest tests/test_harness_goal.py::test_goal_refill_regenerates_gate_verification_after_completed_gate_task -q` and confirm it fails before implementation.
-
-### Task 2: Regenerate Gate Work Only When Needed
-
-**Files:**
-- Modify: `scripts/harness_goal.py`
-
-- [x] Change gate-verification idempotency to ignore completed progress tasks.
-- [x] Keep queued/active/manual gate-verification tasks idempotent so watch does not create duplicates.
-- [x] Run the new goal refill regression and existing gate-refill tests.
-
-### Task 3: Bound Idle Debug Runs
-
-**Files:**
-- Modify: `tests/test_harness_watch.py`
-- Modify: `scripts/harness_watch.py`
-
-- [x] Add a watch test proving `watch --max-cycles N` exits after one no-progress idle when no executable backlog exists.
-- [x] Update the idle branch to write `max-cycles-idle-no-progress` status and return 0 for bounded watch runs with no processed work.
-- [x] Keep normal `./harness watch` long-running behavior unchanged.
-
-### Task 4: Verify Real Target Behavior
-
-**Files:**
-- No product repo edits.
-
-- [x] Run focused tests:
-  - `python3 -m pytest tests/test_harness_goal.py::test_goal_refill_regenerates_gate_verification_after_completed_gate_task tests/test_harness_watch.py -q`
-- [x] Run broader verification:
-  - `python3 -m pytest tests/test_harness_goal.py tests/test_harness_watch.py tests/test_harness_cli.py -q`
-- [x] Run guard:
-  - `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
-- [x] Run live bounded smoke:
-  - `./harness watch --max-cycles 3 --no-telegram-drain`
-- [x] Confirm no dev/test server remains and both controller/product git worktrees are clean or expected.
-
-### Correction: Gate Verifier Hot-Loop
-
-- [x] Exclude `task-verify-gates` from product PR publication blockers because it is verifier evidence, not product diff publication.
-- [x] Add a recent blocked-verifier cooldown so the same current-commit pending gate evidence is not regenerated in a tight loop.
-- [x] Preserve retry possibility after cooldown/provider setup changes.
-- [x] Add `tests/test_harness_goal_continuity.py` coverage for regenerate-vs-hot-loop behavior.
-
-### Review Checklist
-
-- [x] Pending gates with completed gate-verification history create new work.
-- [x] Pending gates with an existing queued/active gate-verification task do not duplicate work.
-- [x] Bounded watch does not hang with zero executable work.
-- [x] External account blockers remain operator-wait/setup readiness, not completed goals.
-- [ ] Final report includes an additional 5-line-or-less summary.
+- [x] No fake production pass is introduced.
+- [x] Gate verifier blocked evidence leads to work, not repeated verifier-only loops.
+- [x] Duplicate correction tasks are not generated while one is open.
+- [x] External setup blockers remain visible as setup/operator waits.
+- [x] Final report includes a <=5-line summary.

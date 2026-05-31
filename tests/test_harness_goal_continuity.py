@@ -14,6 +14,10 @@ def _load_module():
 def _init_product(path: Path) -> str:
     path.mkdir()
     (path / "README.md").write_text("# Product\n", encoding="utf-8")
+    (path / "package.json").write_text(
+        json.dumps({"scripts": {"test": "node --test", "build": "echo build"}}),
+        encoding="utf-8",
+    )
     subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, stdout=subprocess.PIPE)
     subprocess.run(["git", "config", "user.email", "test@example.test"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True)
@@ -100,7 +104,7 @@ def test_goal_refill_regenerates_gate_verification_after_completed_gate_task(tmp
     assert gate_tasks[-1]["pending_gate_ids"]
 
 
-def test_goal_refill_does_not_hot_loop_same_blocked_gate_verifier(tmp_path: Path) -> None:
+def test_goal_refill_turns_blocked_gate_verifier_into_correction_task(tmp_path: Path) -> None:
     module = _load_module()
     state_root = tmp_path / "targets" / "chatapp"
     product_head = _init_product(tmp_path / "product")
@@ -160,8 +164,21 @@ def test_goal_refill_does_not_hot_loop_same_blocked_gate_verifier(tmp_path: Path
     result = module.refill_goal_tasks(state_root=state_root, target_id="chatapp", target_repo=tmp_path / "product", goal=goal)
 
     assert result is not None
-    assert result.created == 0
-    assert result.queued == 0
-    assert result.manual_review == 1
-    assert result.message == "goal gate verifier blocked pending gates"
-    assert not (state_root / "backlog" / "queued").exists()
+    assert result.created == 1
+    assert result.queued == 1
+    assert result.message == "goal gate correction task generated"
+    progress_after = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    correction_tasks = [task for task in progress_after["tasks"] if task.get("task_key") == "task-repair-gates"]
+    assert len(correction_tasks) == 1
+    assert correction_tasks[0]["pending_gate_ids"] == pending_gates
+    queued = tuple((state_root / "backlog" / "queued").glob("*.md"))
+    assert len(queued) == 1
+    body = queued[0].read_text(encoding="utf-8")
+    assert "blocked production gate 보정" in body
+    assert "Goal-Gate-ID: deployed_url" in body
+
+    duplicate = module.refill_goal_tasks(state_root=state_root, target_id="chatapp", target_repo=tmp_path / "product", goal=goal)
+
+    assert duplicate is not None
+    assert duplicate.created == 0
+    assert tuple((state_root / "backlog" / "queued").glob("*.md")) == queued
