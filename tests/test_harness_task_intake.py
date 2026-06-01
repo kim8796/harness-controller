@@ -400,12 +400,22 @@ def test_task_review_allows_exact_env_example_scope_but_rejects_runtime_env(tmp_
     review = module.review_packet(state_root=state_root, packet_id="task-env-example")
 
     assert review.auto_eligible is True
+    queued = module.queue_packet(state_root=state_root, packet_id="task-env-example", auto=True)
+    body = queued.backlog_path.read_text(encoding="utf-8")
+    assert "- .env.example" in body
+    assert "- .env*" not in body
 
     env_runtime = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-env-runtime")
     env_runtime.write_text(_safe_request().replace("## File Scope\n- README.md", "## File Scope\n- .env.local"), encoding="utf-8")
     runtime_review = module.review_packet(state_root=state_root, packet_id="task-env-runtime")
     assert runtime_review.auto_eligible is False
     assert "금지 범위" in " ".join(runtime_review.risk_flags)
+
+    env_test = module.create_draft(state_root=state_root, target_id="demo", packet_id="task-env-test")
+    env_test.write_text(_safe_request().replace("## File Scope\n- README.md", "## File Scope\n- .env.test"), encoding="utf-8")
+    test_review = module.review_packet(state_root=state_root, packet_id="task-env-test")
+    assert test_review.auto_eligible is False
+    assert "금지 범위" in " ".join(test_review.risk_flags)
 
 
 @pytest.mark.parametrize(
@@ -1352,7 +1362,13 @@ def test_task_queue_always_merges_mandatory_forbidden_scope(tmp_path: Path) -> N
     queued = module.queue_packet(state_root=state_root, packet_id="task-demo", auto=True)
     body = queued.backlog_path.read_text(encoding="utf-8")
 
-    assert "- .env*" in body
+    assert "- .env*" not in body
+    assert "- .env" in body
+    assert "- .env.local" in body
+    assert "- .env.production" in body
+    assert "- .env.development" in body
+    assert "- .env.test" in body
+    assert "- .envrc" in body
     assert "- runs/**" in body
     assert "- reports/**" in body
     assert "- targets/**" in body

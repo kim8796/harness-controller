@@ -65,9 +65,9 @@ SECRET_TEXT_PATTERNS = (
         r"['\"]?\s*[:=]\s*['\"]?[A-Za-z0-9._~+/=-]{12,}"
     ),
 )
-ENV_FORBIDDEN_SCOPE = (".env", ".env.local", ".env.production", ".env.development", ".envrc")
+ENV_FORBIDDEN_SCOPE = (".env", ".env.local", ".env.production", ".env.development", ".env.test", ".envrc")
 PRODUCT_FORBIDDEN_SCOPE = ("runs/**", "reports/**", "targets/**", "backlog/**", "HARNESS.md", "harness", "scripts/harness")
-MANDATORY_FORBIDDEN_SCOPE = (".env*", *ENV_FORBIDDEN_SCOPE, *PRODUCT_FORBIDDEN_SCOPE)
+MANDATORY_FORBIDDEN_SCOPE = (*ENV_FORBIDDEN_SCOPE, *PRODUCT_FORBIDDEN_SCOPE)
 CONFIG_ALIAS_EXTENSIONS = ("js", "mjs", "cjs", "ts", "mts", "cts")
 SAFE_CONFIG_SCOPE_ALIASES = {
     f"{prefix}.*": tuple(f"{prefix}.{suffix}" for suffix in CONFIG_ALIAS_EXTENSIONS)

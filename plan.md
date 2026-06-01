@@ -1,25 +1,27 @@
-# Production Readiness Gate Probe Plan
+# Env Example Template Scope Correction Plan
 
 ## Goal
 
-`chatapp-test` production 배포와 `/api/health` readiness가 통과했는데도 하네스 production gate verifier가 `deployed_url` gate를 blocked로 남기는 문제를 controller에서 고친다.
+`chatapp-test` production gate repair task가 `.env.example` 보정을 요구하면서 mandatory forbidden scope의 `.env*` wildcard 때문에 스스로 blocked 되는 controller 버그를 고친다.
+
+## Root Cause
+
+- `.env.example`은 product template/documentation file이며 secret/runtime env 파일이 아니다.
+- `harness_task_intake.MANDATORY_FORBIDDEN_SCOPE`가 `.env*`를 그대로 backlog에 넣어 `.env.example`까지 금지하는 것처럼 보인다.
+- deterministic normalization은 사용자 입력 `.env*`를 explicit runtime env 목록으로 바꾸지만, mandatory scope merge가 다시 `.env*`를 삽입해 충돌을 만든다.
 
 ## Changes
 
-- product repo에 `npm run production:readiness`가 있고 setup readiness가 충족된 경우, verifier가 이를 secret-free production probe로 실행한다.
-- readiness 결과가 `ready=true`이고 deployment smoke가 passed이면 `deployed_url` gate만 passed receipt로 기록한다.
-- Supabase/OpenAI health configured는 배포 health의 일부로만 기록하고, DB persistence/auth/realtime/AI reply 같은 기능 gate는 별도 production-safe probe 없이는 계속 blocked로 둔다.
-- `.env.local` 등 ignored product env는 하네스가 읽어 process env로 넘기되, generated evidence에는 key/value를 남기지 않는다.
-- timeout, missing script, JSON parse 실패, readiness 실패는 pass가 아니라 blocked로 남긴다.
+- mandatory forbidden scope에서 `.env*` wildcard를 제거하고 explicit runtime env 파일 목록만 유지한다.
+- `.env.example`은 exact file scope로 계속 auto-eligible하게 둔다.
+- `.env`, `.env.local`, `.env.production`, `.env.development`, `.envrc`, `.env.test` 같은 runtime/secret env scope는 계속 fail-closed로 막는다.
+- 새로 생성되는 backlog에는 `.env.example`과 겹치는 mandatory forbidden wildcard가 없어야 한다.
+- 기존 queued repair task는 controller 수정 후 재생성하거나 안전하게 scope를 갱신해 watch가 계속 진행할 수 있게 한다.
 
 ## Validation
 
-- `python3 -m pytest tests/test_harness_production_gate_verifier.py -q`
+- `python3 -m pytest tests/test_harness_task_intake.py -q`
 - `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
-- 수정 후 `./harness watch --max-cycles 1 --no-telegram-drain`을 다시 실행해 `deployed_url`이 passed로 승격되는지 확인한다.
+- 수정 후 `./harness watch --max-cycles 3 --no-telegram-drain` 재실행
 
-## Notes
-
-- product 파일은 직접 수정하지 않는다.
-- 이번 PR은 `deployed_url` 흡수만 해결한다. 나머지 production/native gate는 실제 기능 probe가 생기기 전까지 완료 처리하지 않는다.
-Diet-Exception: `scripts/harness_goal.py`, `scripts/harness_watch.py`, and related tests grow in this hotfix because the controller must both generate production readiness evidence and display live refreshed gate status without a larger refactor. Follow-up diet should move gate evidence collection/status projection into a cohesive small module and split the large goal/watch tests after this blocking production gate receipt bug is fixed.
+Diet-Exception: `scripts/harness_task_intake.py` and focused task intake tests change scope guard policy because `.env.example` must remain editable as product template documentation while runtime `.env` files stay blocked; follow-up diet can move env scope policy helpers into a small task contract module.
