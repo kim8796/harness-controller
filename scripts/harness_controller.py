@@ -89,7 +89,13 @@ SECRET_LIKE_ENV_REFERENCE = re.compile(
     r"(?:process\.env|import\.meta\.env)(?:\.[A-Za-z_][A-Za-z0-9_]*|\[['\"][A-Za-z_][A-Za-z0-9_]*['\"]\])!?"
 )
 ENV_NAME_LITERAL = re.compile(r"^[A-Z][A-Z0-9_]{2,}$")
-SAFE_PRODUCT_PLACEHOLDER_LITERAL = re.compile(r"(?i)^(?:demo|provider-test|test|mock|fixture)-(?:session|token|credential)$")
+SAFE_PRODUCT_PLACEHOLDER_LITERAL = re.compile(
+    r"(?i)^(?:"
+    r"(?:demo|provider-test|test|mock|fixture)-(?:session|token|credential)|"
+    r"(?:your|replace-with|change-me)-[A-Za-z0-9._-]+|"
+    r"placeholder|changeme|<[^>\n]+>"
+    r")$"
+)
 SIDECAR_DIRS = (
     Path("reports"),
     Path("operator-inbox"),
@@ -2104,6 +2110,8 @@ def _product_secret_value_has_hardcoded_literal(value: str) -> bool:
         if not SAFE_PRODUCT_PLACEHOLDER_LITERAL.fullmatch(text):
             return True
     text = value.strip().rstrip(",;)}").strip()
+    if SAFE_PRODUCT_PLACEHOLDER_LITERAL.fullmatch(text):
+        return False
     return bool(
         re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{11,}", text)
         and re.search(r"(?i)(secret|token|key|password|credential)", text)
