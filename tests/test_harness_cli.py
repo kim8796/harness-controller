@@ -56,6 +56,36 @@ def test_dependency_ready_backlog_items_skip_unmet_task_key_dependencies(tmp_pat
     assert module._dependency_ready_backlog_items(state_root, [ready, blocked], all_items=[completed, ready, blocked]) == [ready]
 
 
+def test_has_executable_backlog_respects_unmet_dependencies(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "target"
+    queued_path = state_root / "backlog" / "queued" / "BL-task-01.md"
+    queued_path.parent.mkdir(parents=True)
+    queued_path.write_text(
+        "\n".join(
+            [
+                "ID: BL-task-01",
+                "Status: queued",
+                "Autonomy-Execute: auto",
+                "Depends-On: BL-missing",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert module._has_executable_backlog(state_root) is False
+
+    completed_path = state_root / "backlog" / "completed" / "BL-missing.md"
+    completed_path.parent.mkdir(parents=True)
+    completed_path.write_text(
+        "\n".join(["ID: BL-missing", "Status: completed", ""]),
+        encoding="utf-8",
+    )
+
+    assert module._has_executable_backlog(state_root) is True
+
+
 def test_controller_release_check_and_ci_cover_goal_gate_surfaces() -> None:
     module = _load_module()
     expected_ruff_paths = {
