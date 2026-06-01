@@ -2544,6 +2544,134 @@ def _completed_progress_backlog_ids(state_root: Path, tasks: Sequence[Mapping[st
     return completed
 
 
+def _backlog_top_metadata(text: str) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    for line in text.splitlines():
+        if line.startswith("## "):
+            break
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        metadata[key.strip().casefold()] = value.strip()
+    return metadata
+
+
+def _backlog_note_value(text: str, field: str) -> str:
+    match = re.search(rf"^-\s*{re.escape(field)}:\s*(?P<value>.+?)\s*$", text, flags=re.MULTILINE)
+    return match.group("value").strip() if match else ""
+
+
+def _path_has_symlink_between(root: Path, path: Path) -> bool:
+    try:
+        relative_parts = path.relative_to(root).parts
+    except ValueError:
+        return True
+    current = root
+    if current.is_symlink():
+        return True
+    for part in relative_parts:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
+def _queued_gate_backlog_text_for_task(
+    state_root: Path,
+    *,
+    goal_id: str,
+    task: Mapping[str, object],
+) -> tuple[Path, str] | None:
+    relative = str(task.get("queued_backlog_path") or "").strip()
+    if not relative:
+        return None
+    candidate = state_root / relative
+    queued_root = state_root / "backlog" / "queued"
+    if queued_root.is_symlink() or _path_has_symlink_between(state_root, queued_root):
+        return None
+    try:
+        candidate.resolve().relative_to(queued_root.resolve())
+    except (OSError, ValueError):
+        return None
+    if _path_has_symlink_between(state_root, candidate) or not candidate.is_file():
+        return None
+    text = candidate.read_text(encoding="utf-8")
+    metadata = _backlog_top_metadata(text)
+    backlog_id = str(task.get("backlog_id") or "").strip()
+    task_key = str(task.get("task_key") or "").strip()
+    if not backlog_id or metadata.get("id") != backlog_id:
+        return None
+    if metadata.get("status", "").casefold() != "queued":
+        return None
+    if metadata.get("goal") != goal_id:
+        return None
+    if task_key not in {"task-verify-gates", "task-repair-gates"}:
+        return None
+    if _backlog_note_value(text, "Task-Key") != task_key:
+        return None
+    return candidate, text
+
+
+def _rewrite_depends_on_metadata(text: str, depends_on: Sequence[str]) -> str:
+    lines = text.splitlines()
+    trailing_newline = text.endswith("\n")
+    metadata_end = next((index for index, line in enumerate(lines) if line.startswith("## ")), len(lines))
+    new_line = "Depends-On: " + ", ".join(depends_on) if depends_on else ""
+    for index in range(metadata_end):
+        if not lines[index].startswith("Depends-On:"):
+            continue
+        if new_line:
+            lines[index] = new_line
+        else:
+            del lines[index]
+        rendered = "\n".join(lines)
+        return rendered + ("\n" if trailing_newline else "")
+    if not new_line:
+        return text
+    insert_at = next((index for index, line in enumerate(lines[:metadata_end]) if not line.strip()), metadata_end)
+    lines.insert(insert_at, new_line)
+    rendered = "\n".join(lines)
+    return rendered + ("\n" if trailing_newline else "")
+
+
+def _normalize_open_gate_task_dependencies(
+    state_root: Path,
+    *,
+    goal_id: str,
+    tasks: Sequence[Mapping[str, object]],
+    completed_dependencies: Sequence[str],
+) -> tuple[list[Mapping[str, object]], int]:
+    updated: list[Mapping[str, object]] = []
+    changed = 0
+    normalized_dependencies = [str(item) for item in completed_dependencies if str(item)]
+    for raw in tasks:
+        task = dict(raw)
+        status = str(task.get("backlog_status") or "").strip().lower()
+        should_normalize = (
+            (_is_gate_verification_progress_task(task) or _is_gate_correction_progress_task(task))
+            and status not in {"completed", "blocked"}
+        )
+        if not should_normalize:
+            updated.append(task)
+            continue
+        current = [str(item).strip() for item in task.get("depends_on") or () if str(item).strip()]
+        if current == normalized_dependencies:
+            updated.append(task)
+            continue
+        backlog_text = _queued_gate_backlog_text_for_task(state_root, goal_id=goal_id, task=task)
+        if backlog_text is None:
+            updated.append(task)
+            continue
+        path, text = backlog_text
+        task["depends_on"] = normalized_dependencies
+        rewritten = _rewrite_depends_on_metadata(text, normalized_dependencies)
+        if rewritten != text:
+            _write_text(path, rewritten)
+        changed += 1
+        updated.append(task)
+    return updated, changed
+
+
 def refill_goal_tasks(
     *,
     state_root: Path,
@@ -2641,8 +2769,26 @@ def refill_goal_tasks(
                 generated_backlog_ids=tuple(str(item.get("backlog_id")) for item in existing_tasks if str(item.get("backlog_id") or "")),
                 message="goal waiting on publication",
             )
-        executable = _goal_executable_progress_tasks(state_root, existing_tasks)
         completed_dependencies = _completed_progress_backlog_ids(state_root, existing_tasks)
+        existing_tasks, normalized_dependencies_count = _normalize_open_gate_task_dependencies(
+            state_root,
+            goal_id=active.goal_id,
+            tasks=existing_tasks,
+            completed_dependencies=completed_dependencies,
+        )
+        if normalized_dependencies_count:
+            now = utc_timestamp()
+            progress["tasks"] = list(existing_tasks)
+            progress["updated_at"] = now
+            progress.setdefault("events", []).append(
+                {
+                    "event": "goal-gate-task-dependencies-normalized",
+                    "created_at": now,
+                    "count": normalized_dependencies_count,
+                }
+            )
+            _write_json(active.progress_json, progress)
+        executable = _goal_executable_progress_tasks(state_root, existing_tasks)
         gate_status = goal_payload.get("completion_gate_status") if isinstance(goal_payload.get("completion_gate_status"), Mapping) else {}
         pending_gate_ids = [
             str(item)
