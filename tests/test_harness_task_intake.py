@@ -150,6 +150,53 @@ def test_task_review_infers_gameplay_scope_for_korean_player_count_request(tmp_p
     assert "inferred-file-scope" in review.normalization_actions
 
 
+def test_task_review_infers_provider_ai_and_migration_scope(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp-test"
+    repo = tmp_path / "chatapp-test"
+    for relative in (
+        "src/app.js",
+        "src/app/api/ai/reply/route.js",
+        "src/lib/openai/ai-replies.js",
+        "tests/production-contract.test.js",
+        "supabase/migrations/0002_social_discovery_schema.sql",
+    ):
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("// smoke\n", encoding="utf-8")
+    (repo / "package.json").write_text('{"scripts":{"test":"node --test","build":"next build"}}\n', encoding="utf-8")
+    request = module.create_draft(
+        state_root=state_root,
+        target_id="chatapp-test",
+        title="provider-test AI reply fix",
+        packet_id="task-provider-ai-scope",
+    )
+    request.write_text(
+        "\n".join(
+            [
+                "# provider-test AI reply fix",
+                "",
+                "provider-test AI 채팅이 /api/ai/reply에서 openai_incomplete_response를 반환한다.",
+                "OpenAI Responses API 응답을 안정화하고 profile_public_id_seq migration bug도 확인한다.",
+                "검증: npm test 그리고 npm run build",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    review = module.review_packet(state_root=state_root, packet_id="task-provider-ai-scope", target_repo=repo)
+    preview = review.preview_path.read_text(encoding="utf-8")
+
+    assert review.auto_eligible is True
+    assert review.open_questions == ()
+    assert "## File Scope" in preview
+    assert "- src/**" in preview
+    assert "- tests/**" in preview
+    assert "- supabase/migrations/**" in preview
+    assert "Autonomy-Execute: auto" in preview
+    assert "inferred-file-scope" in review.normalization_actions
+
+
 def test_task_review_normalization_does_not_make_unsafe_natural_language_auto(tmp_path: Path) -> None:
     module = _load_module()
     state_root = tmp_path / "targets" / "demo"
