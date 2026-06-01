@@ -1265,6 +1265,126 @@ def _status_text(payload: Mapping[str, object], key: str) -> str:
     return str(payload.get(key) or "")
 
 
+_WATCH_STATUS_OPERATOR_WAIT_FIELDS = (
+    "operator_wait",
+    "operator_wait_id",
+    "operator_wait_class",
+    "operator_wait_status",
+    "operator_wait_deadline_at",
+    "operator_wait_next_action",
+)
+
+
+def _completed_backlog_path(record: harness_controller.TargetRecord, backlog_id: str) -> Path | None:
+    text = str(backlog_id or "").strip()
+    if not text or "/" in text or "\\" in text or text in {".", ".."}:
+        return None
+    if text.endswith(".md"):
+        stem = text[:-3]
+    else:
+        stem = text
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", stem):
+        return None
+    completed_dir = record.state_root / "backlog" / "completed"
+    if completed_dir.exists() and completed_dir.is_symlink():
+        return None
+    candidate = completed_dir / f"{stem}.md"
+    if not candidate.exists() or not candidate.is_file() or candidate.is_symlink():
+        return None
+    try:
+        candidate.resolve().relative_to(completed_dir.resolve())
+    except ValueError:
+        return None
+    try:
+        text = candidate.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    metadata: dict[str, str] = {}
+    for line in text.splitlines():
+        if line.startswith("## "):
+            break
+        match = re.match(r"^(?P<key>[A-Za-z0-9][A-Za-z0-9 _/-]*):\s*(?P<value>.*?)\s*$", line.strip())
+        if match is None:
+            continue
+        key = match.group("key").strip().lower().replace(" ", "_").replace("/", "_")
+        metadata[key] = match.group("value").strip()
+    item_id = str(metadata.get("id") or candidate.stem).strip()
+    status = str(metadata.get("status") or "completed").strip().lower()
+    if item_id != stem or status != "completed":
+        return None
+    return candidate
+
+
+def _watch_status_wait_payload(payload: Mapping[str, object]) -> Mapping[str, object]:
+    wait = payload.get("operator_wait")
+    if isinstance(wait, Mapping):
+        return wait
+    return {}
+
+
+def _watch_status_wait_explicit_backlog_id(payload: Mapping[str, object]) -> str:
+    wait = _watch_status_wait_payload(payload)
+    if not wait:
+        return ""
+    backlog_id = str(wait.get("backlog_id") or "")
+    if backlog_id:
+        return backlog_id
+    context = wait.get("context")
+    if isinstance(context, Mapping):
+        return str(context.get("backlog_id") or "")
+    return ""
+
+
+def _is_clearable_completed_backlog_wait(payload: Mapping[str, object]) -> bool:
+    wait = _watch_status_wait_payload(payload)
+    if not wait:
+        return False
+    wait_class = str(wait.get("wait_class") or payload.get("operator_wait_class") or "")
+    wait_status = str(wait.get("status") or payload.get("operator_wait_status") or "").strip().lower()
+    if wait_class != "approval-wait":
+        return False
+    return wait_status in {"waiting", "operator-wait"}
+
+
+def _clear_stale_completed_backlog_operator_wait(
+    record: harness_controller.TargetRecord,
+    payload: Mapping[str, object],
+) -> Mapping[str, object]:
+    wait = payload.get("operator_wait")
+    has_wait = isinstance(wait, Mapping) or any(payload.get(key) for key in _WATCH_STATUS_OPERATOR_WAIT_FIELDS[1:])
+    if not has_wait:
+        return payload
+    if not _is_clearable_completed_backlog_wait(payload):
+        return payload
+    backlog_id = _watch_status_wait_explicit_backlog_id(payload)
+    if _completed_backlog_path(record, backlog_id) is None:
+        return payload
+
+    cleared = dict(payload)
+    transaction = _transaction_status_from_payload(cleared)
+    if any(value for key, value in transaction.items() if key != "last_transaction_at"):
+        for key, value in transaction.items():
+            if value and not str(cleared.get(key) or ""):
+                cleared[key] = value
+    for key in _WATCH_STATUS_OPERATOR_WAIT_FIELDS:
+        cleared.pop(key, None)
+    for key in ("selected_backlog_id", "run_id", "transaction_status", "commit_sha", "publication_branch", "pr_url"):
+        cleared[key] = ""
+    if str(cleared.get("status") or "") == "operator-wait":
+        cleared["status"] = "idle"
+    if str(cleared.get("phase") or "") == "operator-wait":
+        cleared["phase"] = "stale-operator-wait-cleared"
+    cleared["pending_reason"] = ""
+    if not str(cleared.get("next_action") or "") or "approved" in str(cleared.get("next_action") or ""):
+        cleared["next_action"] = str(
+            cleared.get("goal_gate_next_action")
+            or "rerun `./harness watch` to continue the active goal"
+        )
+    cleared["stale_operator_wait_cleared"] = True
+    cleared["stale_operator_wait_backlog_id"] = backlog_id
+    return cleared
+
+
 def _transaction_status_from_payload(payload: Mapping[str, object]) -> dict[str, str]:
     return {
         "last_selected_backlog_id": _status_text(payload, "selected_backlog_id"),
@@ -1617,6 +1737,7 @@ def load_watch_status(record: harness_controller.TargetRecord) -> Mapping[str, o
     if not isinstance(safe, Mapping):
         raise _error("watch status JSON 형식이 올바르지 않습니다")
     safe = _enrich_watch_status_with_live_goal(record, safe)
+    safe = _clear_stale_completed_backlog_operator_wait(record, safe)
     if not any(safe.get(key) for key in ("selected_backlog_id", "run_id", "transaction_status")) and not any(
         safe.get(key)
         for key in (
