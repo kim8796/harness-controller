@@ -8590,6 +8590,33 @@ def build_external_product_implementation_prompt(
     )
 
 
+_EXTERNAL_IMPLEMENTATION_SETUP_BLOCKER_RE = re.compile(
+    r"(?i)("
+    r"missing\s+(?:external\s+)?(?:credentials?|env|environment|provider|setup)|"
+    r"(?:credentials?|env|environment|provider|setup)\s+(?:missing|required|not\s+configured|unavailable)|"
+    r"(?:app\s+store\s+connect|apple\s+developer|google\s+play|play\s+console|"
+    r"signing|provisioning|team[_ -]?id|service\s+account|"
+    r"vercel|supabase|openai|twilio).{0,100}"
+    r"(?:missing|required|not\s+configured|unavailable|not\s+available)|"
+    r"(?:app_store_connect|apple_developer|google_play|google_play_service_account|"
+    r"supabase|openai|twilio|vercel)[A-Z0-9_ -]{0,80}"
+    r")"
+)
+
+
+def _external_setup_blocker_summary(response_text: str) -> str:
+    lines = [line.strip(" -\t") for line in response_text.splitlines() if line.strip()]
+    relevant = [line for line in lines if _EXTERNAL_IMPLEMENTATION_SETUP_BLOCKER_RE.search(line)]
+    if not relevant:
+        return ""
+    summary = "; ".join(relevant[:6])
+    try:
+        summary = _control_support().sanitize_for_outbox(summary)
+    except Exception:
+        pass
+    return truncate_text(summary, limit=500)
+
+
 def resolve_external_product_implementation_runner_model(
     *, runner: str, requested_runner_model: str | None
 ) -> tuple[str | None, str]:
@@ -8825,6 +8852,14 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
         if before_head != after_head:
             raise AutonomyError("external product implementation must not create commits")
         if not after_status:
+            blocker_summary = _external_setup_blocker_summary(
+                implementation_lane_result.response_text if implementation_lane_result is not None else ""
+            )
+            if blocker_summary:
+                raise AutonomyError(
+                    "external product implementation blocked by setup/credential: "
+                    f"{blocker_summary}"
+                )
             raise AutonomyError("external product implementation made no product diff")
         product_diff_paths = [Path(path) for path in controller.target_status_paths(after_status)]
     elif after_status != expected_status_after or before_head != after_head:

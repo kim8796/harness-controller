@@ -74,6 +74,12 @@ def test_classify_external_incident_operator_wait_setup_dirty_and_external_mappi
         {"stage": "preflight", "error": "missing env DATABASE_URL"},
         {"stage": "preflight", "error": "permission denied opening target repo"},
         {"stage": "publication", "error": "authentication failed for GitHub"},
+        {"stage": "implementation", "error": "App Store Connect team is not configured"},
+        {"stage": "implementation", "error": "Google Play service account missing"},
+        {
+            "stage": "implementation",
+            "error": "external product implementation blocked by setup/credential: APP_STORE_CONNECT_KEY_ID missing",
+        },
     ]
     for kwargs in setup_cases:
         classification = module.classify_external_incident(**kwargs)
