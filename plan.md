@@ -1,34 +1,44 @@
-# Gate Verifier Actionable Refill Plan
+# Watch Implementation Visibility Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:systematic-debugging and superpowers:subagent-driven-development. Keep product repo writes inside watch smoke only; controller implementation must not mutate product repo directly.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:systematic-debugging and superpowers:verification-before-completion. This is a controller-only observability fix; do not mutate product repos directly.
 
-**Goal:** When production gates remain blocked, `./harness watch` must not stop at repeated verifier evidence. It should create an actionable correction task for the blocked gates, then bounded watch can process that task or report a concrete setup/operator blocker.
+**Goal:** While `./harness watch` is running a long external implementation transaction, `./harness watch --status` should show useful live progress signals instead of only `implementation-running`.
 
-**Architecture:** Keep gate verification strict. A blocked `goal-gate-verification` receipt is not success; it is input to planner refill. `harness_goal.refill_goal_tasks()` should generate a gate-correction backlog when the current product commit has recent blocked verifier evidence and no executable backlog. Avoid tight verifier hot-loops and keep normal long watch behavior unchanged.
+**Architecture:** Keep transaction execution unchanged. Extend the existing heartbeat payload with derived, secret-free observations from the target sidecar and product git status: elapsed seconds, detected run id, prompt/response file presence, response file size, product dirty count, and a short list of changed product paths. The status writer remains the only status serialization boundary.
 
-**Tech Stack:** Python stdlib, existing task intake, sidecar backlog/progress, pytest.
+**Tech Stack:** Python stdlib, existing `scripts/harness_watch.py`, pytest.
 
-Diet-Exception: gate continuity controller tests require focused regression coverage for blocked verifier correction refill
+Diet-Exception: watch implementation status sidecar module and regression tests require temporary net growth; follow-up diet should split more watch status rendering out of `scripts/harness_watch.py`.
+
+---
+
+## Root Cause Evidence
+
+- 2026-06-01 `chatapp-test` 3-cycle watch spent about 15 minutes inside `external-chatapp-test-rootcontext-20260601-133008`.
+- `watch/latest` heartbeat kept updating, so the loop was alive.
+- Product diffs appeared before implementer completion, but `watch --status` did not show changed files, response file state, or elapsed implementation time.
+- The operator could not distinguish "alive and editing" from "hung waiting for implementer response" without separate `ps`, `git status`, and report-dir inspection.
 
 ## Tasks
 
-- [x] Inspect current blocked verifier evidence and product goal status.
-- [x] Add regression coverage: current-commit blocked verifier creates a `task-repair-gates` correction task instead of another verifier or idle-only state.
-- [x] Implement a single open gate-correction task guard to avoid duplicates.
-- [x] Ensure correction task includes pending gate ids, product audit findings, setup readiness expectations, spec/attachment refs, and safe validation.
-- [x] Keep `--max-cycles` idle exit intact when a recent correction task already exists but cannot run.
-- [x] Correction: add regression coverage for delete+add diffs that Git reports as renames after staging.
-- [x] Correction: compare staged/commit paths with rename detection disabled so implementation evidence remains authoritative.
-- [x] Correction: count applied `backlog-product-push` receipts as publication success so finish recovery clears goal publication blockers.
-- [x] Correction: preserve both source and destination paths when parsing Git rename status.
-- [x] Run focused tests and pre-push guard.
-- [x] Rerun `./harness watch --max-cycles 3 --no-telegram-drain` on `chatapp-test`.
-- [x] Confirm no test/dev server remains and product repo is clean or expected.
+- [x] Add focused tests for heartbeat status metadata:
+  - implementation elapsed seconds is present.
+  - detected run id is present.
+  - implementer prompt/response sidecar paths are relative and secret-free.
+  - product dirty count and changed path preview are present.
+  - status output prints the new metadata.
+- [x] Implement a small status metadata helper in `scripts/harness_watch.py`.
+- [x] Pass metadata through `_implementation_running_status()` and `write_watch_status()`.
+- [x] Render metadata in markdown and CLI `watch --status`.
+- [x] Run focused tests:
+  - `python3 -m pytest tests/test_harness_watch_status.py tests/test_harness_watch.py tests/test_harness_export.py -q`
+  - `python3 -m pytest tests/test_harness_cli.py -q`
+- [x] Run full guard:
+  - `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
 
-## Review Checklist
+## Non-Goals
 
-- [x] No fake production pass is introduced.
-- [x] Gate verifier blocked evidence leads to work, not repeated verifier-only loops.
-- [x] Duplicate correction tasks are not generated while one is open.
-- [x] External setup blockers remain visible as setup/operator waits.
-- [x] Final report includes a <=5-line summary.
+- Do not change Codex implementer execution.
+- Do not add hard timeout in this PR.
+- Do not mark long implementation as failed only because it is silent.
+- Do not expose absolute paths, secret values, env contents, or full diffs in watch status.
