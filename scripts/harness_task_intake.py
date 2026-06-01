@@ -122,6 +122,12 @@ GAMEPLAY_SCOPE_PATTERN = re.compile(
     r"|게임|플레이|플레이어|인원|혼자|[12]\s*인|한\s*명|두\s*명|최소|로비|매치"
 )
 GAMEPLAY_SCOPE_CANDIDATES = ("server/**", "client/**", "src/**", "tests/**", "public/**")
+PROVIDER_AI_SCOPE_PATTERN = re.compile(
+    r"(?i)(?:/api/ai/reply|provider-test|openai|responses api|ai\s+reply|ai\s+chat|ai\s+응답|ai\s+채팅|AI\s*응답|AI\s*채팅)"
+)
+MIGRATION_SCOPE_PATTERN = re.compile(r"(?i)(?:supabase/migrations|migration|migrations|마이그레이션|profile_public_id_seq)")
+PROVIDER_AI_SCOPE_CANDIDATES = ("src/**", "tests/**")
+MIGRATION_SCOPE_CANDIDATES = ("supabase/migrations/**",)
 VALIDATION_DENY_PATTERNS = (
     re.compile(r"(^|\s)rm\b", re.IGNORECASE),
     re.compile(r"(^|\s)rm\s+-[A-Za-z]*[rf][A-Za-z]*\s+(?:/|\*|\.|\.\.|[^\n]*\*)", re.IGNORECASE),
@@ -1063,6 +1069,14 @@ def _infer_file_scope_from_text(text: str, *, files: Sequence[str]) -> tuple[str
                 break
     if files and GAMEPLAY_SCOPE_PATTERN.search(text):
         for candidate in GAMEPLAY_SCOPE_CANDIDATES:
+            if _path_exists_in_profile(candidate, files=files, dirs=dirs):
+                candidates.append(candidate)
+    if files and PROVIDER_AI_SCOPE_PATTERN.search(text):
+        for candidate in PROVIDER_AI_SCOPE_CANDIDATES:
+            if _path_exists_in_profile(candidate, files=files, dirs=dirs):
+                candidates.append(candidate)
+    if files and MIGRATION_SCOPE_PATTERN.search(text):
+        for candidate in MIGRATION_SCOPE_CANDIDATES:
             if _path_exists_in_profile(candidate, files=files, dirs=dirs):
                 candidates.append(candidate)
     return tuple(dict.fromkeys(candidates))

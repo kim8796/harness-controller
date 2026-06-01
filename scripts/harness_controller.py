@@ -89,6 +89,7 @@ SECRET_LIKE_ENV_REFERENCE = re.compile(
     r"(?:process\.env|import\.meta\.env)(?:\.[A-Za-z_][A-Za-z0-9_]*|\[['\"][A-Za-z_][A-Za-z0-9_]*['\"]\])!?"
 )
 ENV_NAME_LITERAL = re.compile(r"^[A-Z][A-Z0-9_]{2,}$")
+SAFE_PRODUCT_PLACEHOLDER_LITERAL = re.compile(r"(?i)^(?:demo|provider-test|test|mock|fixture)-(?:session|token|credential)$")
 SIDECAR_DIRS = (
     Path("reports"),
     Path("operator-inbox"),
@@ -2098,8 +2099,10 @@ def _product_secret_value_is_env_name_helper(value: str) -> bool:
 
 
 def _product_secret_value_has_hardcoded_literal(value: str) -> bool:
-    if SECRET_LIKE_PRODUCT_QUOTED_LITERAL.search(value):
-        return True
+    for literal in SECRET_LIKE_PRODUCT_QUOTED_LITERAL.finditer(value):
+        text = str(literal.group("value") or "").strip()
+        if not SAFE_PRODUCT_PLACEHOLDER_LITERAL.fullmatch(text):
+            return True
     text = value.strip().rstrip(",;)}").strip()
     return bool(
         re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{11,}", text)

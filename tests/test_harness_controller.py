@@ -297,6 +297,8 @@ def test_product_diff_policy_allows_env_references_but_rejects_secret_literals(t
                 "const fallbackSecret = process.env.PRIMARY_SECRET ?? process.env.SECONDARY_SECRET;",
                 'const adminConfig = { adminToken: firstEnv(["PRODUCTION_SMOKE_ADMIN_TOKEN", "ADMIN_ACCESS_TOKEN"]) };',
                 'const phoneConfig = { otpToken: requiredEnv(["PRODUCTION_SMOKE_OTP_A", "E2E_OTP_A"]) };',
+                'const session = { access_token: "demo-session" };',
+                'const providerSession = payload.session?.access_token || "provider-test-session";',
             ]
         ),
         encoding="utf-8",

@@ -1,44 +1,28 @@
-# Watch Implementation Visibility Plan
+# Product Diff Placeholder Secret False Positive Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:systematic-debugging and superpowers:verification-before-completion. This is a controller-only observability fix; do not mutate product repos directly.
+## Goal
 
-**Goal:** While `./harness watch` is running a long external implementation transaction, `./harness watch --status` should show useful live progress signals instead of only `implementation-running`.
+`chatapp-test` provider-test 작업이 실제 secret이 아닌 공개 테스트 세션 placeholder 때문에 `product-diff-secret-like-content`로 막히는 문제를 controller에서 고친다.
 
-**Architecture:** Keep transaction execution unchanged. Extend the existing heartbeat payload with derived, secret-free observations from the target sidecar and product git status: elapsed seconds, detected run id, prompt/response file presence, response file size, product dirty count, and a short list of changed product paths. The status writer remains the only status serialization boundary.
+## Changes
 
-**Tech Stack:** Python stdlib, existing `scripts/harness_watch.py`, pytest.
+- product diff scanner가 `demo-session`, `provider-test-session` 같은 공개 테스트/session fixture placeholder를 secret literal로 보지 않게 한다.
+- 실제 hardcoded API key, bearer token, secret fallback literal, secret-like helper literal 차단은 유지한다.
+- regression test를 추가해 placeholder는 허용하고 실제 secret literal은 계속 차단되는지 확인한다.
+- task intake가 provider-test/OpenAI API 버그 요청에서 파일 범위를 놓치지 않게 한다.
+- `/api/ai/reply`, `OpenAI`, `provider-test`, `AI 채팅` 같은 힌트는 `src/**`와 `tests/**`를 추론한다.
+- `migration`, `profile_public_id_seq`, `supabase/migrations` 힌트는 `supabase/migrations/**`를 추론한다.
 
-Diet-Exception: watch implementation status sidecar module and regression tests require temporary net growth; follow-up diet should split more watch status rendering out of `scripts/harness_watch.py`.
+## Validation
 
----
+- `python3 -m pytest tests/test_harness_controller.py -q`
+- `python3 -m pytest tests/test_harness_task_intake.py -q`
+- 수정 후 현재 `chatapp-test` product diff에 `product-diff-secret-like-content`가 사라지는지 확인한다.
+- 그 다음 harness transaction을 재개해 product commit/PR publication까지 다시 시도한다.
 
-## Root Cause Evidence
+## Notes
 
-- 2026-06-01 `chatapp-test` 3-cycle watch spent about 15 minutes inside `external-chatapp-test-rootcontext-20260601-133008`.
-- `watch/latest` heartbeat kept updating, so the loop was alive.
-- Product diffs appeared before implementer completion, but `watch --status` did not show changed files, response file state, or elapsed implementation time.
-- The operator could not distinguish "alive and editing" from "hung waiting for implementer response" without separate `ps`, `git status`, and report-dir inspection.
+- product repo diff는 controller가 이미 생성한 상태로 보존한다.
+- product 파일은 직접 수정하지 않는다.
 
-## Tasks
-
-- [x] Add focused tests for heartbeat status metadata:
-  - implementation elapsed seconds is present.
-  - detected run id is present.
-  - implementer prompt/response sidecar paths are relative and secret-free.
-  - product dirty count and changed path preview are present.
-  - status output prints the new metadata.
-- [x] Implement a small status metadata helper in `scripts/harness_watch.py`.
-- [x] Pass metadata through `_implementation_running_status()` and `write_watch_status()`.
-- [x] Render metadata in markdown and CLI `watch --status`.
-- [x] Run focused tests:
-  - `python3 -m pytest tests/test_harness_watch_status.py tests/test_harness_watch.py tests/test_harness_export.py -q`
-  - `python3 -m pytest tests/test_harness_cli.py -q`
-- [x] Run full guard:
-  - `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
-
-## Non-Goals
-
-- Do not change Codex implementer execution.
-- Do not add hard timeout in this PR.
-- Do not mark long implementation as failed only because it is silent.
-- Do not expose absolute paths, secret values, env contents, or full diffs in watch status.
+Diet-Exception: scripts/harness_controller.py and scripts/harness_task_intake.py hotfix growth is temporary to unblock provider-test AI product transaction; follow-up controller diet should move scanner/intake scope policy helpers out of oversized modules after this bugfix PR.
