@@ -2523,6 +2523,27 @@ def _goal_executable_progress_tasks(state_root: Path, tasks: Sequence[Mapping[st
     return executable
 
 
+def _completed_progress_backlog_ids(state_root: Path, tasks: Sequence[Mapping[str, object]]) -> list[str]:
+    try:
+        backlog_items = harness_loop.discover_backlog_items(state_root)
+    except harness_loop.LoopError:
+        backlog_items = ()
+    items_by_id = {item.item_id: item for item in backlog_items}
+    completed: list[str] = []
+    seen: set[str] = set()
+    for task in tasks:
+        backlog_id = str(task.get("backlog_id") or "").strip()
+        if not backlog_id or backlog_id in seen:
+            continue
+        discovered = items_by_id.get(backlog_id)
+        status = discovered.status if discovered is not None else str(task.get("backlog_status") or "").strip().lower()
+        if status != "completed":
+            continue
+        completed.append(backlog_id)
+        seen.add(backlog_id)
+    return completed
+
+
 def refill_goal_tasks(
     *,
     state_root: Path,
@@ -2621,6 +2642,7 @@ def refill_goal_tasks(
                 message="goal waiting on publication",
             )
         executable = _goal_executable_progress_tasks(state_root, existing_tasks)
+        completed_dependencies = _completed_progress_backlog_ids(state_root, existing_tasks)
         gate_status = goal_payload.get("completion_gate_status") if isinstance(goal_payload.get("completion_gate_status"), Mapping) else {}
         pending_gate_ids = [
             str(item)
@@ -2702,7 +2724,7 @@ def refill_goal_tasks(
                         "labels": ["product", "goal-driven", "production", "gate-correction"],
                         "goal_id": active.goal_id,
                         "milestone_id": "gate-correction",
-                        "depends_on": [str(item.get("backlog_id")) for item in existing_tasks if str(item.get("backlog_id") or "")],
+                        "depends_on": completed_dependencies,
                         "goal_spec_path": str(goal_payload.get("spec_path") or ""),
                         "attachment_manifest_path": str(goal_payload.get("attachment_manifest_path") or ""),
                         "traceability_path": str(goal_payload.get("traceability_path") or ""),
@@ -2839,7 +2861,7 @@ def refill_goal_tasks(
                 "labels": ["product", "goal-driven", "production", "gate-verification"],
                 "goal_id": active.goal_id,
                 "milestone_id": "gate-verification",
-                "depends_on": [str(item.get("backlog_id")) for item in existing_tasks if str(item.get("backlog_id") or "")],
+                "depends_on": completed_dependencies,
                 "goal_spec_path": str(goal_payload.get("spec_path") or ""),
                 "attachment_manifest_path": str(goal_payload.get("attachment_manifest_path") or ""),
                 "traceability_path": str(goal_payload.get("traceability_path") or ""),

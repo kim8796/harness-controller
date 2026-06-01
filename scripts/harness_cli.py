@@ -686,7 +686,8 @@ def _verify_required_files(target_root: Path) -> list[str]:
 
 def _has_executable_backlog(target_root: Path) -> bool:
     items = harness_loop.discover_backlog_items(target_root)
-    return any(item.status == "queued" and item.autonomy_execute == "auto" for item in items)
+    executable_items = [item for item in items if item.status == "queued" and item.autonomy_execute == "auto"]
+    return bool(_dependency_ready_backlog_items(target_root, executable_items, all_items=items))
 
 
 def _select_executable_backlog_plan(state_paths: harness_controller.StatePaths):
