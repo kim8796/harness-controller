@@ -23,6 +23,7 @@ import harness_product_setup_readiness
 import harness_production_gate_verifier
 import harness_release
 import harness_task_intake
+import harness_watch_status
 from harness_autonomy.control import sanitize_for_outbox
 
 
@@ -843,6 +844,21 @@ def _transaction_evidence_run_ids(record: harness_controller.TargetRecord) -> se
         return set()
 
 
+def _implementation_status_metadata(
+    record: harness_controller.TargetRecord,
+    *,
+    run_id: str,
+    started_at_monotonic: float | None,
+) -> Mapping[str, object]:
+    return harness_watch_status.collect_implementation_status(
+        record,
+        run_id=run_id,
+        started_at_monotonic=started_at_monotonic,
+        sidecar_relative=lambda path: watch_sidecar_relative(record, path),
+        redact_text=redact_watch_text,
+    )
+
+
 def _implementation_running_status(
     runtime: WatchRuntime,
     record: harness_controller.TargetRecord,
@@ -851,19 +867,26 @@ def _implementation_running_status(
     processed_count: int,
     idle_count: int,
     baseline_run_ids: set[str],
+    started_at_monotonic: float | None = None,
     phase: str = "implementation-running",
     next_action: str = "implementation running; inspect `./harness watch --status`",
 ) -> None:
     new_run_ids = sorted(_transaction_evidence_run_ids(record) - baseline_run_ids)
+    run_id = new_run_ids[-1] if new_run_ids else ""
     runtime.write_watch_status(
         record,
         phase=phase,
         status="running",
         selected_backlog_id=backlog_id,
-        run_id=new_run_ids[-1] if new_run_ids else "",
+        run_id=run_id,
         processed_count=processed_count,
         idle_count=idle_count,
         next_action=next_action,
+        implementation_status=_implementation_status_metadata(
+            record,
+            run_id=run_id,
+            started_at_monotonic=started_at_monotonic,
+        ),
     )
 
 
@@ -878,6 +901,7 @@ def _start_implementation_status_heartbeat(
     next_action: str = "implementation running; inspect `./harness watch --status`",
 ) -> tuple[threading.Event, threading.Thread]:
     baseline_run_ids = _transaction_evidence_run_ids(record)
+    started_at_monotonic = harness_watch_status.monotonic_seconds()
     stop_event = threading.Event()
 
     def _heartbeat() -> None:
@@ -890,6 +914,7 @@ def _start_implementation_status_heartbeat(
                     processed_count=processed_count,
                     idle_count=idle_count,
                     baseline_run_ids=baseline_run_ids,
+                    started_at_monotonic=started_at_monotonic,
                     phase=phase,
                     next_action=next_action,
                 )
@@ -903,6 +928,7 @@ def _start_implementation_status_heartbeat(
         processed_count=processed_count,
         idle_count=idle_count,
         baseline_run_ids=baseline_run_ids,
+        started_at_monotonic=started_at_monotonic,
         phase=phase,
         next_action=next_action,
     )
@@ -1327,6 +1353,7 @@ def write_watch_status(
     processed_count: int = 0,
     idle_count: int = 0,
     operator_wait: Mapping[str, object] | None = None,
+    implementation_status: Mapping[str, object] | None = None,
 ) -> Mapping[str, object]:
     json_path, md_path = watch_status_paths(record)
     watch_dir = json_path.parent
@@ -1361,6 +1388,8 @@ def write_watch_status(
         "json_path": watch_sidecar_relative(record, json_path),
         "markdown_path": watch_sidecar_relative(record, md_path),
     }
+    if implementation_status:
+        payload["implementation_status"] = dict(implementation_status)
     goal_payload = watch_active_goal_payload(record)
     gate_summary = _goal_gate_summary_from_payload(goal_payload)
     if gate_summary:
@@ -1455,6 +1484,9 @@ def render_watch_status_markdown(payload: Mapping[str, object]) -> str:
                 "",
             ]
         )
+    implementation = payload.get("implementation_status")
+    if isinstance(implementation, Mapping):
+        lines.extend(harness_watch_status.implementation_markdown_lines(implementation, current_run_id=value("run_id", "none")))
     gate_status = payload.get("goal_gate_status")
     if isinstance(gate_status, Mapping) and int(gate_status.get("required_count") or 0):
         pending_ids = gate_status.get("pending_gate_ids")
@@ -1632,6 +1664,9 @@ def print_watch_status(record: harness_controller.TargetRecord) -> int:
             print(f"  - reason: {reason}")
         print(f"  - deadline: `{wait_payload.get('deadline_at') or payload.get('operator_wait_deadline_at') or 'unknown'}`")
         print(f"  - next: {wait_payload.get('next_action') or payload.get('operator_wait_next_action') or 'none'}")
+    implementation = payload.get("implementation_status")
+    if isinstance(implementation, Mapping):
+        harness_watch_status.print_implementation_status(implementation, current_run_id=payload.get("run_id") or "none")
     current_transaction_visible = any(payload.get(key) for key in ("selected_backlog_id", "run_id", "transaction_status"))
     if (not current_transaction_visible or bool(wait_id)) and any(
         payload.get(key)

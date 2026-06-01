@@ -180,10 +180,16 @@ def test_export_bundle_copies_sources_and_writes_readme(tmp_path: Path) -> None:
     assert (bundle_dir / "tests" / "test_harness_release.py").read_text(encoding="utf-8") == (
         "tests/test_harness_release.py\n"
     )
+    assert (bundle_dir / "tests" / "test_harness_watch_status.py").read_text(encoding="utf-8") == (
+        "tests/test_harness_watch_status.py\n"
+    )
     assert (bundle_dir / "scripts" / "harness_task_cli.py").read_text(encoding="utf-8") == (
         "scripts/harness_task_cli.py\n"
     )
     assert (bundle_dir / "scripts" / "harness_watch.py").read_text(encoding="utf-8") == "scripts/harness_watch.py\n"
+    assert (bundle_dir / "scripts" / "harness_watch_status.py").read_text(encoding="utf-8") == (
+        "scripts/harness_watch_status.py\n"
+    )
     assert (bundle_dir / "scripts" / "harness_controller.py").read_text(encoding="utf-8") == (
         "scripts/harness_controller.py\n"
     )
@@ -488,6 +494,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "tests" / "test_harness_telegram_setup.py").exists()
     assert (bundle / "tests" / "test_harness_task_cli.py").exists()
     assert (bundle / "tests" / "test_harness_watch.py").exists()
+    assert (bundle / "tests" / "test_harness_watch_status.py").exists()
     assert (bundle / "tests" / "test_redis_relay.py").exists()
     assert (bundle / "docs" / "harness" / "releases" / "v1.8.8.md").exists()
     assert (bundle / "docs" / "harness" / "releases" / "v1.8.9.md").exists()

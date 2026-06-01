@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import time
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -1000,6 +1001,59 @@ def test_command_run_marks_status_gate_verifier_running_for_gate_backlog(tmp_pat
     assert module.command_run(args, runtime) == 2
     assert observed["phase"] == "gate-verifier-running"
     assert "gate verifier running" in observed["next_action"]
+
+
+def test_implementation_running_status_exposes_live_progress_metadata(tmp_path, capsys) -> None:
+    module = _load_module()
+    module.ERROR_CLASS = RuntimeError
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    state_root = controller / "targets" / "demo"
+    state_root.mkdir(parents=True)
+    _init_product_repo(product)
+    (product / "src").mkdir()
+    (product / "src" / "app.js").write_text("console.log('changed')\n", encoding="utf-8")
+    (product / ".env.local").write_text("OPENAI_API_KEY=sk-secret\n", encoding="utf-8")
+    report_dir = state_root / "reports" / "harness-autonomy" / "external-demo-rootcontext-1"
+    report_dir.mkdir(parents=True)
+    (report_dir / "implementer-prompt.md").write_text("prompt\n", encoding="utf-8")
+    (report_dir / "implementer-response.md").write_text("response\n", encoding="utf-8")
+    record = SimpleNamespace(target_id="demo", repo=product, state_root=state_root)
+    runtime = SimpleNamespace(write_watch_status=module.write_watch_status)
+
+    module._implementation_running_status(
+        runtime,
+        record,
+        backlog_id="BL-one",
+        processed_count=1,
+        idle_count=0,
+        baseline_run_ids=set(),
+        started_at_monotonic=time.monotonic() - 65,
+    )
+
+    json_path = state_root / "watch" / "latest.json"
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    implementation = payload["implementation_status"]
+    assert implementation["run_id"] == "external-demo-rootcontext-1"
+    assert implementation["elapsed_seconds"] >= 60
+    assert implementation["report_dir"] == "reports/harness-autonomy/external-demo-rootcontext-1"
+    assert implementation["prompt_exists"] is True
+    assert implementation["response_exists"] is True
+    assert implementation["response_size_bytes"] == len("response\n")
+    assert implementation["product_dirty_count"] == 2
+    assert "src/app.js" in implementation["product_changed_paths"]
+    assert "<redacted-path>" in implementation["product_changed_paths"]
+    status_text = json_path.read_text(encoding="utf-8")
+    assert str(tmp_path) not in status_text
+    assert ".env.local" not in status_text
+    assert "sk-secret" not in status_text
+
+    module.print_watch_status(record)
+    output = capsys.readouterr().out
+    assert "- implementation:" in output
+    assert "elapsed:" in output
+    assert "changed paths:" in output
+    assert "src/app.js" in output
 
 
 def test_command_run_stops_heartbeat_before_terminal_failure_status(tmp_path) -> None:
