@@ -299,6 +299,10 @@ def test_product_diff_policy_allows_env_references_but_rejects_secret_literals(t
                 'const phoneConfig = { otpToken: requiredEnv(["PRODUCTION_SMOKE_OTP_A", "E2E_OTP_A"]) };',
                 'const session = { access_token: "demo-session" };',
                 'const providerSession = payload.session?.access_token || "provider-test-session";',
+                "NEXT_PUBLIC_SUPABASE_ANON_KEY=your-supabase-anon-key",
+                "SUPABASE_SERVICE_ROLE_KEY=replace-with-service-role-key",
+                "OPENAI_API_KEY=<openai-api-key>",
+                "ADMIN_ACCESS_TOKEN=placeholder",
             ]
         ),
         encoding="utf-8",
