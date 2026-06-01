@@ -616,6 +616,169 @@ def test_watch_status_prints_operator_wait_plus_last_transaction(tmp_path, capsy
     assert "credential-blocked" in output
 
 
+def test_load_watch_status_suppresses_wait_for_completed_backlog(tmp_path, capsys) -> None:
+    module = _load_module()
+    module.ERROR_CLASS = RuntimeError
+    record = SimpleNamespace(target_id="demo", state_root=tmp_path / "targets" / "demo")
+    record.state_root.mkdir(parents=True)
+    completed = record.state_root / "backlog" / "completed" / "BL-done.md"
+    completed.parent.mkdir(parents=True)
+    completed.write_text("ID: BL-done\nStatus: completed\n", encoding="utf-8")
+
+    module.write_watch_status(
+        record,
+        phase="operator-wait",
+        status="operator-wait",
+        selected_backlog_id="BL-done",
+        run_id="run-done",
+        transaction_status="operator-approval",
+        pending_reason="approval required",
+        next_action="Reply `approved` or rerun",
+        operator_wait={
+            "id": "approval-wait-BL-done-run-done",
+            "wait_class": "approval-wait",
+            "status": "waiting",
+            "backlog_id": "BL-done",
+            "run_id": "run-done",
+            "reason": "old policy blocker",
+            "deadline_at": "2026-05-18T00:15:00",
+            "next_action": "Reply `approved` or rerun",
+        },
+    )
+
+    payload = module.load_watch_status(record)
+
+    assert payload is not None
+    assert payload["phase"] == "stale-operator-wait-cleared"
+    assert payload["status"] == "idle"
+    assert payload["selected_backlog_id"] == ""
+    assert payload["transaction_status"] == ""
+    assert payload["last_selected_backlog_id"] == "BL-done"
+    assert payload["last_run_id"] == "run-done"
+    assert payload["last_transaction_status"] == "operator-approval"
+    assert payload["stale_operator_wait_cleared"] is True
+    assert "operator_wait" not in payload
+    assert "operator_wait_status" not in payload
+    assert "approval required" not in str(payload.get("pending_reason") or "")
+
+    assert module.print_watch_status(record) == 0
+    output = capsys.readouterr().out
+    assert "- operator wait:" not in output
+    assert "approval-wait-BL-done-run-done" not in output
+    assert "- last transaction:" in output
+    assert "BL-done" in output
+
+
+def test_load_watch_status_keeps_wait_for_unfinished_backlog(tmp_path) -> None:
+    module = _load_module()
+    module.ERROR_CLASS = RuntimeError
+    record = SimpleNamespace(target_id="demo", state_root=tmp_path / "targets" / "demo")
+    record.state_root.mkdir(parents=True)
+    queued = record.state_root / "backlog" / "queued" / "BL-wait.md"
+    queued.parent.mkdir(parents=True)
+    queued.write_text("ID: BL-wait\nStatus: queued\n", encoding="utf-8")
+
+    module.write_watch_status(
+        record,
+        phase="operator-wait",
+        status="operator-wait",
+        selected_backlog_id="BL-wait",
+        run_id="run-wait",
+        transaction_status="operator-approval",
+        pending_reason="approval required",
+        operator_wait={
+            "id": "approval-wait-BL-wait-run-wait",
+            "wait_class": "approval-wait",
+            "status": "waiting",
+            "backlog_id": "BL-wait",
+            "run_id": "run-wait",
+            "reason": "policy blocker",
+            "deadline_at": "2026-05-18T00:15:00",
+            "next_action": "Reply `approved` or rerun",
+        },
+    )
+
+    payload = module.load_watch_status(record)
+
+    assert payload is not None
+    assert payload["phase"] == "operator-wait"
+    assert payload["status"] == "operator-wait"
+    assert payload["operator_wait"]["id"] == "approval-wait-BL-wait-run-wait"
+    assert "stale_operator_wait_cleared" not in payload
+
+
+def test_load_watch_status_keeps_setup_wait_for_completed_backlog(tmp_path) -> None:
+    module = _load_module()
+    module.ERROR_CLASS = RuntimeError
+    record = SimpleNamespace(target_id="demo", state_root=tmp_path / "targets" / "demo")
+    record.state_root.mkdir(parents=True)
+    completed = record.state_root / "backlog" / "completed" / "BL-published.md"
+    completed.parent.mkdir(parents=True)
+    completed.write_text("ID: BL-published\nStatus: completed\n", encoding="utf-8")
+
+    module.write_watch_status(
+        record,
+        phase="operator-wait",
+        status="operator-wait",
+        selected_backlog_id="BL-published",
+        run_id="run-published",
+        transaction_status="credential-blocked",
+        operator_wait={
+            "id": "setup-wait-BL-published-run-published",
+            "wait_class": "setup-wait",
+            "status": "waiting",
+            "backlog_id": "BL-published",
+            "run_id": "run-published",
+            "reason": "GitHub credential missing",
+            "deadline_at": "2026-05-18T00:15:00",
+            "next_action": "run `gh auth status`",
+        },
+    )
+
+    payload = module.load_watch_status(record)
+
+    assert payload is not None
+    assert payload["phase"] == "operator-wait"
+    assert payload["operator_wait"]["id"] == "setup-wait-BL-published-run-published"
+    assert "stale_operator_wait_cleared" not in payload
+
+
+def test_load_watch_status_keeps_goal_level_wait_despite_completed_last_backlog(tmp_path) -> None:
+    module = _load_module()
+    module.ERROR_CLASS = RuntimeError
+    record = SimpleNamespace(target_id="demo", state_root=tmp_path / "targets" / "demo")
+    record.state_root.mkdir(parents=True)
+    completed = record.state_root / "backlog" / "completed" / "BL-last.md"
+    completed.parent.mkdir(parents=True)
+    completed.write_text("ID: BL-last\nStatus: completed\n", encoding="utf-8")
+
+    module.write_watch_status(
+        record,
+        phase="operator-wait",
+        status="operator-wait",
+        selected_backlog_id="BL-last",
+        transaction_status="credential-blocked",
+        operator_wait={
+            "id": "setup-wait-gate",
+            "wait_class": "setup-wait",
+            "status": "waiting",
+            "reason": "Supabase env missing",
+            "deadline_at": "2026-05-18T00:15:00",
+            "next_action": "set provider env",
+            "context": {
+                "run_id": "production-gate-verifier-demo",
+                "blocked_gate_ids": ["database_persistence"],
+            },
+        },
+    )
+
+    payload = module.load_watch_status(record)
+
+    assert payload is not None
+    assert payload["operator_wait"]["id"] == "setup-wait-gate"
+    assert "stale_operator_wait_cleared" not in payload
+
+
 def test_watch_status_recovers_last_transaction_from_pr_receipt(tmp_path, capsys) -> None:
     module = _load_module()
     module.ERROR_CLASS = RuntimeError
