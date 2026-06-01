@@ -186,6 +186,15 @@ _SETUP_WAIT_PATTERNS = (
     r"\bmissing\s+(?:required\s+)?(?:env|environment|variable)\b",
     r"\brequired\s+(?:env|environment|variable)\b",
     r"\.env\s+(?:missing|required|not found)\b",
+    r"\bapp\s+store\s+connect\b",
+    r"\bapple\s+developer\b",
+    r"\bgoogle\s+play\b",
+    r"\bplay\s+console\b",
+    r"\bsigning\b",
+    r"\bprovisioning\b",
+    r"\bteam[_ -]?id\b",
+    r"\bservice\s+account\b",
+    r"\b(app_store_connect|apple_developer|google_play|google_play_service_account)\b",
 )
 _EXTERNAL_WAIT_PATTERNS = (
     r"\btimeout\b",

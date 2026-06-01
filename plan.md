@@ -1,27 +1,26 @@
-# Stale Operator Wait Completion Plan
+# Setup Blocker No-Diff Operator Wait Plan
 
 ## Goal
 
-`./harness watch --status`가 이미 완료된 backlog에 묶인 과거 operator-wait를 active blocker처럼 보여주는 문제를 고친다.
+외부 credential/provider setup이 없어서 product diff를 만들 수 없는 경우, `watch`가 같은 repair task를 반복하지 않고 `setup-wait`로 수렴하게 한다.
 
 ## Root Cause
 
-- `watch/latest.json`은 마지막 transaction 상태를 그대로 보존한다.
-- 과거 transaction이 `operator-wait`였고 이후 같은 backlog가 `backlog/completed`로 이동해도 status loader가 wait를 재검증하지 않는다.
-- 그 결과 product diff가 commit/PR/merge까지 끝난 뒤에도 stale `approval-wait`가 현재 루프 blocker처럼 표시된다.
+- product implementer prompt는 “missing credentials/external services면 파일을 바꾸지 말고 blocker를 보고하라”고 지시한다.
+- 하지만 external implementation plumbing은 no-diff를 무조건 `external product implementation made no product diff`로 축약한다.
+- 이 과정에서 `App Store Connect`, `Google Play`, provider credential 같은 원인 문장이 사라져 incident/operator-wait classifier가 `setup-wait`로 분류하지 못한다.
 
 ## Changes
 
-- `scripts/harness_watch.py`에 completed backlog 판정 helper를 추가한다.
-- `load_watch_status()`가 status를 반환하기 전에 operator-wait를 정리한다.
-- wait의 `backlog_id`가 completed backlog로 확인되면 현재 `operator_wait*`, `pending_reason`, active transaction fields는 숨기고 last transaction에는 기존 추적 정보를 남긴다.
-- setup/readiness gate wait는 completed backlog에 묶인 경우에만 숨긴다. backlog가 없거나 아직 queued/active이면 기존 동작을 유지한다.
-- product repo 파일은 수정하지 않는다.
+- `scripts/harness_autonomy/core.py`에서 implementation no-diff 시 implementer response를 검사한다.
+- response가 credential/provider/setup blocker면 `external product implementation blocked by setup/credential: ...` 형태로 원인을 보존해 raise한다.
+- `scripts/harness_incident.py`의 setup classifier를 watch regex와 맞춰 App Store/Google Play/signing/provisioning/team id도 setup-wait로 본다.
+- tests로 no-diff setup blocker가 일반 반복 실패가 아니라 setup blocker로 노출되는지 확인한다.
 
 ## Validation
 
-- `python3 -m pytest tests/test_harness_watch.py -q`
+- `python3 -m pytest tests/test_harness_cli.py tests/test_harness_incident.py tests/test_harness_watch.py -q`
 - `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
-- 수정 후 `./harness watch --status`에서 stale wait가 사라지고, `./harness watch --max-cycles 3 --no-telegram-drain`이 다음 gate 흐름으로 진행되는지 확인한다.
+- 수정 후 `./harness watch --max-cycles 3 --no-telegram-drain`이 같은 no-diff repair를 반복하지 않고 setup/operator blocker로 수렴하는지 확인한다.
 
-Diet-Exception: `scripts/harness_watch.py`에 status sanitization helper만 추가한다. operator-wait lifecycle 전체 리팩터링은 이번 hotfix 범위가 아니다.
+Diet-Exception: no-diff loop hotfix로 classifier와 external plumbing에만 최소 helper/test를 추가한다.

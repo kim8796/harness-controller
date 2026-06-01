@@ -6469,6 +6469,59 @@ def test_external_target_run_execute_backlog_once_failed_before_write_reports_no
     ).stdout == ""
 
 
+def test_external_target_run_implementation_no_diff_preserves_setup_blocker(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    product.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=product, check=True, text=True, capture_output=True, env=_git_env())
+    (product / "README.md").write_text("# Product\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=product, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=product, check=True, env=_git_env())
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.5")
+
+    assert module.main(["target", "add", "demo", "--repo", str(product)]) == 0
+    _write_sidecar_backlog(controller)
+    capsys.readouterr()
+
+    command = "printf 'Missing external credentials: APP_STORE_CONNECT_KEY_ID and GOOGLE_PLAY_SERVICE_ACCOUNT_JSON\\n'"
+    assert (
+        module.main(
+            [
+                "target",
+                "run",
+                "demo",
+                "--implement-backlog-once",
+                "--runner",
+                "custom",
+                "--command-template",
+                command,
+            ]
+        )
+        == 2
+    )
+    output = capsys.readouterr().out
+    smoke_body = (controller / "targets" / "demo" / "reports" / "target-run-latest.md").read_text(encoding="utf-8")
+
+    assert "external product implementation blocked by setup/credential" in output
+    assert "Missing external credentials" in output
+    assert "target-no-product-diff" in output
+    assert "external-state-plumbing-failed" in output
+    assert "Result: `blocked`" in smoke_body
+    assert subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=product,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=_git_env(),
+    ).stdout == ""
+
+
 def test_external_target_run_execute_backlog_once_preexisting_tracked_smoke_file_reports_no_diff(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
