@@ -1,28 +1,25 @@
-# Product Diff Placeholder Secret False Positive Plan
+# Production Readiness Gate Probe Plan
 
 ## Goal
 
-`chatapp-test` provider-test 작업이 실제 secret이 아닌 공개 테스트 세션 placeholder 때문에 `product-diff-secret-like-content`로 막히는 문제를 controller에서 고친다.
+`chatapp-test` production 배포와 `/api/health` readiness가 통과했는데도 하네스 production gate verifier가 `deployed_url` gate를 blocked로 남기는 문제를 controller에서 고친다.
 
 ## Changes
 
-- product diff scanner가 `demo-session`, `provider-test-session` 같은 공개 테스트/session fixture placeholder를 secret literal로 보지 않게 한다.
-- 실제 hardcoded API key, bearer token, secret fallback literal, secret-like helper literal 차단은 유지한다.
-- regression test를 추가해 placeholder는 허용하고 실제 secret literal은 계속 차단되는지 확인한다.
-- task intake가 provider-test/OpenAI API 버그 요청에서 파일 범위를 놓치지 않게 한다.
-- `/api/ai/reply`, `OpenAI`, `provider-test`, `AI 채팅` 같은 힌트는 `src/**`와 `tests/**`를 추론한다.
-- `migration`, `profile_public_id_seq`, `supabase/migrations` 힌트는 `supabase/migrations/**`를 추론한다.
+- product repo에 `npm run production:readiness`가 있고 setup readiness가 충족된 경우, verifier가 이를 secret-free production probe로 실행한다.
+- readiness 결과가 `ready=true`이고 deployment smoke가 passed이면 `deployed_url` gate만 passed receipt로 기록한다.
+- Supabase/OpenAI health configured는 배포 health의 일부로만 기록하고, DB persistence/auth/realtime/AI reply 같은 기능 gate는 별도 production-safe probe 없이는 계속 blocked로 둔다.
+- `.env.local` 등 ignored product env는 하네스가 읽어 process env로 넘기되, generated evidence에는 key/value를 남기지 않는다.
+- timeout, missing script, JSON parse 실패, readiness 실패는 pass가 아니라 blocked로 남긴다.
 
 ## Validation
 
-- `python3 -m pytest tests/test_harness_controller.py -q`
-- `python3 -m pytest tests/test_harness_task_intake.py -q`
-- 수정 후 현재 `chatapp-test` product diff에 `product-diff-secret-like-content`가 사라지는지 확인한다.
-- 그 다음 harness transaction을 재개해 product commit/PR publication까지 다시 시도한다.
+- `python3 -m pytest tests/test_harness_production_gate_verifier.py -q`
+- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+- 수정 후 `./harness watch --max-cycles 1 --no-telegram-drain`을 다시 실행해 `deployed_url`이 passed로 승격되는지 확인한다.
 
 ## Notes
 
-- product repo diff는 controller가 이미 생성한 상태로 보존한다.
 - product 파일은 직접 수정하지 않는다.
-
-Diet-Exception: scripts/harness_controller.py and scripts/harness_task_intake.py hotfix growth is temporary to unblock provider-test AI product transaction; follow-up controller diet should move scanner/intake scope policy helpers out of oversized modules after this bugfix PR.
+- 이번 PR은 `deployed_url` 흡수만 해결한다. 나머지 production/native gate는 실제 기능 probe가 생기기 전까지 완료 처리하지 않는다.
+Diet-Exception: `scripts/harness_goal.py`, `scripts/harness_watch.py`, and related tests grow in this hotfix because the controller must both generate production readiness evidence and display live refreshed gate status without a larger refactor. Follow-up diet should move gate evidence collection/status projection into a cohesive small module and split the large goal/watch tests after this blocking production gate receipt bug is fixed.

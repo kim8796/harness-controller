@@ -996,6 +996,7 @@ def _goal_gate_summary_from_payload(payload: Mapping[str, object]) -> Mapping[st
         "pending_count": len(pending) if isinstance(pending, list) else 0,
         "passed_count": len(passed) if isinstance(passed, list) else 0,
         "pending_gate_ids": [str(item) for item in pending] if isinstance(pending, list) else [],
+        "passed_gate_ids": [str(item) for item in passed] if isinstance(passed, list) else [],
         "product_standard": str(
             (payload.get("goal_contract") or {}).get("product_standard")
             if isinstance(payload.get("goal_contract"), Mapping)
@@ -1067,6 +1068,34 @@ def _active_setup_operator_wait(
     return None
 
 
+def _product_has_package_script(product_root: Path, script_name: str) -> bool:
+    package_path = product_root / "package.json"
+    if not package_path.exists() or package_path.is_symlink() or not package_path.is_file():
+        return False
+    try:
+        payload = json.loads(package_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    scripts = payload.get("scripts") if isinstance(payload, Mapping) else None
+    return isinstance(scripts, Mapping) and script_name in scripts
+
+
+def _has_ready_default_gate_probe(
+    record: harness_controller.TargetRecord,
+    *,
+    pending_gate_ids: Sequence[str],
+    setup_readiness: Mapping[str, object],
+) -> bool:
+    pending_set = {str(gate_id) for gate_id in pending_gate_ids if str(gate_id)}
+    missing = setup_readiness.get("missing_gate_ids")
+    missing_set = {str(gate_id) for gate_id in missing} if isinstance(missing, list) else set()
+    return (
+        "deployed_url" in pending_set
+        and "deployed_url" not in missing_set
+        and _product_has_package_script(record.repo, "production:readiness")
+    )
+
+
 def _operator_wait_from_summary(
     record: harness_controller.TargetRecord,
     wait: Mapping[str, object],
@@ -1113,7 +1142,13 @@ def _run_idle_goal_gate_verifier(
         return None
     if str(setup_readiness.get("status") or "") != "missing-setup":
         return None
-    active_wait = _active_setup_operator_wait(record, pending_gate_ids=pending_gate_ids)
+    active_wait = None
+    if not _has_ready_default_gate_probe(
+        record,
+        pending_gate_ids=pending_gate_ids,
+        setup_readiness=setup_readiness,
+    ):
+        active_wait = _active_setup_operator_wait(record, pending_gate_ids=pending_gate_ids)
     if active_wait:
         return {
             "status": "operator-wait",
@@ -1581,6 +1616,7 @@ def load_watch_status(record: harness_controller.TargetRecord) -> Mapping[str, o
     safe = watch_safe_value(payload)
     if not isinstance(safe, Mapping):
         raise _error("watch status JSON 형식이 올바르지 않습니다")
+    safe = _enrich_watch_status_with_live_goal(record, safe)
     if not any(safe.get(key) for key in ("selected_backlog_id", "run_id", "transaction_status")) and not any(
         safe.get(key)
         for key in (
@@ -1598,6 +1634,35 @@ def load_watch_status(record: harness_controller.TargetRecord) -> Mapping[str, o
         if isinstance(enriched_safe, Mapping):
             return enriched_safe
     return safe
+
+
+def _enrich_watch_status_with_live_goal(
+    record: harness_controller.TargetRecord,
+    payload: Mapping[str, object],
+) -> Mapping[str, object]:
+    try:
+        status = harness_goal.status_payload(state_root=record.state_root)
+    except harness_goal.GoalError:
+        return payload
+    goal_payload = status.get("goal") if isinstance(status.get("goal"), Mapping) else {}
+    if not goal_payload:
+        return payload
+    enriched = dict(payload)
+    gate_summary = _goal_gate_summary_from_payload(goal_payload)
+    if gate_summary:
+        enriched["goal_gate_status"] = gate_summary
+        gate_next_action = _goal_gate_next_action(gate_summary)
+        if gate_next_action:
+            enriched["goal_gate_next_action"] = gate_next_action
+    setup_readiness = _watch_setup_readiness(record, goal_payload)
+    enriched["setup_readiness"] = setup_readiness
+    enriched["release_state"] = _watch_release_state(
+        record,
+        goal_payload=goal_payload,
+        gate_summary=gate_summary,
+        setup_readiness=setup_readiness,
+    )
+    return enriched
 
 
 def print_watch_status(record: harness_controller.TargetRecord) -> int:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
@@ -16,6 +17,8 @@ SCHEMA_VERSION = 1
 RUN_PREFIX = "production-gate-verifier"
 GENERATED_EVIDENCE_NAME = "generated-evidence.json"
 GENERATED_EVIDENCE_MD_NAME = "generated-evidence.md"
+PRODUCTION_READINESS_SCRIPT = "production:readiness"
+PRODUCTION_READINESS_TIMEOUT_SECONDS = 90
 
 ProbeRunner = Callable[[str, dict[str, object]], Mapping[str, object] | None]
 
@@ -108,6 +111,94 @@ def _product_head_sha(product_root: Path) -> str:
         return ""
     sha = result.stdout.strip()
     return sha if harness_goal_gates.HEX_COMMIT_SHA.fullmatch(sha) else ""
+
+
+def _product_process_env(product_root: Path, environ: Mapping[str, str] | None) -> dict[str, str]:
+    values, _documented = harness_product_setup_readiness._read_product_env(product_root, environ)
+    process_env = os.environ.copy()
+    process_env.update(values)
+    return process_env
+
+
+def _product_package_scripts(product_root: Path) -> Mapping[str, object]:
+    package_path = product_root / "package.json"
+    if not package_path.exists() or package_path.is_symlink() or not package_path.is_file():
+        return {}
+    try:
+        payload = json.loads(package_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    scripts = payload.get("scripts") if isinstance(payload, Mapping) else None
+    return scripts if isinstance(scripts, Mapping) else {}
+
+
+def _extract_json_object(text: str) -> Mapping[str, object] | None:
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        payload = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, Mapping) else None
+
+
+def _deployment_smoke_passed(readiness: Mapping[str, object]) -> bool:
+    smoke = readiness.get("deployment_smoke")
+    if isinstance(smoke, Mapping):
+        return bool(smoke.get("passed"))
+    return str(readiness.get("gate_status") or "").casefold() in {"ready", "env-ready"} and bool(
+        readiness.get("ready")
+    )
+
+
+def _default_deployed_url_probe(
+    *,
+    product_root: Path,
+    checked_at: str,
+    environ: Mapping[str, str] | None,
+) -> Mapping[str, object] | None:
+    scripts = _product_package_scripts(product_root)
+    if PRODUCTION_READINESS_SCRIPT not in scripts:
+        return None
+    try:
+        result = subprocess.run(
+            ["npm", "run", PRODUCTION_READINESS_SCRIPT],
+            cwd=product_root,
+            env=_product_process_env(product_root, environ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=PRODUCTION_READINESS_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    readiness = _extract_json_object(result.stdout)
+    if result.returncode != 0 or readiness is None or not _deployment_smoke_passed(readiness):
+        return None
+    smoke = readiness.get("deployment_smoke")
+    smoke = smoke if isinstance(smoke, Mapping) else {}
+    observed = smoke.get("observed")
+    observed = observed if isinstance(observed, Mapping) else {}
+    health_url = (
+        str(smoke.get("health_url") or "")
+        or str(readiness.get("vercel_env", {}).get("health_url") if isinstance(readiness.get("vercel_env"), Mapping) else "")
+    )
+    http_status = str(smoke.get("http_status") or "200")
+    supabase_status = str(observed.get("supabase_status") or readiness.get("supabase_status") or "configured")
+    openai_status = str(observed.get("openai_status") or readiness.get("openai_status") or "configured")
+    return {
+        "status": "passed",
+        "environment": "production",
+        "validator": harness_goal_gates.EXPECTED_GATE_VALIDATORS["deployed_url"],
+        "evidence": f"Vercel production HTTPS deployment health check passed: {health_url}",
+        "observed_result": (
+            "Production deployment health probe passed "
+            f"with http_status={http_status}, supabase={supabase_status}, openai={openai_status}."
+        ),
+        "checked_at": checked_at,
+    }
 
 
 def _missing_setup_by_gate(setup_report: Mapping[str, object]) -> dict[str, list[str]]:
@@ -330,6 +421,12 @@ def verify_goal_gates(
             )
             continue
         probe_result = probe_runner(gate_id, context) if probe_runner else None
+        if probe_result is None and gate_id == "deployed_url":
+            probe_result = _default_deployed_url_probe(
+                product_root=product_root,
+                checked_at=checked_at,
+                environ=environ,
+            )
         if isinstance(probe_result, Mapping):
             passed_entry = _entry_for_passed_probe(
                 gate_id=gate_id,

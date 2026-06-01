@@ -224,6 +224,77 @@ def test_prepared_probe_creates_schema_v2_passed_receipt(tmp_path: Path) -> None
     assert "sk-test-secret" not in json.dumps(payload, ensure_ascii=False)
 
 
+def test_deployed_url_uses_product_production_readiness_probe(tmp_path: Path) -> None:
+    module = _load_module()
+    product = tmp_path / "product"
+    _init_product(product)
+    (product / "scripts").mkdir()
+    (product / "scripts" / "production-readiness.mjs").write_text(
+        "\n".join(
+            [
+                "const url = process.env.APP_URL;",
+                "console.log(JSON.stringify({",
+                "  ready: true,",
+                "  gate_status: 'ready',",
+                "  deployment_smoke: {",
+                "    passed: true,",
+                "    health_url: `${url}/api/health`,",
+                "    http_status: 200,",
+                "    observed: {",
+                "      supabase_status: 'reachable',",
+                "      openai_status: 'configured'",
+                "    }",
+                "  }",
+                "}));",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (product / "package.json").write_text(
+        '{"scripts":{"production:readiness":"node scripts/production-readiness.mjs"}}\n',
+        encoding="utf-8",
+    )
+    (product / ".env.local").write_text(
+        "\n".join(
+            [
+                "VERCEL_PROJECT_ID=prj_demo",
+                "APP_URL=https://chatapp.example.test",
+                "NEXT_PUBLIC_SUPABASE_URL=https://db.example.test",
+                "NEXT_PUBLIC_SUPABASE_ANON_KEY=anon-demo",
+                "SUPABASE_SERVICE_ROLE_KEY=service-role-demo",
+                "OPENAI_API_KEY=sk-test-secret-should-redact",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "package.json", "scripts/production-readiness.mjs"], cwd=product, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add production readiness"],
+        cwd=product,
+        check=True,
+        stdout=subprocess.PIPE,
+    )
+
+    result = module.verify_goal_gates(
+        product_root=product,
+        state_root=_state_root(tmp_path),
+        target_id="demo",
+        goal_id="goal-1",
+        goal_payload=_goal_payload("deployed_url", "production_e2e_smoke"),
+        environ={},
+    )
+
+    assert result["status"] == "blocked"
+    assert result["passed_gate_ids"] == ["deployed_url"]
+    assert result["blocked_gate_ids"] == ["production_e2e_smoke"]
+    entry = next(item for item in result["completion_gates"] if item["gate_id"] == "deployed_url")
+    assert entry["status"] == "passed"
+    assert entry["validator"] == "https_deployment_probe_v1"
+    serialized = json.dumps(result, ensure_ascii=False)
+    assert "sk-test-secret" not in serialized
+    assert product.as_posix() not in serialized
+
+
 def test_unsafe_probe_evidence_is_blocked_not_passed(tmp_path: Path) -> None:
     module = _load_module()
     product = tmp_path / "product"
