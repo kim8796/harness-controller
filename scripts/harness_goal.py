@@ -683,6 +683,7 @@ def _collect_completion_gate_evidence(
     if not runs_root.exists() or runs_root.is_symlink() or not allowed_gate_ids:
         return {}
     collected: dict[str, object] = {}
+    collected_checked_at: dict[str, str] = {}
     for evidence_path in sorted(runs_root.rglob("generated-evidence.json")):
         if evidence_path.is_symlink():
             continue
@@ -763,7 +764,10 @@ def _collect_completion_gate_evidence(
                 checked_at=checked_at,
             )
             if normalized_entry is not None:
-                collected[normalized_gate_id] = normalized_entry
+                checked_at_text = str(normalized_entry.get("checked_at") or "")
+                if checked_at_text >= collected_checked_at.get(normalized_gate_id, ""):
+                    collected[normalized_gate_id] = normalized_entry
+                    collected_checked_at[normalized_gate_id] = checked_at_text
     return collected
 
 

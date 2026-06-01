@@ -296,6 +296,31 @@ def test_true_idle_gate_verifier_reuses_existing_setup_wait(tmp_path) -> None:
     assert len(verifier_receipts) == 1
 
 
+def test_ready_default_gate_probe_can_bypass_partial_setup_wait(tmp_path) -> None:
+    module = _load_module()
+    product = tmp_path / "product"
+    product.mkdir()
+    (product / "package.json").write_text(
+        '{"scripts":{"production:readiness":"node scripts/production-readiness.mjs"}}\n',
+        encoding="utf-8",
+    )
+    state_root = tmp_path / "targets" / "demo"
+    state_root.mkdir(parents=True)
+    record = SimpleNamespace(target_id="demo", state_root=state_root, repo=product)
+
+    assert module._has_ready_default_gate_probe(
+        record,
+        pending_gate_ids=["deployed_url", "ios_native_build", "android_native_build"],
+        setup_readiness={"missing_gate_ids": ["ios_native_build", "android_native_build"]},
+    ) is True
+
+    assert module._has_ready_default_gate_probe(
+        record,
+        pending_gate_ids=["deployed_url", "ios_native_build", "android_native_build"],
+        setup_readiness={"missing_gate_ids": ["deployed_url", "ios_native_build"]},
+    ) is False
+
+
 def test_true_idle_gate_verifier_ignores_unrelated_and_expired_setup_waits(tmp_path) -> None:
     module = _load_module()
     module.ERROR_CLASS = RuntimeError
@@ -1001,6 +1026,57 @@ def test_command_run_marks_status_gate_verifier_running_for_gate_backlog(tmp_pat
     assert module.command_run(args, runtime) == 2
     assert observed["phase"] == "gate-verifier-running"
     assert "gate verifier running" in observed["next_action"]
+
+
+def test_load_watch_status_refreshes_live_goal_gate_summary(tmp_path, monkeypatch) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    watch_dir = state_root / "watch"
+    watch_dir.mkdir(parents=True)
+    (watch_dir / "latest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "target_id": "demo",
+                "phase": "max-cycles-complete",
+                "status": "stopped",
+                "goal_gate_status": {
+                    "status": "pending",
+                    "required_count": 1,
+                    "passed_count": 0,
+                    "pending_count": 1,
+                    "passed_gate_ids": [],
+                    "pending_gate_ids": ["deployed_url"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    record = SimpleNamespace(target_id="demo", state_root=state_root, repo=tmp_path / "product")
+    monkeypatch.setattr(
+        module.harness_goal,
+        "status_payload",
+        lambda *, state_root: {
+            "active": True,
+            "goal": {
+                "completion_gates": [{"id": "deployed_url"}],
+                "completion_gate_status": {
+                    "status": "passed",
+                    "passed_gate_ids": ["deployed_url"],
+                    "pending_gate_ids": [],
+                },
+            },
+        },
+    )
+    monkeypatch.setattr(module, "_watch_setup_readiness", lambda _record, _goal: {"status": "ready"})
+    monkeypatch.setattr(module, "_watch_release_state", lambda *_args, **_kwargs: {"status": "ready"})
+
+    payload = module.load_watch_status(record)
+
+    gate_status = payload["goal_gate_status"]
+    assert gate_status["passed_count"] == 1
+    assert gate_status["pending_count"] == 0
+    assert gate_status["passed_gate_ids"] == ["deployed_url"]
 
 
 def test_implementation_running_status_exposes_live_progress_metadata(tmp_path, capsys) -> None:
