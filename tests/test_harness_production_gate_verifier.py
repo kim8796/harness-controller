@@ -528,7 +528,9 @@ def test_ios_native_build_cleans_xcode_swiftpm_package_resolution_side_effect(
         encoding="utf-8",
     )
     _commit_all(product, "add ios project")
+    run_dir = tmp_path / "run"
     package_resolved = project / "project.xcworkspace" / "xcshareddata" / "swiftpm" / "Package.resolved"
+    derived_data_markers: list[Path] = []
     original_run = subprocess.run
 
     def fake_run(command, **kwargs):
@@ -541,6 +543,12 @@ def test_ios_native_build_cleans_xcode_swiftpm_package_resolution_side_effect(
                 stderr = ""
 
             return VersionResult()
+        derived_data_path = Path(command[command.index("-derivedDataPath") + 1])
+        derived_data_path.mkdir(parents=True, exist_ok=True)
+        marker = derived_data_path / "Build" / "Intermediates.noindex" / "probe.bin"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("temporary xcode build output\n", encoding="utf-8")
+        derived_data_markers.append(marker)
         package_resolved.parent.mkdir(parents=True, exist_ok=True)
         package_resolved.write_text('{"pins":[],"version":3}\n', encoding="utf-8")
 
@@ -557,10 +565,12 @@ def test_ios_native_build_cleans_xcode_swiftpm_package_resolution_side_effect(
     result = module._default_ios_native_build_probe(
         product_root=product,
         checked_at="2026-06-02T00:00:00Z",
-        context={"run_dir": tmp_path / "run"},
+        context={"run_dir": run_dir},
     )
 
     assert result["status"] == "passed"
+    assert not (run_dir / "xcode-derived-data").exists()
+    assert all(not marker.exists() for marker in derived_data_markers)
     assert not package_resolved.exists()
     status = subprocess.run(["git", "status", "--short"], cwd=product, check=True, capture_output=True, text=True)
     assert status.stdout == ""
@@ -658,16 +668,24 @@ def test_android_native_build_injects_default_sdk_root_without_product_mutation(
     gradlew = android / "gradlew"
     gradlew.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     gradlew.chmod(0o755)
+    run_dir = tmp_path / "run"
     sdk_root = tmp_path / "android-sdk"
     (sdk_root / "platforms").mkdir(parents=True)
     (sdk_root / "platform-tools").mkdir()
     captured_env: list[dict[str, str]] = []
+    gradle_markers: list[Path] = []
     original_run = subprocess.run
 
     def fake_run(command, **kwargs):
         if command and command[0] == "git":
             return original_run(command, **kwargs)
-        captured_env.append(dict(kwargs.get("env") or {}))
+        env = dict(kwargs.get("env") or {})
+        captured_env.append(env)
+        gradle_home = Path(env["GRADLE_USER_HOME"])
+        gradle_home.mkdir(parents=True, exist_ok=True)
+        marker = gradle_home / "wrapper-cache.bin"
+        marker.write_text("temporary gradle cache\n", encoding="utf-8")
+        gradle_markers.append(marker)
 
         class Result:
             returncode = 0
@@ -682,13 +700,17 @@ def test_android_native_build_injects_default_sdk_root_without_product_mutation(
     result = module._default_android_native_build_probe(
         product_root=product,
         checked_at="2026-06-02T00:00:00Z",
-        context={"run_dir": tmp_path / "run"},
+        context={"run_dir": run_dir},
     )
 
     assert result["status"] == "passed"
     assert captured_env
     assert all(env["ANDROID_HOME"] == str(sdk_root) for env in captured_env)
     assert all(env["ANDROID_SDK_ROOT"] == str(sdk_root) for env in captured_env)
+    assert all("GRADLE_USER_HOME" in env for env in captured_env)
+    assert not (run_dir / "gradle-home").exists()
+    assert all(not Path(env["GRADLE_USER_HOME"]).resolve().is_relative_to(run_dir.resolve()) for env in captured_env)
+    assert all(not marker.exists() for marker in gradle_markers)
     assert not (android / "local.properties").exists()
 
 

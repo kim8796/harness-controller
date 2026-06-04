@@ -239,3 +239,65 @@ Diet-Exception: Production gate verifier support needs focused tests for real E2
 
 - `python3 -m pytest tests/test_harness_controller_recovery.py tests/test_harness_cli.py::test_beginner_finish_recovers_interrupted_evidence_for_scoped_dirty_diff tests/test_harness_cli.py::test_beginner_finish_can_disable_default_interrupted_evidence_recovery -q`
 - `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+
+## Correction Plan: Gradle Cache Sidecar Bloat
+
+**Problem:** `production-gate-verifier-*` runs stored permanent `GRADLE_USER_HOME=<run_dir>/gradle-home`. Each Android native verifier run duplicated Gradle wrapper/cache artifacts inside controller evidence sidecar, growing `targets/chatapp-test/runs/harness` by multiple GB while the useful evidence files were only small md/json receipts.
+
+**Fix:**
+
+- Delete only existing `targets/chatapp-test/runs/harness/production-gate-verifier-*/gradle-home` directories after confirming no verifier/watch/Gradle process has them open.
+- Keep all evidence/report/receipt/root-context md/json files.
+- Change Android native build verification to use a temporary Gradle user home for the preflight and assemble calls, then clean it up after the probe exits.
+- Do not write Gradle cache under the run evidence directory and do not write `android/local.properties` or any product repo state.
+- Keep Android SDK autodetection behavior for `ANDROID_HOME` and `ANDROID_SDK_ROOT`.
+
+**Verification:**
+
+- `du -sh targets/chatapp-test/runs/harness` before and after cleanup.
+- `find targets/chatapp-test/runs/harness -maxdepth 2 -type d -path '*/production-gate-verifier-*/gradle-home' -print` returns empty after cleanup.
+- Add/update Android native verifier test proving `GRADLE_USER_HOME` is not under `run_dir`, temporary cache files are cleaned, and product repo remains untouched.
+- Run focused verifier tests and pre-push guard.
+
+### Correction: Xcode DerivedData Sidecar Bloat
+
+**Problem:** After removing Gradle caches, two `production-gate-verifier-*` runs still contain `xcode-derived-data` directories of about 196MB each. These are native build intermediates, not evidence, and the verifier currently sets `-derivedDataPath <run_dir>/xcode-derived-data`.
+
+**Fix:**
+
+- Delete only existing `targets/chatapp-test/runs/harness/production-gate-verifier-*/xcode-derived-data` directories after confirming no `xcodebuild` process has them open.
+- Change iOS native build verification to use a temporary DerivedData directory and clean it after the probe exits.
+- Keep the existing cleanup for Xcode SwiftPM `Package.resolved` product side effects.
+- Keep all md/json evidence files under the run directory.
+
+**Verification:**
+
+- Add/update iOS native verifier test proving `-derivedDataPath` is not under `run_dir`, temporary DerivedData files are cleaned, and product repo remains clean.
+- `find targets/chatapp-test/runs/harness -maxdepth 2 -type d -path '*/production-gate-verifier-*/xcode-derived-data' -print` returns empty after cleanup.
+- Run focused verifier tests and pre-push guard.
+
+## Code Diet Audit Plan
+
+**Problem:** The controller has accumulated several very large modules and tests. The biggest files are `scripts/harness_autonomy/core.py`, `scripts/harness_cli.py`, `scripts/harness_doctor.py`, `scripts/harness_goal.py`, `scripts/harness_controller.py`, `scripts/harness_task_intake.py`, and `scripts/harness_watch.py`; the largest tests are `tests/test_harness_autonomy.py` and `tests/test_harness_cli.py`.
+
+**Fix Direction:**
+
+- Do not remove product-facing behavior just because it is rarely used; remove only duplicated helpers, dead compatibility paths with tests proving no references, and disposable run artifacts.
+- Prioritize cleanup that lowers future bug risk:
+  - split focused tests before adding more cases to files already over budget;
+  - move pure helpers out of CLI/watch/controller only when it reduces duplicated logic or isolates a stable concern;
+  - replace duplicated sidecar cleanup patterns with one helper;
+  - keep user-facing commands stable unless a deprecation path exists.
+- Treat code diet as small PRs, not one broad refactor.
+
+**First Candidate PRs:**
+
+- Native verifier disposable-output cleanup: Gradle and Xcode outputs never persist in evidence run directories.
+- Test diet: split new controller/CLI/watch tests into focused files before touching behavior.
+- CLI diet: move `finish` recovery helpers to a focused module only if the next finish change would otherwise grow `harness_cli.py`.
+- Watch/status diet: keep `harness_watch_status.py` as the status writer/reader boundary and avoid adding more status rendering into `harness_watch.py`.
+
+**Verification:**
+
+- Every cleanup PR must run focused tests plus `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`.
+- No cleanup PR may delete evidence/report/receipt/root-context files or product repo files.

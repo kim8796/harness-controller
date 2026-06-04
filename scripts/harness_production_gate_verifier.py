@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -506,16 +507,14 @@ def _default_android_sdk_root() -> Path | None:
     return None
 
 
-def _android_native_build_env(*, context: Mapping[str, object]) -> dict[str, str]:
+def _android_native_build_env(*, gradle_user_home: Path) -> dict[str, str]:
     env = os.environ.copy()
     if not env.get("ANDROID_HOME") and not env.get("ANDROID_SDK_ROOT"):
         sdk_root = _default_android_sdk_root()
         if sdk_root is not None:
             env["ANDROID_HOME"] = str(sdk_root)
             env["ANDROID_SDK_ROOT"] = str(sdk_root)
-    run_dir = context.get("run_dir")
-    if run_dir:
-        env["GRADLE_USER_HOME"] = str(Path(str(run_dir)) / "gradle-home")
+    env["GRADLE_USER_HOME"] = str(gradle_user_home)
     return env
 
 
@@ -626,47 +625,46 @@ def _default_ios_native_build_probe(
     project_args = _xcode_project_args(product_root)
     if project_args is None:
         return {"status": "blocked", "reason": "iOS Xcode project/workspace is missing."}
-    run_dir = context.get("run_dir")
-    derived_data = Path(str(run_dir)) / "xcode-derived-data" if run_dir else product_root / "ios" / ".harness-derived-data"
-    command = [
-        "xcodebuild",
-        *project_args,
-        "-configuration",
-        "Debug",
-        "-sdk",
-        "iphonesimulator",
-        "-destination",
-        "generic/platform=iOS Simulator",
-        "CODE_SIGNING_ALLOWED=NO",
-        "-derivedDataPath",
-        str(derived_data),
-        "build",
-    ]
-    before_status = _product_git_status_paths(product_root)
-    try:
-        result = subprocess.run(
-            command,
-            cwd=product_root,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=LOCAL_NATIVE_BUILD_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired:
+    with tempfile.TemporaryDirectory(prefix="harness-xcode-derived-data-") as derived_data:
+        command = [
+            "xcodebuild",
+            *project_args,
+            "-configuration",
+            "Debug",
+            "-sdk",
+            "iphonesimulator",
+            "-destination",
+            "generic/platform=iOS Simulator",
+            "CODE_SIGNING_ALLOWED=NO",
+            "-derivedDataPath",
+            derived_data,
+            "build",
+        ]
+        before_status = _product_git_status_paths(product_root)
+        try:
+            result = subprocess.run(
+                command,
+                cwd=product_root,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=LOCAL_NATIVE_BUILD_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            dirty_blocker = _native_probe_dirty_blocker(product_root, before_status)
+            if dirty_blocker:
+                return {"status": "blocked", "reason": dirty_blocker}
+            return {"status": "blocked", "reason": f"iOS simulator/debug build timed out after {LOCAL_NATIVE_BUILD_TIMEOUT_SECONDS}s."}
+        except OSError as exc:
+            dirty_blocker = _native_probe_dirty_blocker(product_root, before_status)
+            if dirty_blocker:
+                return {"status": "blocked", "reason": dirty_blocker}
+            return {"status": "blocked", "reason": f"iOS simulator/debug build could not start: {exc.__class__.__name__}."}
         dirty_blocker = _native_probe_dirty_blocker(product_root, before_status)
         if dirty_blocker:
             return {"status": "blocked", "reason": dirty_blocker}
-        return {"status": "blocked", "reason": f"iOS simulator/debug build timed out after {LOCAL_NATIVE_BUILD_TIMEOUT_SECONDS}s."}
-    except OSError as exc:
-        dirty_blocker = _native_probe_dirty_blocker(product_root, before_status)
-        if dirty_blocker:
-            return {"status": "blocked", "reason": dirty_blocker}
-        return {"status": "blocked", "reason": f"iOS simulator/debug build could not start: {exc.__class__.__name__}."}
-    dirty_blocker = _native_probe_dirty_blocker(product_root, before_status)
-    if dirty_blocker:
-        return {"status": "blocked", "reason": dirty_blocker}
-    if result.returncode != 0:
-        return {"status": "blocked", "reason": f"iOS simulator/debug build exited with status {result.returncode}."}
+        if result.returncode != 0:
+            return {"status": "blocked", "reason": f"iOS simulator/debug build exited with status {result.returncode}."}
     return {
         "status": "passed",
         "environment": "release",
@@ -686,53 +684,54 @@ def _default_android_native_build_probe(
     gradlew = product_root / "android" / "gradlew"
     if not gradlew.is_file():
         return {"status": "blocked", "reason": "Android Gradle wrapper is missing."}
-    env = _android_native_build_env(context=context)
-    try:
-        preflight = subprocess.run(
-            [str(gradlew), "-v", "--no-daemon"],
-            cwd=product_root / "android",
-            env=env,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return {
-            "status": "blocked",
-            "reason": "Android Gradle preflight could not run; install Java runtime and Android SDK before emulator/debug build verification.",
-        }
-    if preflight.returncode != 0:
-        return {
-            "status": "blocked",
-            "reason": "Java/Android Gradle toolchain is unavailable; install Java runtime and Android SDK before emulator/debug build verification.",
-        }
-    before_status = _product_git_status_paths(product_root)
-    try:
-        result = subprocess.run(
-            [str(gradlew), ":app:assembleDebug", "--no-daemon"],
-            cwd=product_root / "android",
-            env=env,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=LOCAL_NATIVE_BUILD_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired:
+    with tempfile.TemporaryDirectory(prefix="harness-gradle-") as gradle_home:
+        env = _android_native_build_env(gradle_user_home=Path(gradle_home))
+        try:
+            preflight = subprocess.run(
+                [str(gradlew), "-v", "--no-daemon"],
+                cwd=product_root / "android",
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return {
+                "status": "blocked",
+                "reason": "Android Gradle preflight could not run; install Java runtime and Android SDK before emulator/debug build verification.",
+            }
+        if preflight.returncode != 0:
+            return {
+                "status": "blocked",
+                "reason": "Java/Android Gradle toolchain is unavailable; install Java runtime and Android SDK before emulator/debug build verification.",
+            }
+        before_status = _product_git_status_paths(product_root)
+        try:
+            result = subprocess.run(
+                [str(gradlew), ":app:assembleDebug", "--no-daemon"],
+                cwd=product_root / "android",
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=LOCAL_NATIVE_BUILD_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            dirty_blocker = _native_probe_dirty_blocker(product_root, before_status)
+            if dirty_blocker:
+                return {"status": "blocked", "reason": dirty_blocker}
+            return {"status": "blocked", "reason": f"Android emulator/debug build timed out after {LOCAL_NATIVE_BUILD_TIMEOUT_SECONDS}s."}
+        except OSError as exc:
+            dirty_blocker = _native_probe_dirty_blocker(product_root, before_status)
+            if dirty_blocker:
+                return {"status": "blocked", "reason": dirty_blocker}
+            return {"status": "blocked", "reason": f"Android emulator/debug build could not start: {exc.__class__.__name__}."}
         dirty_blocker = _native_probe_dirty_blocker(product_root, before_status)
         if dirty_blocker:
             return {"status": "blocked", "reason": dirty_blocker}
-        return {"status": "blocked", "reason": f"Android emulator/debug build timed out after {LOCAL_NATIVE_BUILD_TIMEOUT_SECONDS}s."}
-    except OSError as exc:
-        dirty_blocker = _native_probe_dirty_blocker(product_root, before_status)
-        if dirty_blocker:
-            return {"status": "blocked", "reason": dirty_blocker}
-        return {"status": "blocked", "reason": f"Android emulator/debug build could not start: {exc.__class__.__name__}."}
-    dirty_blocker = _native_probe_dirty_blocker(product_root, before_status)
-    if dirty_blocker:
-        return {"status": "blocked", "reason": dirty_blocker}
-    if result.returncode != 0:
-        return {"status": "blocked", "reason": f"Android Gradle assembleDebug exited with status {result.returncode}."}
+        if result.returncode != 0:
+            return {"status": "blocked", "reason": f"Android Gradle assembleDebug exited with status {result.returncode}."}
     return {
         "status": "passed",
         "environment": "release",
