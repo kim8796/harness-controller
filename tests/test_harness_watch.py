@@ -669,6 +669,46 @@ def test_load_watch_status_suppresses_wait_for_completed_backlog(tmp_path, capsy
     assert "BL-done" in output
 
 
+def test_load_watch_status_clears_running_status_for_completed_backlog(tmp_path, capsys) -> None:
+    module = _load_module()
+    module.ERROR_CLASS = RuntimeError
+    record = SimpleNamespace(target_id="demo", state_root=tmp_path / "targets" / "demo")
+    record.state_root.mkdir(parents=True)
+    completed = record.state_root / "backlog" / "completed" / "BL-done.md"
+    completed.parent.mkdir(parents=True)
+    completed.write_text("ID: BL-done\nStatus: completed\n", encoding="utf-8")
+
+    module.write_watch_status(
+        record,
+        phase="transaction-failed",
+        status="running",
+        selected_backlog_id="BL-done",
+        run_id="run-done",
+        transaction_status="",
+        pending_reason="old implementation failure",
+        next_action="inspect doctor diagnosis",
+    )
+
+    payload = module.load_watch_status(record)
+
+    assert payload is not None
+    assert payload["phase"] == "stale-running-cleared"
+    assert payload["status"] == "idle"
+    assert payload["selected_backlog_id"] == ""
+    assert payload["run_id"] == ""
+    assert payload["transaction_status"] == ""
+    assert payload["last_selected_backlog_id"] == "BL-done"
+    assert payload["last_run_id"] == "run-done"
+    assert payload["stale_running_cleared"] is True
+    assert "old implementation failure" not in str(payload.get("pending_reason") or "")
+
+    assert module.print_watch_status(record) == 0
+    output = capsys.readouterr().out
+    assert "- 상태: `idle`" in output
+    assert "- last transaction:" in output
+    assert "BL-done" in output
+
+
 def test_load_watch_status_keeps_wait_for_unfinished_backlog(tmp_path) -> None:
     module = _load_module()
     module.ERROR_CLASS = RuntimeError

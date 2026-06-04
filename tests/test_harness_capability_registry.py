@@ -85,7 +85,8 @@ def test_registry_exposes_setup_pack_requirements_for_existing_gates() -> None:
     assert {item["capability_id"] for item in deployment} == {"deployment"}
     assert {item["provider_id"] for item in database} == {"supabase"}
     assert ai[0]["setup_pack_id"] == "openai_runtime"
-    assert native[0]["provider_id"] == "apple"
+    assert native[0]["provider_id"] == "vercel"
+    assert native[0]["setup_pack_id"] == "production_app_url"
     assert store[0]["provider_id"] == "store"
 
 

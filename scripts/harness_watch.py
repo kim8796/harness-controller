@@ -1201,6 +1201,14 @@ def _idle_status_from_refill(refill: Mapping[str, object]) -> tuple[str, str, st
             str(wait.get("next_action") or "complete the setup wait, then watch will recheck gates"),
             wait,
         )
+    if "external setup/toolchain/store" in reason.casefold():
+        return (
+            "external-gate-blocked",
+            "blocked",
+            reason,
+            "complete external setup/toolchain/store prerequisites, then rerun `./harness watch`",
+            None,
+        )
     phase = "manual-review-only" if int(refill.get("manual_review") or 0) else "planner-refill-empty"
     return (
         phase,
@@ -1382,6 +1390,37 @@ def _clear_stale_completed_backlog_operator_wait(
         )
     cleared["stale_operator_wait_cleared"] = True
     cleared["stale_operator_wait_backlog_id"] = backlog_id
+    return cleared
+
+
+def _clear_stale_completed_backlog_running_status(
+    record: harness_controller.TargetRecord,
+    payload: Mapping[str, object],
+) -> Mapping[str, object]:
+    if str(payload.get("status") or "").strip().lower() != "running":
+        return payload
+    backlog_id = _status_text(payload, "selected_backlog_id")
+    if _completed_backlog_path(record, backlog_id) is None:
+        return payload
+
+    cleared = dict(payload)
+    transaction = _transaction_status_from_payload(cleared)
+    if any(value for key, value in transaction.items() if key != "last_transaction_at"):
+        for key, value in transaction.items():
+            if value and not str(cleared.get(key) or ""):
+                cleared[key] = value
+    for key in ("selected_backlog_id", "run_id", "transaction_status", "commit_sha", "publication_branch", "pr_url"):
+        cleared[key] = ""
+    cleared["status"] = "idle"
+    cleared["phase"] = "stale-running-cleared"
+    cleared["pending_reason"] = ""
+    if not str(cleared.get("next_action") or "") or "doctor" in str(cleared.get("next_action") or ""):
+        cleared["next_action"] = str(
+            cleared.get("goal_gate_next_action")
+            or "rerun `./harness watch` to continue the active goal"
+        )
+    cleared["stale_running_cleared"] = True
+    cleared["stale_running_backlog_id"] = backlog_id
     return cleared
 
 
@@ -1738,6 +1777,7 @@ def load_watch_status(record: harness_controller.TargetRecord) -> Mapping[str, o
         raise _error("watch status JSON 형식이 올바르지 않습니다")
     safe = _enrich_watch_status_with_live_goal(record, safe)
     safe = _clear_stale_completed_backlog_operator_wait(record, safe)
+    safe = _clear_stale_completed_backlog_running_status(record, safe)
     if not any(safe.get(key) for key in ("selected_backlog_id", "run_id", "transaction_status")) and not any(
         safe.get(key)
         for key in (
@@ -2417,6 +2457,32 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
 
         backlog_id = str(getattr(item, "item_id", ""))
         if args.watch:
+            selected_text_for_preflight = _selected_backlog_text(record, item)
+            if _selected_backlog_task_key(selected_text_for_preflight) == "task-repair-gates":
+                try:
+                    quarantine = harness_goal.quarantine_external_gate_correction_tasks(
+                        state_root=record.state_root,
+                        target_id=record.target_id,
+                        target_repo=record.repo,
+                    )
+                except harness_goal.GoalError as exc:
+                    raise _error(str(exc)) from exc
+                quarantined_ids = {str(value) for value in quarantine.get("blocked_backlog_ids", []) if str(value)}
+                if backlog_id in quarantined_ids:
+                    print("transaction 격리: external setup/toolchain/store blocker 전용 gate repair task입니다.")
+                    print(f"- blocked backlog: `{backlog_id}`")
+                    runtime.write_watch_status(
+                        record,
+                        phase="external-gate-blocked",
+                        status="blocked",
+                        selected_backlog_id=backlog_id,
+                        transaction_status="external-gate-blocked",
+                        pending_reason="goal gates are waiting on external setup/toolchain/store prerequisites",
+                        processed_count=processed,
+                        idle_count=idle_count,
+                        next_action="complete the listed setup/toolchain/store prerequisites, then rerun watch",
+                    )
+                    continue
             wait = _selected_backlog_setup_wait(
                 runtime,
                 record,

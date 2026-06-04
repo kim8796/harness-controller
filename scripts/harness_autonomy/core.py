@@ -7244,6 +7244,8 @@ def run_lane(
         finally:
             codex_home_handle.cleanup()
         command_record: tuple[str, ...] | str = tuple(command)
+        if not response_path.exists():
+            write_text(response_path, result.stdout)
     elif runner == "claude":
         command = list(build_claude_command(worktree_path, runner_model=runner_model))
         result = run_captured_process(
@@ -8563,6 +8565,10 @@ def build_external_product_implementation_prompt(
             "- Goal integrity: when the backlog lists `Goal-Spec-Path`, read the full goal spec before implementing.",
             "- Visual evidence: when the backlog lists `Goal-Attachment-Manifest`, inspect the manifest and relevant attachments needed to satisfy the visual/product goal.",
             "- Inspect the full goal spec and attachment manifest when the backlog references them.",
+            "- Binding design source: when the backlog references a user-provided design, mockup, Sketch, Figma, screenshot, or image attachment, treat it as the binding source of truth rather than loose inspiration.",
+            "- Do not replace it with a generic design system or arbitrary redesign; only make the minimum responsive/platform adjustments needed to implement that supplied design.",
+            "- If you cannot inspect the design artifact or map it to product screens, leave product files unchanged and report that blocker.",
+            "- For binding design tasks, CSS-only/theme-only diffs are insufficient unless the backlog explicitly says the task is style-only.",
             "- Do not shrink the goal to a local demo, seed data, README-only change, or mocked flow unless the goal explicitly asks for that.",
             "- If implementation is blocked by missing credentials or external services, leave product files unchanged and report the exact blocker.",
             "",

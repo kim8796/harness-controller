@@ -194,6 +194,7 @@ class FinishEvidence:
     product_diff_paths: tuple[str, ...]
     backlog_status: str
     matching_commit_receipt: bool
+    recovered: bool = False
 
 
 @dataclass(frozen=True)
@@ -2609,7 +2610,25 @@ def command_run(args: argparse.Namespace) -> int:
     return harness_watch.command_run(args, _watch_runtime())
 
 
-def _find_finish_evidence(record: harness_controller.TargetRecord, run_id: str | None) -> FinishEvidence:
+def _finish_evidence_from_summary(resolved: Mapping[str, object], *, recovered: bool = False) -> FinishEvidence:
+    return FinishEvidence(
+        run_id=str(resolved.get("run_id") or ""),
+        path=Path(str(resolved.get("evidence_path") or "")),
+        backlog_id=str(resolved.get("backlog_id") or ""),
+        backlog_title=str(resolved.get("backlog_title") or ""),
+        product_diff_paths=tuple(str(path) for path in resolved.get("product_diff_paths") or [] if str(path)),
+        backlog_status=str(resolved.get("backlog_status") or "unknown"),
+        matching_commit_receipt=bool(resolved.get("matching_commit_receipt")),
+        recovered=recovered,
+    )
+
+
+def _find_finish_evidence(
+    record: harness_controller.TargetRecord,
+    run_id: str | None,
+    *,
+    recover_evidence: bool = True,
+) -> FinishEvidence:
     try:
         resolved = harness_controller.find_target_implementation_evidence(
             controller_root=repo_root(),
@@ -2626,16 +2645,23 @@ def _find_finish_evidence(record: harness_controller.TargetRecord, run_id: str |
                 "완료할 구현 기록이 여러 개입니다."
                 f"{candidate_suffix} `./harness finish --target {record.target_id} --run <run-id>`로 지정하세요."
             )
-        raise HarnessCliError("완료할 구현 기록이 없습니다. 먼저 `./harness run`을 실행하세요.")
-    return FinishEvidence(
-        run_id=str(resolved.get("run_id") or ""),
-        path=Path(str(resolved.get("evidence_path") or "")),
-        backlog_id=str(resolved.get("backlog_id") or ""),
-        backlog_title=str(resolved.get("backlog_title") or ""),
-        product_diff_paths=tuple(str(path) for path in resolved.get("product_diff_paths") or [] if str(path)),
-        backlog_status=str(resolved.get("backlog_status") or "unknown"),
-        matching_commit_receipt=bool(resolved.get("matching_commit_receipt")),
-    )
+        if recover_evidence and run_id:
+            try:
+                recovered = harness_controller.recover_interrupted_target_implementation_evidence(
+                    controller_root=repo_root(),
+                    record=record,
+                    run_id=run_id,
+                )
+            except harness_controller.ControllerError as recovery_exc:
+                raise HarnessCliError(f"구현 기록 복구 실패: {recovery_exc}") from recovery_exc
+            return _finish_evidence_from_summary(recovered, recovered=True)
+        suffix = ""
+        if run_id and not recover_evidence:
+            suffix = " 자동 recovery가 `--no-recover-evidence`로 비활성화되어 있습니다."
+        elif run_id:
+            suffix = " 중단된 diff는 `--run`이 명시된 경우 자동 recovery를 시도합니다."
+        raise HarnessCliError("완료할 구현 기록이 없습니다. 먼저 `./harness run`을 실행하세요." + suffix)
+    return _finish_evidence_from_summary(resolved)
 
 
 def _finish_backlog_status(record: harness_controller.TargetRecord, evidence: FinishEvidence) -> str:
@@ -2648,6 +2674,8 @@ def _render_finish_intro(record: harness_controller.TargetRecord, evidence: Fini
     print(f"- 구현 기록: `{evidence.run_id}`")
     print(f"- 작업 항목: `{evidence.backlog_id}`" + (f" - {evidence.backlog_title}" if evidence.backlog_title else ""))
     print(f"- 제품 변경 파일: {', '.join(evidence.product_diff_paths) if evidence.product_diff_paths else '없음'}")
+    if evidence.recovered:
+        print("- recovery: interrupted implementation diff를 검증해 evidence를 복구했습니다.")
     print("- 기본 동작: 상태 점검만 수행")
 
 
@@ -2664,7 +2692,10 @@ def command_finish(args: argparse.Namespace) -> int:
         return 2
     try:
         record = _resolve_controller_target(args.target)
-        evidence = _find_finish_evidence(record, args.run)
+        recover_evidence = bool(args.run) and not bool(args.no_recover_evidence)
+        if bool(getattr(args, "recover_evidence", False)):
+            recover_evidence = bool(args.run)
+        evidence = _find_finish_evidence(record, args.run, recover_evidence=recover_evidence)
         _render_finish_intro(record, evidence)
         reason = args.reason or "implementation accepted"
         if args.complete or (args.apply and not (args.commit or args.push)):
@@ -5298,6 +5329,16 @@ def build_parser() -> argparse.ArgumentParser:
     finish.add_argument("--push", action="store_true", help="Dry-run the validated product push; add --apply to push.")
     finish.add_argument("--message", help="Product commit message for --commit.")
     finish.add_argument("--reason", help="Backlog completion reason for --apply.")
+    finish.add_argument(
+        "--recover-evidence",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    finish.add_argument(
+        "--no-recover-evidence",
+        action="store_true",
+        help="Advanced diagnostics: disable automatic strict recovery for an interrupted named run.",
+    )
     finish.set_defaults(func=command_finish)
 
     smoke = subparsers.add_parser("smoke", help="Run beginner smoke checks without touching real targets.")

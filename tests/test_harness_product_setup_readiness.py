@@ -140,10 +140,12 @@ def test_native_store_setup_entries_include_pack_metadata(tmp_path: Path) -> Non
     )
 
     entries = {entry["id"]: entry for entry in report["entries"]}
-    assert entries["apple_developer"]["provider_id"] == "apple"
-    assert entries["apple_developer"]["capability_id"] == "ios_native"
-    assert entries["google_play_console"]["provider_id"] == "google-play"
-    assert entries["google_play_console"]["capability_id"] == "android_native"
+    assert entries["production_app_url"]["provider_id"] == "vercel"
+    assert entries["production_app_url"]["capability_id"] == ""
+    assert set(entries["production_app_url"]["capability_ids"]) == {
+        "ios_native",
+        "android_native",
+    }
     assert entries["store_release_metadata"]["provider_id"] == "store"
     assert entries["store_release_metadata"]["capability_id"] == "store_release"
     assert entries["store_release_metadata"]["setup_pack_id"] == "store_release_metadata"
@@ -169,9 +171,9 @@ def test_setup_readiness_prioritizes_web_runtime_actions_before_store_actions(tm
     )
 
     missing = report["missing_requirements"]
-    assert missing.index("production_app_url") < missing.index("apple_developer")
-    assert missing.index("supabase_server_key") < missing.index("apple_developer")
-    assert missing.index("openai_runtime") < missing.index("apple_developer")
+    assert missing.index("production_app_url") < missing.index("store_release_metadata")
+    assert missing.index("supabase_server_key") < missing.index("store_release_metadata")
+    assert missing.index("openai_runtime") < missing.index("store_release_metadata")
     assert "Vercel" in report["next_actions"][0] or "production URL" in report["next_actions"][0]
 
 

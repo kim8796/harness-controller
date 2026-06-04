@@ -37,6 +37,26 @@ PRODUCT_DIFF_SMOKE_PUSH_CAUTION = (
     "automation. No automatic remote rollback is performed; coordinate with the branch owner and use "
     "an operator-reviewed revert or repo-policy recovery."
 )
+_BINDING_DESIGN_SOURCE_RE = re.compile(
+    r"(?i)("
+    r"Goal-Attachment(?:-Manifest)?|"
+    r"\.sketch\b|\bsketch\b|figma|mockup|wireframe|screenshot|visual\s+evidence|"
+    r"design\s+artifact|user[- ]provided\s+design|image\s+attachment|"
+    r"디자인|시안|스크린샷|화면\s*설계|첨부\s*이미지"
+    r")"
+)
+_STYLE_ONLY_AFFIRMATIVE_RE = re.compile(
+    r"(?i)("
+    r"^\s*(?:[-*]\s*)?(?:style-only|css-only|theme-only|visual\s+polish\s+only)\s*[:=;-]|"
+    r"\b(?:css|styles?|colors?|theme)\s+only\b|"
+    r"(?:CSS|스타일|색상|테마|시각\s*보정)\s*만\s*(?:조정|수정|변경|반영|개선|보정|다듬)"
+    r")"
+)
+_STYLE_ONLY_NEGATION_RE = re.compile(r"(?i)\b(?:not|never|insufficient|forbidden|reject|block)\b|(?:아님|아니|금지|불충분|부족|하지\s*말|하면\s*안)")
+_STYLE_ONLY_DIFF_SUFFIXES = frozenset({".css", ".scss", ".sass", ".less"})
+_STYLE_ONLY_DIFF_DIR_NAMES = frozenset({"css", "style", "styles", "stylesheet", "stylesheets", "theme", "themes"})
+_DOC_ONLY_DIFF_SUFFIXES = frozenset({".md", ".mdx", ".txt"})
+_DOC_ONLY_DIFF_NAMES = frozenset({"readme", "license", "notice", "changelog", "doc", "docs", "documentation"})
 PRODUCT_IMPLEMENTATION_ROLLBACK_CAUTION = (
     "This implementation gate leaves local product changes uncommitted. Review `git status --short` "
     "and revert only the intended product diff; no automatic rollback is performed."
@@ -1415,6 +1435,185 @@ def find_resumable_target_implementation_evidence(
     return _target_implementation_evidence_summary(record, state_paths, selected_run_id, evidence_path, payload)
 
 
+def _markdown_backtick_field(text: str, field: str) -> str:
+    match = re.search(rf"^-\s+{re.escape(field)}:\s+`(?P<value>[^`]+)`\s*$", text, flags=re.MULTILINE)
+    return str(match.group("value") if match else "").strip()
+
+
+def _target_run_report_field(text: str, field: str) -> str:
+    match = re.search(rf"^-\s+{re.escape(field)}:\s+`(?P<value>[^`]+)`\s*$", text, flags=re.MULTILINE)
+    return str(match.group("value") if match else "").strip()
+
+
+def _selected_backlog_from_implementation_prompt(state_paths: StatePaths, run_id: str) -> dict[str, str]:
+    prompt_path = state_paths.reports_dir / "harness-autonomy" / run_id / "implementer-prompt.md"
+    if not _path_is_relative_to(prompt_path.resolve(strict=False), state_paths.state_root.resolve()):
+        raise ControllerError("recovery prompt path must stay inside target sidecar")
+    if prompt_path.is_symlink() or not prompt_path.exists() or not prompt_path.is_file():
+        raise ControllerError("recovery requires implementer prompt for the interrupted run")
+    text = prompt_path.read_text(encoding="utf-8")
+    selected = {
+        "id": _markdown_backtick_field(text, "ID"),
+        "path": _markdown_backtick_field(text, "Path"),
+        "title": _markdown_backtick_field(text, "Title"),
+    }
+    if not selected["id"] or not selected["path"]:
+        raise ControllerError("recovery prompt does not identify the selected backlog")
+    return selected
+
+
+def _target_run_report_head_and_backlog(state_paths: StatePaths) -> dict[str, str]:
+    report_path = state_paths.target_run_report
+    if report_path.is_symlink() or not report_path.exists() or not report_path.is_file():
+        raise ControllerError("recovery requires the latest target run report")
+    text = report_path.read_text(encoding="utf-8")
+    return {
+        "product_head_before": _target_run_report_field(text, "Product HEAD before"),
+        "product_head_after": _target_run_report_field(text, "Product HEAD after"),
+        "planned_backlog_id": _target_run_report_field(text, "Planned backlog id"),
+        "planned_backlog_path": _target_run_report_field(text, "Planned backlog path"),
+    }
+
+
+def _backlog_scope_allows_dirty_paths(backlog_text: str, dirty_paths: Sequence[str]) -> None:
+    from harness_autonomy.core import parse_backlog_machine_scope, scope_pattern_matches_path
+
+    file_scope, forbidden_scope, failures = parse_backlog_machine_scope(backlog_text)
+    if failures:
+        raise ControllerError("recovery backlog scope is not machine-readable: " + ", ".join(failures))
+    if not file_scope:
+        raise ControllerError("recovery backlog has no machine-readable file scope")
+    for dirty_path in dirty_paths:
+        path = Path(dirty_path)
+        if not any(scope_pattern_matches_path(pattern, path) for pattern in file_scope):
+            raise ControllerError(f"current dirty path is outside recovery backlog scope: {dirty_path}")
+        if any(scope_pattern_matches_path(pattern, path) for pattern in forbidden_scope):
+            raise ControllerError(f"current dirty path is forbidden by recovery backlog scope: {dirty_path}")
+
+
+def recover_interrupted_target_implementation_evidence(
+    *,
+    controller_root: Path,
+    record: TargetRecord,
+    run_id: str,
+) -> dict[str, Any]:
+    """Create strict recovery evidence for an interrupted external implementation diff."""
+
+    safe_run_id = _safe_evidence_run_id(run_id)
+    state_paths = record.state_paths(controller_root)
+    run_dir = state_paths.state_root / "runs" / "harness" / safe_run_id
+    evidence_path = run_dir / "generated-evidence.json"
+    if not _path_is_relative_to(evidence_path.resolve(strict=False), state_paths.state_root.resolve()):
+        raise ControllerError("recovery evidence path must stay inside target sidecar")
+    if evidence_path.exists():
+        raise ControllerError("recovery evidence already exists for this run")
+    selected = _selected_backlog_from_implementation_prompt(state_paths, safe_run_id)
+    report = _target_run_report_head_and_backlog(state_paths)
+    if report["planned_backlog_id"] and report["planned_backlog_id"] != selected["id"]:
+        raise ControllerError("recovery target run report does not match selected backlog")
+    if report["planned_backlog_path"] and report["planned_backlog_path"] != selected["path"]:
+        raise ControllerError("recovery target run report does not match selected backlog path")
+    before_head = report["product_head_before"]
+    after_head = report["product_head_after"] or before_head
+    if not before_head or before_head != after_head:
+        raise ControllerError("recovery target run report does not prove unchanged product HEAD")
+    current_head = target_git_head(record.repo)
+    if current_head != before_head:
+        raise ControllerError("target product HEAD changed after interrupted implementation")
+    item = _discover_sidecar_backlog_item(state_paths, selected["path"] or selected["id"])
+    if str(item.item_id) != selected["id"]:
+        raise ControllerError("recovery selected backlog id does not match queued item")
+    if str(item.status) != "queued" or str(item.autonomy_execute) != "auto":
+        raise ControllerError("recovery requires queued Autonomy-Execute auto backlog")
+    backlog_path = state_paths.state_root / item.path
+    if backlog_path.is_symlink() or not backlog_path.exists() or not backlog_path.is_file():
+        raise ControllerError("recovery backlog file is not readable")
+    current_status = target_git_status_lines(record.repo)
+    current_paths = target_status_paths(current_status)
+    if not current_paths:
+        raise ControllerError("recovery requires current product diff")
+    safe_paths = _safe_product_diff_paths(current_paths)
+    _backlog_scope_allows_dirty_paths(backlog_path.read_text(encoding="utf-8"), safe_paths)
+    ensure_product_diff_policy(record.repo, safe_paths)
+    fingerprint = product_diff_fingerprint(record.repo, safe_paths)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    recovered_at = datetime.now().isoformat(timespec="seconds")
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "status": "pass",
+        "operation": "backlog-implementation-recovery",
+        "recovery_evidence": True,
+        "recovered_at": recovered_at,
+        "recovery_reason": "interrupted implementation produced validated product diff without generated evidence",
+        "root_context": {
+            "mode": "external",
+            "target_id": record.target_id,
+            "controller_root": state_paths.controller_root.as_posix(),
+            "target_root": state_paths.target_root.as_posix(),
+            "state_root": state_paths.state_root.as_posix(),
+        },
+        "product_head_before": before_head,
+        "product_head_after": before_head,
+        "product_status_before": [],
+        "product_status_after": current_status,
+        "product_execution": "enabled",
+        "product_implementation": "enabled",
+        "product_diff_paths": safe_paths,
+        "product_diff_fingerprint": fingerprint,
+        "product_commit": "disabled",
+        "product_commit_sha": "",
+        "product_commit_message": "",
+        "product_commit_diff": [],
+        "product_push": "disabled",
+        "product_push_remote": "",
+        "product_push_ref": "",
+        "product_push_remote_before": "",
+        "product_push_remote_after": "",
+        "product_push_sha": "",
+        "product_push_command": [],
+        "product_push_error": "",
+        "product_push_caution": "",
+        "external_backlog": {
+            "id": str(item.item_id),
+            "path": item.path.as_posix(),
+            "title": str(item.title),
+            "priority": str(item.priority),
+            "goal": str(item.goal),
+            "autonomy_execute": str(item.autonomy_execute),
+        },
+        "implementation_lane": None,
+        "rollback_guidance": product_implementation_rollback_guidance(record.repo, current_status),
+        "rollback_safety_note": PRODUCT_IMPLEMENTATION_ROLLBACK_CAUTION,
+        "lane_execution": "backlog-implementation",
+        "verification": {},
+        "post_verification": {},
+        "recovery_sources": {
+            "implementer_prompt": (state_paths.reports_dir / "harness-autonomy" / safe_run_id / "implementer-prompt.md").as_posix(),
+            "target_run_report": state_paths.target_run_report.as_posix(),
+        },
+    }
+    _write_sidecar_json(state_paths.state_root, evidence_path, payload, label="recovered implementation generated evidence")
+    _write_sidecar_text(
+        state_paths.state_root,
+        run_dir / "generated-evidence.md",
+        "\n".join(
+            [
+                "# Generated Evidence",
+                "",
+                f"- Target ID: `{record.target_id}`",
+                "- Operation: `backlog-implementation-recovery`",
+                "- Recovery evidence: `true`",
+                f"- External backlog: `{item.item_id}`",
+                f"- Product diff: `{', '.join(safe_paths)}`",
+                f"- Recovered at: `{recovered_at}`",
+                "",
+            ]
+        ),
+        label="recovered implementation generated evidence markdown",
+    )
+    return _target_implementation_evidence_summary(record, state_paths, safe_run_id, evidence_path, payload)
+
+
 def pending_backlog_product_pushes(*, controller_root: Path, record: TargetRecord) -> list[dict[str, str]]:
     """Return completed implementation runs with a local commit receipt but no push receipt."""
 
@@ -1770,6 +1969,63 @@ def _update_backlog_metadata(path: Path, updates: Mapping[str, str]) -> None:
     update_backlog_metadata(path, **dict(updates))
 
 
+def _backlog_mentions_binding_design_source(backlog_text: str) -> bool:
+    return bool(_BINDING_DESIGN_SOURCE_RE.search(backlog_text or ""))
+
+
+def _backlog_explicitly_style_only(backlog_text: str) -> bool:
+    for line in str(backlog_text or "").splitlines():
+        if _STYLE_ONLY_NEGATION_RE.search(line):
+            continue
+        if _STYLE_ONLY_AFFIRMATIVE_RE.search(line):
+            return True
+    return False
+
+
+def _product_diff_path_is_style_or_docs_only(path: str) -> bool:
+    normalized = str(path or "").strip()
+    if not normalized:
+        return True
+    lowered = normalized.lower()
+    suffix = Path(lowered).suffix
+    stem = Path(lowered).stem
+    name = Path(lowered).name
+    if suffix in _STYLE_ONLY_DIFF_SUFFIXES or suffix in _DOC_ONLY_DIFF_SUFFIXES:
+        return True
+    if lowered.startswith("docs/") or lowered.startswith("documentation/"):
+        return True
+    if name in _STYLE_ONLY_DIFF_DIR_NAMES or stem in _STYLE_ONLY_DIFF_DIR_NAMES:
+        return True
+    if name in _DOC_ONLY_DIFF_NAMES or stem in _DOC_ONLY_DIFF_NAMES:
+        return True
+    if lowered.startswith(("tailwind.config.", "postcss.config.")):
+        return True
+    return False
+
+
+def _product_diff_is_style_or_docs_only(paths: Sequence[str]) -> bool:
+    normalized = [str(path).strip() for path in paths if str(path).strip()]
+    return bool(normalized) and all(_product_diff_path_is_style_or_docs_only(path) for path in normalized)
+
+
+def _enforce_binding_design_completion_guard(*, source_path: Path, evidence: Mapping[str, Any] | None) -> None:
+    try:
+        backlog_text = source_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        backlog_text = source_path.read_text(encoding="utf-8", errors="replace")
+    if not _backlog_mentions_binding_design_source(backlog_text):
+        return
+    if _backlog_explicitly_style_only(backlog_text):
+        return
+    diff_paths = [str(path) for path in (evidence or {}).get("product_diff_paths", []) if str(path).strip()]
+    if not _product_diff_is_style_or_docs_only(diff_paths):
+        return
+    raise ControllerError(
+        "binding design backlog completion requires product view/component implementation evidence; "
+        "CSS/docs-only diff is not enough unless the backlog explicitly says style-only"
+    )
+
+
 def _move_backlog_item_if_needed(state_paths: StatePaths, source_rel: Path, target_state: str) -> Path:
     from harness_autonomy import move_backlog_item_if_needed
 
@@ -1818,6 +2074,7 @@ def transition_sidecar_backlog(
     if target_status == "completed":
         if str(item.status) != "queued" or str(item.autonomy_execute) != "auto":
             raise ControllerError("completed transition requires queued Autonomy-Execute auto backlog")
+        _enforce_binding_design_completion_guard(source_path=source_path, evidence=evidence)
         target_state = "completed"
         metadata_updates = {
             "Status": "completed",

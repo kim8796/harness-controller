@@ -94,6 +94,11 @@ SECTION_HEADINGS = (
     "Acceptance",
     "완료 조건",
     "수용 기준",
+    "Required behavior",
+    "Required Behavior",
+    "Requirements",
+    "요구 동작",
+    "요구사항",
     "File Scope",
     "변경 범위",
     "Forbidden Scope",
@@ -876,8 +881,16 @@ def _packet_ids(state_root: Path, *, target_id: str | None = None) -> tuple[str,
 
 
 def _section(text: str, names: Iterable[str]) -> str:
-    escaped = "|".join(re.escape(name) for name in names)
-    pattern = re.compile(rf"^##\s+(?:{escaped})\s*$\n(?P<body>.*?)(?=^##\s+|\Z)", re.MULTILINE | re.DOTALL | re.IGNORECASE)
+    section_names = tuple(dict.fromkeys(str(name) for name in names if str(name)))
+    escaped = "|".join(re.escape(name) for name in section_names)
+    stop_names = tuple(dict.fromkeys((*SECTION_HEADINGS, *section_names)))
+    stop_escaped = "|".join(re.escape(name) for name in stop_names)
+    heading = rf"(?:##\s+(?:{escaped})\s*|(?:{escaped})\s*:)\s*$"
+    stop_heading = rf"(?:##\s+(?:{stop_escaped})\s*|(?:{stop_escaped})\s*:)\s*$"
+    pattern = re.compile(
+        rf"^{heading}\n(?P<body>.*?)(?=^{stop_heading}\n|\Z)",
+        re.MULTILINE | re.DOTALL | re.IGNORECASE,
+    )
     match = pattern.search(text)
     return match.group("body").strip() if match else ""
 
@@ -926,7 +939,14 @@ def _request_model(state_root: Path, packet_id: str) -> dict[str, object]:
     _reject_secretish_text(text)
     summary = _bullets(_section(text, ("Summary", "요약")))
     goal = _bullets(_section(text, ("Goal", "목표")))
-    acceptance = _bullets(_section(text, ("Acceptance", "완료 조건", "수용 기준")))
+    acceptance = tuple(
+        dict.fromkeys(
+            (
+                *_bullets(_section(text, ("Required behavior", "Required Behavior", "Requirements", "요구 동작", "요구사항"))),
+                *_bullets(_section(text, ("Acceptance", "완료 조건", "수용 기준"))),
+            )
+        )
+    )
     file_scope = _bullets(_section(text, ("File Scope", "변경 범위")))
     forbidden_scope = _bullets(_section(text, ("Forbidden Scope", "금지 범위")))
     file_scope, file_adjustments = _normalize_scope_items(file_scope, field="file_scope")
@@ -1367,7 +1387,15 @@ def _normalize_task_model(
                 normalized["goal"] = (inferred,)
                 actions.append("inferred-goal")
         if not normalized.get("summary"):
-            summary = tuple(line for line in plain_lines[:3] if line)
+            goal_lines = tuple(str(item) for item in normalized.get("goal") or () if str(item))
+            summary = tuple(
+                dict.fromkeys(
+                    (
+                        *goal_lines,
+                        *(line for line in plain_lines if line),
+                    )
+                )
+            )[:3]
             if summary:
                 normalized["summary"] = summary
                 actions.append("inferred-summary")

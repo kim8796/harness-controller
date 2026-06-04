@@ -112,6 +112,9 @@ def test_external_product_prompt_allows_goal_spec_and_visual_evidence(tmp_path: 
     assert "goals/goal-1/inputs/goal-spec.md" in prompt
     assert "goals/goal-1/attachments/attachment-manifest.json" in prompt
     assert "Inspect the full goal spec and attachment manifest when the backlog references them" in prompt
+    assert "binding source of truth" in prompt
+    assert "Do not replace it with a generic design system or arbitrary redesign" in prompt
+    assert "CSS-only/theme-only diffs are insufficient" in prompt
 
 
 def test_external_rootcontext_run_once_writes_sidecar_only(tmp_path: Path, capsys) -> None:
@@ -13681,6 +13684,41 @@ def test_run_lane_passes_timeout_seconds_to_runner_helper(
     assert captured["env"] == {"CODEX_HOME": "/tmp/harness-codex-home"}
     assert helper_calls == [("skill-a", "skill-b")]
     assert cleanup_events == ["cleaned"]
+
+
+def test_run_lane_codex_writes_stdout_fallback_when_response_file_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    report_dir, run_dir = _lane_dirs(tmp_path)
+
+    class FakeTempHome:
+        def cleanup(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        module,
+        "_prepare_isolated_codex_runner_env",
+        lambda *, allowed_global_skills=(): (FakeTempHome(), {}),
+    )
+    _patch_run_captured_process(module, monkeypatch, stdout="fallback implementer summary\n")
+
+    result = module.run_lane(
+        "implementer",
+        repo_root=tmp_path,
+        worktree_path=tmp_path,
+        run_dir=run_dir,
+        report_dir=report_dir,
+        runner="codex",
+        runner_model=None,
+        command_template=None,
+        prompt="hello",
+        timeout_seconds=30,
+    )
+
+    assert result.response_path.read_text(encoding="utf-8") == "fallback implementer summary\n"
+    assert result.response_text == "fallback implementer summary\n"
 
 
 def test_run_lane_claude_does_not_use_codex_home_isolation(

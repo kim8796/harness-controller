@@ -2668,6 +2668,95 @@ def test_beginner_finish_dry_run_and_apply_complete_sidecar_backlog(monkeypatch,
     _assert_no_product_harness_pollution(product)
 
 
+def _prepare_interrupted_finish_recovery_fixture(monkeypatch, tmp_path: Path):
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    head = _init_product_repo(product)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.40")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    state_root = controller / "targets" / "demo"
+    backlog = state_root / "backlog" / "queued" / "BL-demo.md"
+    backlog.parent.mkdir(parents=True, exist_ok=True)
+    backlog.write_text(
+        "\n".join(
+            [
+                "ID: BL-demo",
+                "Title: Demo sidecar task",
+                "Status: queued",
+                "Priority: P1",
+                "Autonomy-Execute: auto",
+                "",
+                "## File Scope",
+                "- README.md",
+                "",
+                "## Forbidden Scope",
+                "- .env.local",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    report_dir = state_root / "reports" / "harness-autonomy" / "run-interrupted"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    (report_dir / "implementer-prompt.md").write_text(
+        "## Selected Sidecar Backlog\n\n- ID: `BL-demo`\n- Path: `backlog/queued/BL-demo.md`\n- Title: `Demo sidecar task`\n",
+        encoding="utf-8",
+    )
+    (state_root / "reports" / "target-run-latest.md").write_text(
+        "\n".join(
+            [
+                "# External Target Run Backlog Implementation",
+                "",
+                f"- Product HEAD before: `{head}`",
+                f"- Product HEAD after: `{head}`",
+                "- Planned backlog id: `BL-demo`",
+                "- Planned backlog path: `backlog/queued/BL-demo.md`",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (product / "README.md").write_text("# Product\n\nRecovered diff.\n", encoding="utf-8")
+    return module, controller, product, state_root, backlog
+
+
+def test_beginner_finish_recovers_interrupted_evidence_for_scoped_dirty_diff(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module, _, product, state_root, backlog = _prepare_interrupted_finish_recovery_fixture(monkeypatch, tmp_path)
+    capsys.readouterr()
+
+    assert module.main(["finish", "--run", "run-interrupted"]) == 0
+    output = capsys.readouterr().out
+
+    assert "recovery: interrupted implementation diff" in output
+    assert "작업 현재 상태: `queued`" in output
+    assert (state_root / "runs" / "harness" / "run-interrupted" / "generated-evidence.json").exists()
+    assert backlog.exists()
+    assert _product_git_status(product) == [" M README.md"]
+    _assert_no_product_harness_pollution(product)
+
+
+def test_beginner_finish_can_disable_default_interrupted_evidence_recovery(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module, _, product, state_root, backlog = _prepare_interrupted_finish_recovery_fixture(monkeypatch, tmp_path)
+    capsys.readouterr()
+
+    assert module.main(["finish", "--run", "run-interrupted", "--no-recover-evidence"]) == 2
+    output = capsys.readouterr().out
+
+    assert "완료할 구현 기록이 없습니다" in output
+    assert not (state_root / "runs" / "harness" / "run-interrupted" / "generated-evidence.json").exists()
+    assert backlog.exists()
+    assert _product_git_status(product) == [" M README.md"]
+    _assert_no_product_harness_pollution(product)
+
+
 def test_beginner_finish_apply_accepts_untracked_directory_diff(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_module()
     controller = tmp_path / "controller"
