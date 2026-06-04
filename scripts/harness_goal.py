@@ -27,6 +27,47 @@ GOALS_DIR = Path("goals")
 ACTIVE_GOAL_FILE = GOALS_DIR / "active-goal.json"
 GOAL_DRAFTS_DIR = GOALS_DIR / "drafts"
 GATE_VERIFIER_BLOCK_COOLDOWN_SECONDS = 15 * 60
+EXTERNAL_GATE_BLOCKER_HINTS = (
+    "product gate readiness is waiting",
+    "provider setup missing",
+    "operator-wait",
+    "production_smoke_",
+    "phone auth",
+    "sms provider",
+    "release smoke",
+    "production https app",
+    "xcode toolchain",
+    "xcode-select",
+    "xcodebuild -version",
+    "java/android gradle toolchain",
+    "android sdk",
+    "apple developer",
+    "app store connect",
+    "google play console",
+    "store release readiness requires",
+    "account receipts",
+    "credential",
+    "env",
+    "toolchain",
+    "signing",
+    "provisioning",
+)
+PRODUCT_ACTIONABLE_GATE_BLOCKER_HINTS = (
+    "no production-safe probe evidence",
+    "missing provider evidence",
+    "exited with status",
+    "package.json has no",
+    "script is missing",
+    "project directory is missing",
+    "workspace is missing",
+    "gradle wrapper is missing",
+    "localstorage",
+    "seed-only",
+    "readme",
+    "ui is not",
+    "ui does not",
+    "ui flow",
+)
 MAX_GOAL_SPEC_BYTES = 512_000
 MAX_GOAL_ATTACHMENT_BYTES = 10_000_000
 MAX_GOAL_ATTACHMENTS = 50
@@ -2324,20 +2365,41 @@ def _goal_publication_success_backlog_ids(*, state_root: Path, target_id: str, g
     return success
 
 
-def _latest_gate_verifier_blocks_pending_gates(
+def _gate_entry_id(entry: Mapping[str, object]) -> str:
+    return str(entry.get("gate_id") or entry.get("id") or "").strip()
+
+
+def _gate_blocker_reason(entry: Mapping[str, object]) -> str:
+    for key in ("observed_result", "reason", "message", "summary"):
+        value = str(entry.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _is_external_gate_blocker_reason(reason: str) -> bool:
+    normalized = reason.casefold()
+    if not normalized:
+        return False
+    if any(hint in normalized for hint in PRODUCT_ACTIONABLE_GATE_BLOCKER_HINTS):
+        return False
+    return any(hint in normalized for hint in EXTERNAL_GATE_BLOCKER_HINTS)
+
+
+def _latest_gate_verifier_block_report(
     *,
     state_root: Path,
     target_id: str,
     goal_id: str,
     target_repo: Path,
     pending_gate_ids: Sequence[str],
-) -> bool:
+) -> dict[str, object] | None:
     current_head = _product_head_sha(target_repo)
     if current_head is None or not pending_gate_ids:
-        return False
+        return None
     runs_root = state_root / "runs" / "harness"
     if not runs_root.exists() or runs_root.is_symlink():
-        return False
+        return None
     pending = {str(item) for item in pending_gate_ids if str(item)}
     for path in sorted(runs_root.glob("production-gate-verifier-*/generated-evidence.json"), reverse=True):
         if path.is_symlink():
@@ -2354,14 +2416,54 @@ def _latest_gate_verifier_blocks_pending_gates(
             continue
         try:
             if time.time() - path.stat().st_mtime > GATE_VERIFIER_BLOCK_COOLDOWN_SECONDS:
-                return False
+                return None
         except OSError:
-            return False
+            return None
         if str(payload.get("status") or "").strip().lower() != "blocked":
-            return False
+            return None
         blocked = {str(item) for item in payload.get("blocked_gate_ids") or [] if str(item)}
-        return pending.issubset(blocked) if blocked else True
-    return False
+        if blocked and not pending.issubset(blocked):
+            return None
+        reason_by_gate: dict[str, str] = {}
+        for raw_gate in payload.get("completion_gates") or []:
+            if not isinstance(raw_gate, Mapping):
+                continue
+            gate_id = _gate_entry_id(raw_gate)
+            if gate_id not in pending:
+                continue
+            if str(raw_gate.get("status") or "").strip().lower() != "blocked":
+                continue
+            reason_by_gate[gate_id] = _gate_blocker_reason(raw_gate)
+        external_gate_ids = [gate_id for gate_id in sorted(pending) if _is_external_gate_blocker_reason(reason_by_gate.get(gate_id, ""))]
+        product_actionable_gate_ids = [gate_id for gate_id in sorted(pending) if gate_id not in external_gate_ids]
+        return {
+            "path": path.as_posix(),
+            "product_commit_sha": current_head,
+            "blocked_gate_ids": sorted(blocked) if blocked else sorted(pending),
+            "pending_gate_ids": sorted(pending),
+            "reason_by_gate": reason_by_gate,
+            "external_gate_ids": external_gate_ids,
+            "product_actionable_gate_ids": product_actionable_gate_ids,
+            "external_only": bool(external_gate_ids) and not product_actionable_gate_ids,
+        }
+    return None
+
+
+def _latest_gate_verifier_blocks_pending_gates(
+    *,
+    state_root: Path,
+    target_id: str,
+    goal_id: str,
+    target_repo: Path,
+    pending_gate_ids: Sequence[str],
+) -> bool:
+    return _latest_gate_verifier_block_report(
+        state_root=state_root,
+        target_id=target_id,
+        goal_id=goal_id,
+        target_repo=target_repo,
+        pending_gate_ids=pending_gate_ids,
+    ) is not None
 
 
 def refresh_progress(*, state_root: Path, goal: GoalRecord) -> dict[str, object]:
@@ -2634,6 +2736,189 @@ def _rewrite_depends_on_metadata(text: str, depends_on: Sequence[str]) -> str:
     return rendered + ("\n" if trailing_newline else "")
 
 
+def _rewrite_backlog_metadata_fields(text: str, fields: Mapping[str, str]) -> str:
+    lines = text.splitlines()
+    trailing_newline = text.endswith("\n")
+    metadata_end = next((index for index, line in enumerate(lines) if line.startswith("## ")), len(lines))
+    normalized_fields = {field.casefold(): (field, value) for field, value in fields.items()}
+    seen: set[str] = set()
+    for index in range(metadata_end):
+        if ":" not in lines[index]:
+            continue
+        key, _ = lines[index].split(":", 1)
+        normalized = key.strip().casefold()
+        if normalized not in normalized_fields:
+            continue
+        field, value = normalized_fields[normalized]
+        lines[index] = f"{field}: {value}"
+        seen.add(normalized)
+    insert_at = next((index for index, line in enumerate(lines[:metadata_end]) if not line.strip()), metadata_end)
+    additions = [
+        f"{field}: {value}"
+        for normalized, (field, value) in normalized_fields.items()
+        if normalized not in seen
+    ]
+    if additions:
+        lines[insert_at:insert_at] = additions
+    rendered = "\n".join(lines)
+    return rendered + ("\n" if trailing_newline else "")
+
+
+def _external_gate_blocker_summary(block_report: Mapping[str, object]) -> str:
+    reasons = block_report.get("reason_by_gate") if isinstance(block_report.get("reason_by_gate"), Mapping) else {}
+    parts: list[str] = []
+    for gate_id in block_report.get("external_gate_ids") or []:
+        reason = str(reasons.get(gate_id) if isinstance(reasons, Mapping) else "").strip()
+        parts.append(f"{gate_id}: {reason}" if reason else str(gate_id))
+        if len(parts) >= 3:
+            break
+    return "; ".join(parts) or "external setup/toolchain/store blocker"
+
+
+def _block_external_only_gate_correction_tasks(
+    state_root: Path,
+    *,
+    goal_id: str,
+    tasks: Sequence[Mapping[str, object]],
+    block_report: Mapping[str, object],
+    now: str,
+) -> tuple[list[Mapping[str, object]], int, list[str]]:
+    updated: list[Mapping[str, object]] = []
+    blocked_count = 0
+    blocked_backlog_ids: list[str] = []
+    reason = "External setup/toolchain/store blocker: " + _external_gate_blocker_summary(block_report)
+    blocked_root = state_root / "backlog" / "blocked"
+    queued_root = state_root / "backlog" / "queued"
+    if blocked_root.exists() and blocked_root.is_symlink():
+        return list(tasks), 0, []
+    for raw in tasks:
+        task = dict(raw)
+        status = str(task.get("backlog_status") or "").strip().lower()
+        if not _is_gate_correction_progress_task(task) or status in {"completed", "blocked"}:
+            updated.append(task)
+            continue
+        backlog_text = _queued_gate_backlog_text_for_task(state_root, goal_id=goal_id, task=task)
+        if backlog_text is None:
+            updated.append(task)
+            continue
+        path, text = backlog_text
+        try:
+            path.resolve().relative_to(queued_root.resolve())
+        except (OSError, ValueError):
+            updated.append(task)
+            continue
+        rewritten = _rewrite_backlog_metadata_fields(
+            text,
+            {
+                "Status": "blocked",
+                "Autonomy-Execute": "blocked",
+                "Blocked-Reason": reason,
+            },
+        )
+        blocked_root.mkdir(parents=True, exist_ok=True)
+        destination = blocked_root / path.name
+        if destination.exists():
+            destination = blocked_root / f"{path.stem}-external-blocked{path.suffix}"
+        _write_text(path, rewritten)
+        path.rename(destination)
+        relative_destination = destination.relative_to(state_root).as_posix()
+        task["backlog_status"] = "blocked"
+        task["queued_backlog_path"] = ""
+        task["blocked_backlog_path"] = relative_destination
+        task["external_gate_blocked_at"] = now
+        task["external_gate_blocked_reason"] = reason
+        blocked_count += 1
+        backlog_id = str(task.get("backlog_id") or "")
+        if backlog_id:
+            blocked_backlog_ids.append(backlog_id)
+        updated.append(task)
+    return updated, blocked_count, blocked_backlog_ids
+
+
+def quarantine_external_gate_correction_tasks(
+    *,
+    state_root: Path,
+    target_id: str,
+    target_repo: Path,
+    goal: GoalRecord | None = None,
+) -> dict[str, object]:
+    active = goal or load_active_goal(state_root)
+    if active is None or active.status != "active":
+        return {"quarantined": 0, "blocked_backlog_ids": []}
+    progress = refresh_progress(state_root=state_root, goal=active)
+    goal_payload = _read_json(active.goal_json)
+    gate_status = goal_payload.get("completion_gate_status") if isinstance(goal_payload.get("completion_gate_status"), Mapping) else {}
+    pending_gate_ids = [
+        str(item)
+        for item in gate_status.get("pending_gate_ids", [])
+        if str(item)
+    ] if isinstance(gate_status, Mapping) and isinstance(gate_status.get("pending_gate_ids"), list) else []
+    block_report = _latest_gate_verifier_block_report(
+        state_root=state_root,
+        target_id=target_id,
+        goal_id=active.goal_id,
+        target_repo=target_repo,
+        pending_gate_ids=pending_gate_ids,
+    ) if pending_gate_ids else None
+    if not block_report or not bool(block_report.get("external_only")):
+        return {"quarantined": 0, "blocked_backlog_ids": []}
+    now = utc_timestamp()
+    tasks = [entry for entry in progress.get("tasks") or [] if isinstance(entry, Mapping)]
+    tasks, blocked_count, blocked_ids = _block_external_only_gate_correction_tasks(
+        state_root,
+        goal_id=active.goal_id,
+        tasks=tasks,
+        block_report=block_report,
+        now=now,
+    )
+    if not blocked_count:
+        return {
+            "quarantined": 0,
+            "blocked_backlog_ids": [],
+            "external_gate_ids": list(block_report.get("external_gate_ids") or ()),
+        }
+    progress["tasks"] = tasks
+    progress["updated_at"] = now
+    progress.setdefault("events", []).append(
+        {
+            "event": "goal-gate-external-blockers-quarantined",
+            "created_at": now,
+            "blocked_backlog_ids": blocked_ids,
+            "pending_gate_ids": pending_gate_ids,
+        }
+    )
+    _write_json(active.progress_json, progress)
+    linked = [str(entry.get("backlog_id")) for entry in tasks if str(entry.get("backlog_id") or "")]
+    goal_payload["linked_backlog_ids"] = linked
+    goal_payload["updated_at"] = now
+    _write_json(active.goal_json, goal_payload)
+    report_path = active.goal_dir / "queue-report.json"
+    _write_json(
+        report_path,
+        {
+            "schema_version": GOAL_SCHEMA_VERSION,
+            "goal_id": active.goal_id,
+            "target_id": target_id,
+            "plan_id": str(goal_payload.get("active_plan_id") or ""),
+            "created_at": now,
+            "tasks": tasks,
+            "queued": 0,
+            "manual_review": 0,
+            "gate_external_blockers": True,
+            "pending_gate_ids": pending_gate_ids,
+            "external_gate_ids": list(block_report.get("external_gate_ids") or ()),
+            "reason_by_gate": dict(block_report.get("reason_by_gate") or {}),
+            "blocked_backlog_ids": blocked_ids,
+        },
+    )
+    return {
+        "quarantined": blocked_count,
+        "blocked_backlog_ids": blocked_ids,
+        "external_gate_ids": list(block_report.get("external_gate_ids") or ()),
+        "queue_report_path": report_path.as_posix(),
+    }
+
+
 def _normalize_open_gate_task_dependencies(
     state_root: Path,
     *,
@@ -2795,6 +3080,39 @@ def refill_goal_tasks(
             for item in gate_status.get("pending_gate_ids", [])
             if str(item)
         ] if isinstance(gate_status, Mapping) and isinstance(gate_status.get("pending_gate_ids"), list) else []
+        gate_block_report = _latest_gate_verifier_block_report(
+            state_root=state_root,
+            target_id=target_id,
+            goal_id=active.goal_id,
+            target_repo=target_repo,
+            pending_gate_ids=pending_gate_ids,
+        ) if pending_gate_ids else None
+        if gate_block_report and bool(gate_block_report.get("external_only")):
+            now = utc_timestamp()
+            existing_tasks, external_blocked_count, external_blocked_ids = _block_external_only_gate_correction_tasks(
+                state_root,
+                goal_id=active.goal_id,
+                tasks=existing_tasks,
+                block_report=gate_block_report,
+                now=now,
+            )
+            if external_blocked_count:
+                progress["tasks"] = list(existing_tasks)
+                progress["updated_at"] = now
+                progress.setdefault("events", []).append(
+                    {
+                        "event": "goal-gate-external-blockers-quarantined",
+                        "created_at": now,
+                        "blocked_backlog_ids": external_blocked_ids,
+                        "pending_gate_ids": pending_gate_ids,
+                    }
+                )
+                _write_json(active.progress_json, progress)
+                linked = [str(entry.get("backlog_id")) for entry in existing_tasks if str(entry.get("backlog_id") or "")]
+                goal_payload["linked_backlog_ids"] = linked
+                goal_payload["updated_at"] = now
+                _write_json(active.goal_json, goal_payload)
+                executable = _goal_executable_progress_tasks(state_root, existing_tasks)
         has_open_gate_verification_task = any(
             _is_gate_verification_progress_task(item)
             and str(item.get("backlog_status") or "").strip().lower() not in {"completed", "blocked"}
@@ -2806,13 +3124,49 @@ def refill_goal_tasks(
             for item in existing_tasks
         )
         if not executable and pending_gate_ids and not has_open_gate_verification_task:
-            if _latest_gate_verifier_blocks_pending_gates(
-                state_root=state_root,
-                target_id=target_id,
-                goal_id=active.goal_id,
-                target_repo=target_repo,
-                pending_gate_ids=pending_gate_ids,
-            ):
+            if gate_block_report:
+                if bool(gate_block_report.get("external_only")):
+                    now = utc_timestamp()
+                    report_path = active.goal_dir / "queue-report.json"
+                    _write_json(
+                        report_path,
+                        {
+                            "schema_version": GOAL_SCHEMA_VERSION,
+                            "goal_id": active.goal_id,
+                            "target_id": target_id,
+                            "plan_id": str(goal_payload.get("active_plan_id") or ""),
+                            "created_at": now,
+                            "tasks": existing_tasks,
+                            "queued": 0,
+                            "manual_review": 0,
+                            "gate_external_blockers": True,
+                            "pending_gate_ids": pending_gate_ids,
+                            "external_gate_ids": list(gate_block_report.get("external_gate_ids") or ()),
+                            "reason_by_gate": dict(gate_block_report.get("reason_by_gate") or {}),
+                        },
+                    )
+                    progress = _read_json(active.progress_json)
+                    progress["updated_at"] = now
+                    progress.setdefault("events", []).append(
+                        {
+                            "event": "goal-gate-external-blockers",
+                            "created_at": now,
+                            "pending_gate_ids": pending_gate_ids,
+                            "external_gate_ids": list(gate_block_report.get("external_gate_ids") or ()),
+                        }
+                    )
+                    _write_json(active.progress_json, progress)
+                    return GoalRefillResult(
+                        goal_id=active.goal_id,
+                        plan_id=str(goal_payload.get("active_plan_id") or ""),
+                        created=0,
+                        queued=0,
+                        manual_review=0,
+                        completed=False,
+                        queue_report_path=report_path,
+                        generated_backlog_ids=(),
+                        message="goal gate verifier blocked on external setup/toolchain/store prerequisites",
+                    )
                 if not has_open_gate_correction_task:
                     completion_gates = goal_payload.get("completion_gates") if isinstance(goal_payload.get("completion_gates"), list) else []
                     product_audit = goal_payload.get("product_audit") if isinstance(goal_payload.get("product_audit"), Mapping) else {}

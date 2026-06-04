@@ -37,6 +37,136 @@ def _init_git_repo(path: Path) -> None:
     (path / "README.md").write_text("# Product\n", encoding="utf-8")
 
 
+def _commit_initial_product(path: Path) -> None:
+    subprocess.run(["git", "add", "README.md"], cwd=path, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", "chore: init product"], cwd=path, check=True, env=_git_env())
+
+
+def _commit_product_all(path: Path, message: str) -> None:
+    subprocess.run(["git", "add", "."], cwd=path, check=True, env=_git_env())
+    subprocess.run(["git", "commit", "-m", message], cwd=path, check=True, env=_git_env())
+
+
+def _write_backlog_implementation_evidence(
+    module,
+    *,
+    product: Path,
+    state_root: Path,
+    backlog_id: str,
+    backlog_title: str,
+    diff_paths: list[str],
+    run_id: str,
+) -> None:
+    head = module.target_git_head(product)
+    fingerprint = module.product_diff_fingerprint(product, diff_paths)
+    run_dir = state_root / "runs" / "harness" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "status": "pass",
+                "root_context": {"target_id": "demo", "state_root": state_root.as_posix()},
+                "product_execution": "enabled",
+                "product_implementation": "enabled",
+                "product_commit": "disabled",
+                "product_push": "disabled",
+                "lane_execution": "backlog-implementation",
+                "product_head_before": head,
+                "product_head_after": head,
+                "external_backlog": {
+                    "id": backlog_id,
+                    "path": f"backlog/queued/{backlog_id}.md",
+                    "title": backlog_title,
+                },
+                "product_diff_paths": diff_paths,
+                "product_diff_fingerprint": fingerprint,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _make_completed_design_transition_fixture(
+    module,
+    tmp_path: Path,
+    *,
+    backlog_id: str,
+    backlog_title: str,
+    backlog_body: str,
+    css_after: str,
+    run_id: str,
+):
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_git_repo(product)
+    _commit_initial_product(product)
+    record = module.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="test",
+    )
+    state_root = controller / "targets" / "demo"
+    queued = state_root / "backlog" / "queued" / f"{backlog_id}.md"
+    queued.parent.mkdir(parents=True, exist_ok=True)
+    queued.write_text(backlog_body, encoding="utf-8")
+    (product / "src").mkdir()
+    (product / "src" / "styles.css").write_text(".screen { color: #000; }\n", encoding="utf-8")
+    _commit_product_all(product, "chore: add baseline styles")
+    (product / "src" / "styles.css").write_text(css_after, encoding="utf-8")
+    _write_backlog_implementation_evidence(
+        module,
+        product=product,
+        state_root=state_root,
+        backlog_id=backlog_id,
+        backlog_title=backlog_title,
+        diff_paths=["src/styles.css"],
+        run_id=run_id,
+    )
+    return controller, product, record, state_root, queued
+
+
+def _make_completed_design_directory_diff_fixture(
+    module,
+    tmp_path: Path,
+    *,
+    backlog_id: str,
+    backlog_body: str,
+    run_id: str,
+):
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_git_repo(product)
+    _commit_initial_product(product)
+    record = module.add_target(
+        controller_root=controller,
+        target_id="demo",
+        repo=product,
+        branch="main",
+        controller_version="test",
+    )
+    state_root = controller / "targets" / "demo"
+    queued = state_root / "backlog" / "queued" / f"{backlog_id}.md"
+    queued.parent.mkdir(parents=True, exist_ok=True)
+    queued.write_text(backlog_body, encoding="utf-8")
+    (product / "styles").mkdir()
+    (product / "styles" / "theme.css").write_text(".screen { color: #555; }\n", encoding="utf-8")
+    _write_backlog_implementation_evidence(
+        module,
+        product=product,
+        state_root=state_root,
+        backlog_id=backlog_id,
+        backlog_title="Sketch design implementation",
+        diff_paths=["styles"],
+        run_id=run_id,
+    )
+    return controller, product, record, state_root, queued
+
+
 def test_controller_git_wrapper_is_noninteractive_and_times_out(monkeypatch, tmp_path: Path) -> None:
     module = _load_module()
     seen: dict[str, object] = {}
@@ -523,6 +653,200 @@ def test_complete_sidecar_backlog_with_controller_evidence_allows_gate_verifier_
     assert "Product-Diff-Paths:" in completed_text
     assert Path(payload["receipt_path"]).exists()
     assert (product / "README.md").read_text(encoding="utf-8") == "# Product\n"
+
+
+def test_transition_rejects_binding_design_backlog_with_css_only_diff(tmp_path: Path) -> None:
+    module = _load_module()
+    controller, _, record, state_root, queued = _make_completed_design_transition_fixture(
+        module,
+        tmp_path,
+        backlog_id="BL-design",
+        backlog_title="iOS 26 Sketch 디자인 기준 UI 반영",
+        css_after=".screen { color: #111; }\n",
+        run_id="run-design",
+        backlog_body="\n".join(
+            [
+                "ID: BL-design",
+                "Title: iOS 26 Sketch 디자인 기준 UI 반영",
+                "Status: queued",
+                "Autonomy-Execute: auto",
+                "",
+                "Goal-Attachment-Manifest: goals/goal-1/attachments/attachment-manifest.json",
+                "",
+                "## Acceptance",
+                "- designs/chatapp-test-ios26-fixed.sketch 디자인과 화면 구조를 반영한다.",
+                "- 프로필, 채팅, 설정 화면이 시안 기준으로 구현된다.",
+                "",
+            ]
+        ),
+    )
+
+    with pytest.raises(module.ControllerError, match="binding design"):
+        module.transition_sidecar_backlog(
+            controller_root=controller,
+            record=record,
+            status="completed",
+            reason="autopilot implementation accepted",
+            apply=True,
+            run_id="run-design",
+        )
+
+    assert queued.exists()
+    assert not (state_root / "backlog" / "completed" / "BL-design.md").exists()
+
+
+def test_transition_rejects_design_backlog_that_says_css_only_is_insufficient(tmp_path: Path) -> None:
+    module = _load_module()
+    controller, _, record, state_root, queued = _make_completed_design_transition_fixture(
+        module,
+        tmp_path,
+        backlog_id="BL-figma",
+        backlog_title="Figma design source of truth",
+        css_after=".screen { color: #333; }\n",
+        run_id="run-figma",
+        backlog_body="\n".join(
+            [
+                "ID: BL-figma",
+                "Title: Figma design source of truth",
+                "Status: queued",
+                "Autonomy-Execute: auto",
+                "",
+                "Goal-Attachment: attachments/current-screen.png",
+                "",
+                "## Acceptance",
+                "- User-provided design is the binding source of truth.",
+                "- CSS-only diffs are insufficient; implement the view/component structure.",
+                "- not CSS-only.",
+                "",
+            ]
+        ),
+    )
+
+    with pytest.raises(module.ControllerError, match="binding design"):
+        module.transition_sidecar_backlog(
+            controller_root=controller,
+            record=record,
+            status="completed",
+            reason="autopilot implementation accepted",
+            apply=True,
+            run_id="run-figma",
+        )
+
+    assert queued.exists()
+    assert not (state_root / "backlog" / "completed" / "BL-figma.md").exists()
+
+
+def test_transition_rejects_english_sketch_design_backlog_with_css_only_diff(tmp_path: Path) -> None:
+    module = _load_module()
+    controller, _, record, state_root, queued = _make_completed_design_transition_fixture(
+        module,
+        tmp_path,
+        backlog_id="BL-sketch",
+        backlog_title="Sketch design implementation",
+        css_after=".screen { color: #444; }\n",
+        run_id="run-sketch",
+        backlog_body="\n".join(
+            [
+                "ID: BL-sketch",
+                "Title: Sketch design implementation",
+                "Status: queued",
+                "Autonomy-Execute: auto",
+                "",
+                "## Acceptance",
+                "- Sketch design should match the user-provided design artifact.",
+                "- Image attachment should be used for screen mapping.",
+                "",
+            ]
+        ),
+    )
+
+    with pytest.raises(module.ControllerError, match="binding design"):
+        module.transition_sidecar_backlog(
+            controller_root=controller,
+            record=record,
+            status="completed",
+            reason="autopilot implementation accepted",
+            apply=True,
+            run_id="run-sketch",
+        )
+
+    assert queued.exists()
+    assert not (state_root / "backlog" / "completed" / "BL-sketch.md").exists()
+
+
+def test_transition_rejects_binding_design_backlog_with_untracked_style_directory_diff(tmp_path: Path) -> None:
+    module = _load_module()
+    controller, _, record, state_root, queued = _make_completed_design_directory_diff_fixture(
+        module,
+        tmp_path,
+        backlog_id="BL-style-dir",
+        run_id="run-style-dir",
+        backlog_body="\n".join(
+            [
+                "ID: BL-style-dir",
+                "Title: Sketch design implementation",
+                "Status: queued",
+                "Autonomy-Execute: auto",
+                "",
+                "## Acceptance",
+                "- Sketch design is the binding source of truth.",
+                "- Implement real product screens, not a stylesheet-only folder.",
+                "",
+            ]
+        ),
+    )
+
+    with pytest.raises(module.ControllerError, match="binding design"):
+        module.transition_sidecar_backlog(
+            controller_root=controller,
+            record=record,
+            status="completed",
+            reason="autopilot implementation accepted",
+            apply=True,
+            run_id="run-style-dir",
+        )
+
+    assert queued.exists()
+    assert not (state_root / "backlog" / "completed" / "BL-style-dir.md").exists()
+
+
+def test_transition_allows_explicit_style_only_design_polish_with_css_diff(tmp_path: Path) -> None:
+    module = _load_module()
+    controller, _, record, state_root, queued = _make_completed_design_transition_fixture(
+        module,
+        tmp_path,
+        backlog_id="BL-design-polish",
+        backlog_title="Sketch 디자인 기준 색상만 CSS로 조정",
+        css_after=".screen { color: #222; }\n",
+        run_id="run-design-polish",
+        backlog_body="\n".join(
+            [
+                "ID: BL-design-polish",
+                "Title: Sketch 디자인 기준 색상만 CSS로 조정",
+                "Status: queued",
+                "Autonomy-Execute: auto",
+                "",
+                "Goal-Attachment-Manifest: goals/goal-1/attachments/attachment-manifest.json",
+                "",
+                "## Acceptance",
+                "- style-only: 기존 구현 화면은 유지하고 색상만 CSS로 조정한다.",
+                "",
+            ]
+        ),
+    )
+
+    payload = module.transition_sidecar_backlog(
+        controller_root=controller,
+        record=record,
+        status="completed",
+        reason="style-only polish accepted",
+        apply=True,
+        run_id="run-design-polish",
+    )
+
+    assert payload["target_path"] == "backlog/completed/BL-design-polish.md"
+    assert not queued.exists()
+    assert (state_root / "backlog" / "completed" / "BL-design-polish.md").exists()
 
 
 def test_find_resumable_target_implementation_evidence_matches_current_dirty_diff(tmp_path: Path) -> None:

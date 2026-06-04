@@ -116,6 +116,69 @@ def test_task_review_normalizes_natural_language_request_to_canonical_preview(tm
     assert "Intake-Packet: task-natural-language" in body
 
 
+def test_task_review_preserves_colon_required_behavior_as_acceptance(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp-test"
+    repo = tmp_path / "chatapp-test"
+    for relative in ("src/seed.js", "src/app.js", "tests/seed.test.js"):
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("// fixture\n", encoding="utf-8")
+    (repo / "package.json").write_text('{"scripts":{"validate":"node --test"}}\n', encoding="utf-8")
+    request = module.create_draft(
+        state_root=state_root,
+        target_id="chatapp-test",
+        title="demo provider seeds",
+        packet_id="task-colon-sections",
+    )
+    request.write_text(
+        "\n".join(
+            [
+                "# demo provider seeds",
+                "",
+                "Goal:",
+                "- Remove overseas region/country/language dummy content from demo and provider-test visible seed data.",
+                "",
+                "Required behavior:",
+                "- Allowed regions: 전체, 서울, 인천, 대전, 대구, 울산, 부산, 경기, 강원, 세종, 제주, 충북, 충남, 전남, 경북, 경남.",
+                "- Provide at least 60 discovery users and at least 60 feed items for scroll testing.",
+                "- Remove visible language-exchange labels and overseas locations such as California, New York, Fukuoka.",
+                "",
+                "File Scope:",
+                "- src/seed.js",
+                "- src/app.js",
+                "- tests/**",
+                "",
+                "Validation:",
+                "- `npm run validate`",
+                "",
+                "Acceptance:",
+                "- Demo mode after pressing 데모 시작 shows only Korean regions/personas.",
+                "- Demo/provider-test seed fixtures remain excluded from production gate evidence.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    review = module.review_packet(state_root=state_root, packet_id="task-colon-sections", target_repo=repo)
+    preview = review.preview_path.read_text(encoding="utf-8")
+
+    assert review.auto_eligible is True
+    assert "Remove overseas region/country/language" in preview
+    assert "Allowed regions: 전체, 서울" in preview
+    assert "at least 60 discovery users" in preview
+    assert "California, New York, Fukuoka" in preview
+    assert "Demo mode after pressing 데모 시작" in preview
+    assert "- src/seed.js" in preview
+    assert "- `npm run validate`" in preview
+
+    queued = module.queue_packet(state_root=state_root, packet_id="task-colon-sections", auto=True, target_repo=repo)
+    body = queued.backlog_path.read_text(encoding="utf-8")
+    assert "Allowed regions: 전체, 서울" in body
+    assert "at least 60 discovery users" in body
+
+
 def test_task_review_infers_gameplay_scope_for_korean_player_count_request(tmp_path: Path) -> None:
     module = _load_module()
     state_root = tmp_path / "targets" / "racegame"

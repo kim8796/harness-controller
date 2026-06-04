@@ -192,22 +192,22 @@ SETUP_REQUIREMENTS_BY_GATE: dict[str, tuple[SetupRequirement, ...]] = {
     ),
     "ios_native_build": (
         SetupRequirement(
-            "apple_developer",
-            "apple",
+            "production_app_url",
+            "vercel",
             "ios_native",
-            "Apple Developer/App Store Connect readiness",
-            (("APP_STORE_CONNECT_KEY_ID",), ("APP_STORE_CONNECT_ISSUER_ID",)),
-            "App Store Connect API key와 signing/provisioning 준비 상태를 확인하세요.",
+            "Production HTTPS app URL",
+            (("NEXT_PUBLIC_APP_URL", "APP_URL"),),
+            "iOS simulator/debug build가 연결할 production HTTPS URL을 설정하세요.",
         ),
     ),
     "android_native_build": (
         SetupRequirement(
-            "google_play_console",
-            "google-play",
+            "production_app_url",
+            "vercel",
             "android_native",
-            "Google Play Console readiness",
-            (("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON",),),
-            "Play Console service account와 signing key 준비 상태를 확인하세요.",
+            "Production HTTPS app URL",
+            (("NEXT_PUBLIC_APP_URL", "APP_URL"),),
+            "Android emulator/debug build가 연결할 production HTTPS URL을 설정하세요.",
         ),
     ),
     "store_release_readiness": (
