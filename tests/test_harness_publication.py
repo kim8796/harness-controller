@@ -48,6 +48,72 @@ def _fail(command: Sequence[str], stderr: str) -> subprocess.CompletedProcess[st
     return subprocess.CompletedProcess(list(command), 1, "", stderr)
 
 
+def _write_task_intake_backlog(
+    state_root: Path,
+    *,
+    backlog_id: str = "BL-demo",
+    packet_id: str = "task-demo",
+    state: str = "completed",
+    goal_id: str = "goal-1",
+    request_id: str = "REQ-0001",
+    check_id: str = "REQ-0001-CHECK-001",
+) -> None:
+    backlog = state_root / "backlog" / state / f"{backlog_id}.md"
+    backlog.parent.mkdir(parents=True, exist_ok=True)
+    backlog.write_text(
+        "\n".join(
+            [
+                f"ID: {backlog_id}",
+                "Title: Demo task",
+                f"Status: {state}",
+                f"Goal: {goal_id}",
+                "Source: task-intake",
+                "Autonomy-Execute: auto",
+                "Target-ID: demo",
+                f"Intake-Packet: {packet_id}",
+                f"Request-Ids: {request_id}",
+                f"Request-Check-Ids: {check_id}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_request_verification(
+    state_root: Path,
+    *,
+    backlog_id: str = "BL-demo",
+    goal_id: str = "goal-1",
+    request_id: str = "REQ-0001",
+    check_id: str = "REQ-0001-CHECK-001",
+    status: str = "passed",
+    product_commit_sha: str = "abc1234",
+) -> None:
+    run_dir = state_root / "runs" / "harness" / f"request-verification-{backlog_id}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "operation": "request-verification",
+                "schema_version": 1,
+                "target_id": "demo",
+                "goal_id": goal_id,
+                "backlog_id": backlog_id,
+                "request_id": request_id,
+                "check_id": check_id,
+                "status": status,
+                "product_commit_sha": product_commit_sha,
+                "validator": "request_check_v1",
+                "observed_result": "The linked request is satisfied by the product implementation.",
+                "evidence": "Request evidence references the implementation output.",
+                "checked_at": "2026-06-04T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_publish_task_branch_receipt_pushes_branch_and_creates_draft_pr(tmp_path: Path) -> None:
     module = _load_module()
     repo = tmp_path / "product"
@@ -455,6 +521,62 @@ def test_publish_task_pr_treats_commit_already_on_base_as_published(tmp_path: Pa
     assert payload["pr_url"] == ""
 
 
+def test_publish_task_pr_records_passing_task_intake_request_evidence(tmp_path: Path) -> None:
+    module = _load_module()
+    repo = tmp_path / "product"
+    state_root = tmp_path / "targets" / "demo"
+    repo.mkdir(parents=True)
+    _write_task_intake_backlog(state_root, backlog_id="BL-demo")
+    _write_request_verification(state_root, backlog_id="BL-demo")
+    branch = module.task_branch_name("demo", "BL-demo")
+    push_command = ("git", "push", "origin", f"abc1234:refs/heads/{branch}")
+    pr_list_command = ("gh", "pr", "list", "--head", branch, "--base", "main", "--json", "url", "--jq", ".[0].url")
+    pr_create_command = (
+        "gh",
+        "pr",
+        "create",
+        "--base",
+        "main",
+        "--head",
+        branch,
+        "--title",
+        "Demo",
+        "--body",
+        "body",
+    )
+    fetch_command = ("git", "fetch", "--prune", "origin")
+    ancestor_command = ("git", "merge-base", "--is-ancestor", "abc1234", "origin/main")
+    runner = FakeRunner(
+        {
+            push_command: _ok(push_command),
+            pr_list_command: _ok(pr_list_command, stdout=""),
+            pr_create_command: _fail(pr_create_command, "GraphQL: No commits between main and harness/demo/BL-demo"),
+            fetch_command: _ok(fetch_command),
+            ancestor_command: _ok(ancestor_command),
+        }
+    )
+
+    result = module.publish_task_pr(
+        controller_root=tmp_path,
+        state_root=state_root,
+        target_repo=repo,
+        target_id="demo",
+        goal_id="goal-1",
+        backlog_id="BL-demo",
+        run_id="run-1",
+        commit_sha="abc1234",
+        base_branch="main",
+        title="Demo",
+        body="body",
+        runner=runner,
+    )
+
+    payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
+    assert payload["request_evidence"]["linked"] is True
+    assert payload["request_evidence"]["status"] == "passed"
+    assert payload["request_evidence"]["passed_check_ids"] == ["REQ-0001-CHECK-001"]
+
+
 def test_pending_task_pr_merges_ignores_already_in_base_receipts_without_pr(tmp_path: Path) -> None:
     module = _load_module()
     state_root = tmp_path / "targets" / "demo"
@@ -627,6 +749,65 @@ def test_merge_task_pr_allows_absent_checks_and_syncs_local_base(tmp_path: Path)
         ("git", "merge", "--ff-only", "origin/main"),
         ("git", "rev-parse", "HEAD"),
     ]
+
+
+def test_merge_task_pr_blocks_linked_request_missing_verification_evidence(tmp_path: Path) -> None:
+    module = _load_module()
+    repo = tmp_path / "product"
+    state_root = tmp_path / "targets" / "demo"
+    repo.mkdir(parents=True)
+    branch = module.task_branch_name("demo", "BL-demo")
+    pr_url = "https://github.com/acme/product/pull/7"
+    _write_task_intake_backlog(
+        state_root,
+        backlog_id="BL-demo",
+        packet_id="task-demo",
+    )
+    publication = state_root / "runs" / "harness" / "external-20260520-000001-backlog-pr-BL-demo"
+    publication.mkdir(parents=True)
+    (publication / "generated-evidence.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "operation": "backlog-product-pr",
+                "applied": True,
+                "status": "created",
+                "target_id": "demo",
+                "goal_id": "goal-1",
+                "backlog_id": "BL-demo",
+                "implementation_run_id": "run-1",
+                "product_commit_sha": "abc1234",
+                "branch": branch,
+                "base": "main",
+                "pr_url": pr_url,
+                "created_at": "2026-05-20T00:00:01Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    runner = FakeRunner({})
+
+    result = module.merge_task_pr(
+        controller_root=tmp_path,
+        state_root=state_root,
+        target_repo=repo,
+        target_id="demo",
+        goal_id="goal-1",
+        backlog_id="BL-demo",
+        run_id="run-1",
+        commit_sha="abc1234",
+        branch=branch,
+        base_branch="main",
+        pr_url=pr_url,
+        runner=runner,
+    )
+
+    payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
+    assert result.status == "merge-blocked"
+    assert "linked request verification evidence" in result.message
+    assert payload["request_evidence"]["linked"] is True
+    assert payload["request_evidence"]["status"] == "missing"
+    assert runner.calls == []
 
 
 def test_merge_task_pr_retries_unknown_mergeability_before_pending(tmp_path: Path) -> None:

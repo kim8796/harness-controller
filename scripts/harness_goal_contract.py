@@ -303,6 +303,8 @@ def build_goal_contract(
     source_spec_path: str = "",
     spec_path: str = "",
     attachment_manifest_path: str = "",
+    request_ledger_path: str = "",
+    request_checks_path: str = "",
     attachments: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     criteria_text = "\n".join(str(item) for item in success_criteria)
@@ -330,6 +332,8 @@ def build_goal_contract(
             "spec_sha256": spec_sha256,
             "spec_sha256_prefix": spec_sha256[:16],
             "attachment_manifest_path": attachment_manifest_path,
+            "request_ledger_path": request_ledger_path,
+            "request_checks_path": request_checks_path,
             "attachment_count": len(attachment_items),
             "attachment_manifest": {
                 "path": attachment_manifest_path,

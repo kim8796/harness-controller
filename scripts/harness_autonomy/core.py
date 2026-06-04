@@ -712,6 +712,16 @@ def _controller_support() -> Any:
         return _load_module("repo_harness_controller", controller_path)
 
 
+def _request_ledger_support() -> Any:
+    try:
+        import harness_request_ledger
+
+        return harness_request_ledger
+    except ModuleNotFoundError:  # pragma: no cover - export/isolated fallback
+        ledger_path = Path(__file__).resolve().parents[1] / "harness_request_ledger.py"
+        return _load_module("repo_harness_request_ledger", ledger_path)
+
+
 def _loop_support() -> Any:
     try:
         import harness_loop
@@ -8569,6 +8579,11 @@ def build_external_product_implementation_prompt(
             "- Do not replace it with a generic design system or arbitrary redesign; only make the minimum responsive/platform adjustments needed to implement that supplied design.",
             "- If you cannot inspect the design artifact or map it to product screens, leave product files unchanged and report that blocker.",
             "- For binding design tasks, CSS-only/theme-only diffs are insufficient unless the backlog explicitly says the task is style-only.",
+            "- Request traceability: when the backlog lists `Request-Ids` or `Request-Check-Ids`, preserve those user-request constraints exactly.",
+            "- Before finishing, include a fenced JSON object with `request_verification_claims` entries for every listed request check that you addressed.",
+            "- These claims are non-authoritative implementer evidence; controller/verifier receipts decide whether a request check passes.",
+            "- Each request verification claim must include `request_id`, `check_id`, `status` (`passed`, `failed`, or `blocked`), `observed_result`, and `evidence`.",
+            "- If a request or binding design cannot be satisfied, mark that check `blocked` or `failed`; do not claim it passed.",
             "- Do not shrink the goal to a local demo, seed data, README-only change, or mocked flow unless the goal explicitly asks for that.",
             "- If implementation is blocked by missing credentials or external services, leave product files unchanged and report the exact blocker.",
             "",
@@ -8675,6 +8690,7 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
     if str(lock_payload.get("target_id") or "") != context.target_id or str(lock_payload.get("token") or "") != lock_token:
         raise AutonomyError("external target lock owner mismatch")
     controller = _controller_support()
+    request_ledger = _request_ledger_support()
     if context.product_implementation_enabled and not context.product_execution_enabled:
         raise AutonomyError("external product implementation requires product execution")
     if context.product_implementation_enabled and (context.product_commit_enabled or context.product_push_enabled):
@@ -9015,6 +9031,27 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
         "verification": verification,
         "post_verification": post_verification,
     }
+    if implementation_lane_result is not None and backlog_payload:
+        request_ids = [
+            value.strip()
+            for value in str(backlog_payload.get("request_ids") or "").split(",")
+            if value.strip()
+        ]
+        request_check_ids = [
+            value.strip()
+            for value in str(backlog_payload.get("request_check_ids") or "").split(",")
+            if value.strip()
+        ]
+        payload["request_verification_claims"] = request_ledger.request_verifications_from_text(
+            implementation_lane_result.response_text,
+            target_id=context.target_id,
+            goal_id=str(backlog_payload.get("goal") or ""),
+            backlog_id=str(backlog_payload.get("id") or ""),
+            request_ids=request_ids,
+            request_check_ids=request_check_ids,
+            product_commit_sha=product_commit_sha,
+            product_diff_fingerprint=str(payload.get("product_diff_fingerprint") or ""),
+        )
     _write_external_sidecar_json(
         context.state_root,
         root_context_path,

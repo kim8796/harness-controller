@@ -301,3 +301,145 @@ Diet-Exception: Production gate verifier support needs focused tests for real E2
 
 - Every cleanup PR must run focused tests plus `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`.
 - No cleanup PR may delete evidence/report/receipt/root-context files or product repo files.
+
+## Request Source Traceability Plan
+
+**Problem:** The controller can still let autonomous planning or UI/design interpretation drift away from the user's explicit request. Existing production gates prevent fake production completion, and existing design guards block some CSS-only completions, but the user's original request is not yet a first-class source-of-truth with per-request pass/fail evidence. That allows PR merge and goal progress to treat a task as complete even when a concrete request or supplied design artifact was not satisfied.
+
+**Goal:** Preserve autonomy for planning and implementation choices while making user requests and binding design artifacts non-negotiable constraints. Each user request must be recorded, decomposed into checks, linked to implementation tasks, verified before completion, and allowed to block PR auto-merge and goal progress when unsatisfied.
+
+**Implementation Direction:**
+
+- Add a controller-owned request ledger module, `scripts/harness_request_ledger.py`.
+  - Store immutable-ish source entries under `targets/<target-id>/goals/<goal-id>/request-ledger.json`.
+  - Each entry has `request_id`, `source_kind`, `source_path`, `source_sha256`, `original_text`, `attachment_refs`, `design_binding`, `created_at`, and secret-redacted display fields.
+  - Store check decomposition under `targets/<target-id>/goals/<goal-id>/request-checks.json`.
+  - Each check has `check_id`, `request_id`, `kind`, `description`, `required_evidence`, `status`, and optional `gate_ids`.
+- Extend goal creation/refill.
+  - `./harness goal` and `./harness goal from` create request ledger/check artifacts from the full spec and attachment manifest.
+  - Design files, screenshots, Sketch/Figma artifacts, and image directories become `design_binding=true`; they are not optional inspiration.
+  - Roadmap tasks inherit `request_ids`, `request_check_ids`, and design/source references.
+- Extend task intake/backlog markdown.
+  - Generated backlog includes `Request-Ids`, `Request-Check-Ids`, `Request-Ledger`, and `Request-Checks`.
+  - The Summary/Acceptance/Notes must state which requests the task is solving.
+  - Canonical parser compatibility must be preserved by keeping new fields metadata-like and adding evidence paths in Notes.
+- Add request verification receipts.
+  - New operation: `request-verification`.
+  - Receipts live in run evidence and contain `target_id`, `goal_id`, `backlog_id`, `request_id`, `check_id`, `status: passed|failed|blocked`, `product_commit_sha`, `validator`, `observed_result`, `evidence`, and `checked_at`.
+  - Secret-like evidence is rejected/redacted.
+  - Missing or failed request checks mean the linked backlog cannot be completed.
+- Gate transition, PR merge, and goal progress.
+  - `transition_sidecar_backlog(... status=completed ...)` verifies linked request checks before moving a backlog to completed.
+  - `merge_task_pr` refuses auto-merge when the backlog has linked request checks with missing/failed request-verification evidence.
+  - Goal progress/completion treats unresolved required requests as pending work even if PRs are merged.
+  - Blocked external checks create operator-wait/correction tasks instead of silently progressing.
+- Strengthen binding design behavior.
+  - Existing CSS-only guard remains, but design-bound checks additionally require a request-verification receipt with visual/design evidence.
+  - If a design artifact cannot be inspected or mapped to product screens, the request check is `blocked`, not `passed`.
+  - Explicit style-only polish can still pass with CSS diffs if the request itself says it is style-only.
+- Update status surfaces.
+  - `./harness watch --status`, `./harness goal`, and `./harness fleet status` show unmet request count and top next action without printing raw secrets.
+  - Product repo files remain untouched by ledger/check state.
+
+**Agent Protocol:**
+
+- Explorers:
+  - Goal/source-of-truth explorer: goal artifacts and roadmap integration.
+  - Task/backlog explorer: backlog metadata and parser compatibility.
+  - Watch/publication explorer: completion and merge gate insertion points.
+  - Design-binding explorer: design request checks and visual evidence risks.
+  - Security/export explorer: redaction, export allowlist, and product pollution.
+- Workers after explorer review:
+  - Worker A: request ledger/check module and tests.
+  - Worker B: goal/refill/backlog linkage and tests.
+  - Worker C: transition/publication/progress gates and tests.
+  - Worker D: design-binding/status/docs/export tests.
+- Reviewers after implementation:
+  - Goal integrity reviewer.
+  - Production/request evidence reviewer.
+  - Fake-success/design-binding reviewer.
+  - Regression/export/security reviewer.
+- If a reviewer finds a blocker, write a short correction section in `plan.md`, patch, rerun focused tests, and review again.
+
+**Test Plan:**
+
+- New `tests/test_harness_request_ledger.py`.
+  - Goal text creates stable request IDs and check IDs.
+  - Attachments and design artifacts are recorded as binding source when present.
+  - Secret-like source/evidence is redacted or rejected.
+  - Re-running with the same source does not duplicate request IDs.
+- Extend `tests/test_harness_goal.py`.
+  - `goal from spec.md screenshots/` writes `request-ledger.json` and `request-checks.json`.
+  - Roadmap tasks include `request_ids` and `request_check_ids`.
+  - 25+ attachments remain represented through the manifest/checks.
+- Extend `tests/test_harness_task_intake.py`.
+  - Backlog preview/queued markdown includes `Request-Ids`, `Request-Check-Ids`, and expected evidence.
+  - Canonical scope and validation parser still accept generated backlog.
+- Extend `tests/test_harness_controller.py` or a focused `tests/test_harness_request_gate.py`.
+  - Completed transition rejects linked backlog when request evidence is missing.
+  - Completed transition rejects failed request evidence.
+
+### Correction: Request Traceability Code Diet
+
+**Problem:** Focused tests passed, but the pre-push guard blocked the branch because the new request-traceability regressions pushed `scripts/harness_publication.py`, `tests/test_harness_controller.py`, and `tests/test_harness_goal.py` over their size caps.
+
+**Fix:**
+
+- Move publication request-evidence lookup into a focused owner module instead of growing `harness_publication.py`.
+- Move request-gate controller regressions into a focused request traceability test file.
+- Move goal request metadata/progress regressions into a focused goal request traceability test file.
+- Add the new module/tests to export, release-check, sanitizer, and related-test surfaces.
+
+**Verification:**
+
+- `python3 -m pytest tests/test_harness_request_ledger.py tests/test_harness_goal_request_traceability.py tests/test_harness_request_gate.py tests/test_harness_publication.py tests/test_harness_export.py -q`
+- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+
+### Correction: Request Verification Fail-Closed Binding
+
+**Problem:** Reviewer found two fail-open paths:
+
+- Request-verification receipts with blank or stale `product_commit_sha` can satisfy later completion/merge/progress checks when callers omit the commit SHA.
+- Goal progress only blocks request checks when completed task/backlog metadata preserves `request_check_ids`; dropped/legacy metadata can fall back to `not-required` even though the goal has request checks.
+
+**Fix:**
+
+- Require `product_commit_sha` in passed request-verification receipts and require callers to provide a non-empty expected commit when request checks are enforced.
+- Bind completion request checks to the implementation evidence commit SHA.
+- Bind publication request checks to the task publication commit SHA.
+- Bind goal progress request checks to the latest successful publication commit for each completed backlog.
+- If completed task/backlog metadata lacks request checks but the goal has request checks, treat those goal request checks as pending instead of not-required.
+
+**Verification:**
+
+- Add tests that blank/stale request receipts do not pass completion/merge/goal progress.
+- Add a goal progress test where request metadata is missing but goal-level request checks keep the goal active.
+  - Completed transition accepts passed request evidence matching target/goal/backlog/commit.
+  - Binding design request rejects CSS/docs-only or no visual evidence unless explicitly style-only.
+- Extend `tests/test_harness_publication.py`.
+  - PR auto-merge is blocked when linked request evidence is missing/failed.
+  - Existing PR checks/merge behavior remains unchanged when no request checks are linked.
+- Extend `tests/test_harness_watch.py`, `tests/test_harness_fleet.py`, and export tests.
+  - Watch/fleet/status surfaces show unmet request debt.
+  - New module is included in controller export.
+
+**Verification:**
+
+- `python3 -m pytest tests/test_harness_request_ledger.py tests/test_harness_goal.py tests/test_harness_task_intake.py tests/test_harness_publication.py tests/test_harness_watch.py tests/test_harness_fleet.py tests/test_harness_export.py -q`
+- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+
+### Correction: No Implementer Self-Attested Request Gate Pass
+
+**Problem:** Final request-integrity reviewer found that implementer response JSON is parsed into nested `request_verifications` inside ordinary implementation evidence, and those nested self-attested entries can satisfy request gates. That makes the implementer both the code author and the authoritative verifier, which defeats request/source-of-truth enforcement.
+
+**Fix:**
+
+- Treat implementer-provided request evidence as non-authoritative `request_verification_claims` only.
+- Only top-level `operation=request-verification` receipts may satisfy request gates.
+- Keep schema, target, goal, backlog, request/check id, commit-or-diff binding, validator, timestamp, and secret checks on authoritative receipts.
+- Update tests so nested implementer claims are explicitly ignored for pass/fail gate decisions.
+
+**Verification:**
+
+- `python3 -m pytest tests/test_harness_request_ledger.py tests/test_harness_request_publication.py tests/test_harness_request_gate.py tests/test_harness_goal_request_traceability.py tests/test_harness_publication.py tests/test_harness_task_intake.py tests/test_harness_export.py -q`
+- `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`

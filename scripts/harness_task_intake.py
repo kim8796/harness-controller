@@ -428,6 +428,34 @@ def _validate_inline_items(values: Sequence[str], *, field_name: str) -> tuple[s
     return tuple(_validate_inline_text(value, field_name=field_name) for value in values)
 
 
+def _metadata_items(value: object, *, field_name: str) -> tuple[str, ...]:
+    if isinstance(value, str):
+        raw_items = re.split(r"\s*,\s*", value)
+    elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        raw_items = [str(item) for item in value if not isinstance(item, Mapping)]
+    else:
+        raw_items = []
+    normalized = _validate_inline_items(tuple(raw_items), field_name=field_name)
+    return tuple(dict.fromkeys(item for item in normalized if item))
+
+
+def _request_metadata_from_packet(packet: Mapping[str, object]) -> dict[str, object]:
+    metadata: dict[str, object] = {}
+    ledger_path = _validate_inline_text(str(packet.get("request_ledger_path") or ""), field_name="request ledger path")
+    checks_path = _validate_inline_text(str(packet.get("request_checks_path") or ""), field_name="request checks path")
+    request_ids = _metadata_items(packet.get("request_ids"), field_name="request ids")
+    request_check_ids = _metadata_items(packet.get("request_check_ids"), field_name="request check ids")
+    if ledger_path:
+        metadata["request_ledger_path"] = ledger_path
+    if checks_path:
+        metadata["request_checks_path"] = checks_path
+    if request_ids:
+        metadata["request_ids"] = request_ids
+    if request_check_ids:
+        metadata["request_check_ids"] = request_check_ids
+    return metadata
+
+
 def _normalize_image_captions(images: Sequence[Path], captions: Sequence[str]) -> tuple[str, ...]:
     if captions and len(captions) != len(images):
         raise TaskIntakeError("image caption count must match image count")
@@ -1668,6 +1696,10 @@ def _backlog_markdown(
     milestone_id: str = "",
     planner_plan_id: str = "",
     depends_on: Sequence[str] = (),
+    request_ledger_path: str = "",
+    request_checks_path: str = "",
+    request_ids: Sequence[str] = (),
+    request_check_ids: Sequence[str] = (),
 ) -> str:
     today = datetime.now().date().isoformat()
     summary = tuple(model["summary"]) or tuple(model["goal"])
@@ -1693,6 +1725,16 @@ def _backlog_markdown(
         metadata.append(f"Milestone: {milestone_id}")
     if planner_plan_id:
         metadata.append(f"Planner-Plan: {planner_plan_id}")
+    if request_ledger_path:
+        metadata.append(f"Request-Ledger: {request_ledger_path}")
+    if request_checks_path:
+        metadata.append(f"Request-Checks: {request_checks_path}")
+    clean_request_ids = tuple(str(item).strip() for item in request_ids if str(item).strip())
+    if clean_request_ids:
+        metadata.append("Request-Ids: " + ", ".join(clean_request_ids))
+    clean_request_check_ids = tuple(str(item).strip() for item in request_check_ids if str(item).strip())
+    if clean_request_check_ids:
+        metadata.append("Request-Check-Ids: " + ", ".join(clean_request_check_ids))
     clean_depends = tuple(str(item).strip() for item in depends_on if str(item).strip())
     if clean_depends:
         metadata.append("Depends-On: " + ", ".join(clean_depends))
@@ -2541,6 +2583,7 @@ def review_packet(
     model = _request_model(state_root, resolved_packet_id)
     packet = model["packet"]
     target_id = _assert_expected_target(packet, expected_target_id)
+    request_metadata = _request_metadata_from_packet(packet)
     request_text = str(model["text"])
     model, normalization = _normalize_task_model(
         state_root=state_root,
@@ -2559,6 +2602,7 @@ def review_packet(
         packet_id=resolved_packet_id,
         autonomy_execute="auto",
         model=model,
+        **request_metadata,
     )
     open_questions, risk_flags = _review_findings(model)
     from harness_autonomy.core import parse_backlog_machine_scope, scope_patterns_overlap
@@ -2575,6 +2619,7 @@ def review_packet(
             packet_id=resolved_packet_id,
             autonomy_execute="auto",
             model=item_model,
+            **request_metadata,
         )
         item_machine_scope, _item_forbidden_scope, item_scope_failures = parse_backlog_machine_scope(item_preview)
         if not item_machine_scope:
@@ -2607,6 +2652,7 @@ def review_packet(
             packet_id=resolved_packet_id,
             autonomy_execute="manual-review",
             model=model,
+            **request_metadata,
         )
     preview_path = _sidecar_path(state_root, DRAFTS_DIR, resolved_packet_id, "backlog-preview.md")
     review_path = _sidecar_path(state_root, DRAFTS_DIR, resolved_packet_id, "review.json")
@@ -2850,6 +2896,7 @@ def queue_packet(
         detail = ", ".join((*review.open_questions, *review.risk_flags))
         raise TaskIntakeError("auto queue 불가: " + detail)
     model = _load_review_model(state_root, resolved_packet_id)
+    request_metadata = _request_metadata_from_packet(packet)
     autonomy_execute = "auto" if auto else "manual-review"
     backlog_id = _make_backlog_id(resolved_packet_id)
     queued_dir = _sidecar_path(state_root, "backlog", "queued")
@@ -2870,6 +2917,7 @@ def queue_packet(
         milestone_id=milestone_id,
         planner_plan_id=planner_plan_id,
         depends_on=depends_on,
+        **request_metadata,
     )
     try:
         _write_text(backlog_path, body)

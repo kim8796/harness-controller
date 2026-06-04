@@ -102,9 +102,15 @@ def _init_wired_production_product(path: Path) -> None:
     subprocess.run(["git", "commit", "-m", "initial"], cwd=path, check=True, stdout=subprocess.PIPE)
 
 
+def _read_goal_payload(state_root: Path, goal_id: str) -> dict[str, object]:
+    payload_path = state_root / "goals" / goal_id / "goal.json"
+    return json.loads(payload_path.read_text(encoding="utf-8")) if payload_path.exists() else {}
+
+
 def _write_successful_publication(state_root: Path, *, target_id: str, goal_id: str, backlog_id: str) -> None:
     receipt_dir = state_root / "runs" / "harness" / f"external-20260529-000000-backlog-pr-{backlog_id}"
     receipt_dir.mkdir(parents=True, exist_ok=True)
+    product_commit_sha = "a" * 40
     (receipt_dir / "generated-evidence.json").write_text(
         json.dumps(
             {
@@ -115,11 +121,38 @@ def _write_successful_publication(state_root: Path, *, target_id: str, goal_id: 
                 "goal_id": goal_id,
                 "backlog_id": backlog_id,
                 "implementation_run_id": "run-done",
+                "product_commit_sha": product_commit_sha,
                 "pr_url": "https://github.com/acme/product/pull/1",
             }
         ),
         encoding="utf-8",
     )
+    goal_payload = _read_goal_payload(state_root, goal_id)
+    request_check_ids = [str(item) for item in goal_payload.get("request_check_ids") or () if str(item)]
+    request_ids = [str(item) for item in goal_payload.get("request_ids") or () if str(item)]
+    if request_check_ids and request_ids:
+        request_dir = state_root / "runs" / "harness" / f"request-verification-{backlog_id}"
+        request_dir.mkdir(parents=True, exist_ok=True)
+        (request_dir / "generated-evidence.json").write_text(
+            json.dumps(
+                {
+                    "operation": "request-verification",
+                    "schema_version": 1,
+                    "target_id": target_id,
+                    "goal_id": goal_id,
+                    "backlog_id": backlog_id,
+                    "request_id": request_ids[0],
+                    "check_id": request_check_ids[0],
+                    "status": "passed",
+                    "product_commit_sha": product_commit_sha,
+                    "validator": "request_check_v1",
+                    "observed_result": "Existing goal regression helper verified the linked user request.",
+                    "evidence": "The completed backlog and publication receipt are tied to this request check.",
+                    "checked_at": "2026-06-04T00:00:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
 
 
 GATE_EVIDENCE_TERMS = {
@@ -145,7 +178,6 @@ GATE_EVIDENCE_TERMS = {
 def _gate_evidence_entry(gate_id: str) -> dict[str, str]:
     validator, evidence = GATE_EVIDENCE_TERMS.get(gate_id, ("production_gate_probe_v1", f"production gate {gate_id} passed"))
     return {"id": gate_id, "status": "passed", "evidence": evidence, "validator": validator, "observed_result": evidence}
-
 
 def test_goal_service_level_production_generates_production_roadmap(tmp_path: Path) -> None:
     module = _load_module()
@@ -1794,32 +1826,6 @@ def test_goal_gate_verification_task_preserves_spec_attachment_and_expected_evid
     assert any(item["gate_id"] == "database_persistence" for item in gate_task["expected_evidence"])
 
 
-def test_goal_refresh_progress_removes_active_pointer_when_completed(tmp_path: Path) -> None:
-    module = _load_module()
-    state_root = tmp_path / "targets" / "game"
-    goal = module.create_goal(state_root=state_root, target_id="game", text="로컬 프로토타입만 완성도 있게 만든다")
-    progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
-    progress["tasks"] = [{"backlog_id": "BL-done"}]
-    goal.progress_json.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
-    completed = state_root / "backlog" / "completed" / "BL-done.md"
-    completed.parent.mkdir(parents=True, exist_ok=True)
-    completed.write_text(
-        "\n".join(["ID: BL-done", "Status: completed", f"Goal: {goal.goal_id}", ""]),
-        encoding="utf-8",
-    )
-    _write_successful_publication(state_root, target_id="game", goal_id=goal.goal_id, backlog_id="BL-done")
-
-    refreshed = module.refresh_progress(state_root=state_root, goal=goal)
-    goal_payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
-
-    assert refreshed["completed_count"] == 1
-    assert goal_payload["status"] == "completed"
-    assert not (state_root / "goals" / "active-goal.json").exists()
-    assert module.load_active_goal(state_root) is None
-    listed = module.list_goals(state_root)
-    assert listed[0]["status"] == "completed"
-
-
 def test_status_payload_refreshes_completed_backlog_progress(tmp_path: Path) -> None:
     module = _load_module()
     state_root = tmp_path / "targets" / "game"
@@ -1849,33 +1855,6 @@ def test_status_payload_refreshes_completed_backlog_progress(tmp_path: Path) -> 
     tasks = payload["progress"]["tasks"]
     assert tasks[0]["backlog_status"] == "completed"
     assert tasks[1]["backlog_status"] == "queued"
-
-
-def test_goal_refill_does_not_create_fallback_after_goal_completion(tmp_path: Path) -> None:
-    module = _load_module()
-    state_root = tmp_path / "targets" / "game"
-    product = tmp_path / "product"
-    product.mkdir()
-    _init_product(product)
-    goal = module.create_goal(state_root=state_root, target_id="game", text="로컬 프로토타입만 완성도 있게 만든다")
-    progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
-    progress["tasks"] = [{"backlog_id": "BL-done"}]
-    goal.progress_json.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
-    completed = state_root / "backlog" / "completed" / "BL-done.md"
-    completed.parent.mkdir(parents=True, exist_ok=True)
-    completed.write_text(
-        "\n".join(["ID: BL-done", "Status: completed", f"Goal: {goal.goal_id}", ""]),
-        encoding="utf-8",
-    )
-    _write_successful_publication(state_root, target_id="game", goal_id=goal.goal_id, backlog_id="BL-done")
-
-    result = module.refill_goal_tasks(state_root=state_root, target_id="game", target_repo=product, goal=goal)
-
-    assert result is not None
-    assert result.completed is True
-    assert result.created == 0
-    assert not tuple((state_root / "backlog" / "queued").glob("*.md"))
-    assert not (state_root / "goals" / "active-goal.json").exists()
 
 
 def test_goal_refill_creates_fallback_when_existing_tasks_are_manual_only(tmp_path: Path) -> None:

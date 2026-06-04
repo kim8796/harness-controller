@@ -17,6 +17,8 @@ Line count is a trigger, not the decision. The default runtime-module cap is 120
 - `scripts/harness_goal.py`: goal storage, roadmap/refill/task generation, progress refresh glue.
 - `scripts/harness_goal_contract.py`: GoalContract v2 classification and source-of-truth metadata.
 - `scripts/harness_goal_gates.py`: completion gate definitions and trusted gate evidence validation.
+- `scripts/harness_request_ledger.py`: user request source-of-truth ledger, request checks, and request-verification evidence validation.
+- `scripts/harness_request_publication.py`: request-verification publication/merge lookup bound to product commit receipts.
 - `scripts/harness_product_audit.py`: product repository audit orchestration.
 - `scripts/harness_product_audit_support.py`: product audit helper rules, path scanners, and maintainability handoff checks.
 - `scripts/harness_product_setup_readiness.py`: gate-driven provider/env setup readiness without exposing secret values.

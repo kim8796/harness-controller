@@ -71,6 +71,41 @@ def test_task_intake_draft_review_and_queue_auto(tmp_path: Path) -> None:
     assert [item.item_id for item in discovered] == [queued.backlog_id]
 
 
+def test_task_intake_carries_request_metadata_without_breaking_backlog_parser(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+
+    request = module.create_draft(
+        state_root=state_root,
+        target_id="demo",
+        title="Add welcome copy",
+        packet_id="task-request-trace",
+    )
+    request.write_text(_safe_request(), encoding="utf-8")
+    packet_path = state_root / "backlog" / "drafts" / "task-request-trace" / "task-packet.json"
+    packet = module.json.loads(packet_path.read_text(encoding="utf-8"))
+    packet["request_ledger_path"] = "goals/goal-1/request-ledger.json"
+    packet["request_checks_path"] = "goals/goal-1/request-checks.json"
+    packet["request_ids"] = ["REQ-0001"]
+    packet["request_check_ids"] = ["REQ-0001-CHECK-001", "REQ-0001-CHECK-002"]
+    packet_path.write_text(module.json.dumps(packet), encoding="utf-8")
+
+    review = module.review_packet(state_root=state_root, packet_id="task-request-trace")
+    preview = review.preview_path.read_text(encoding="utf-8")
+
+    assert "Request-Ledger: goals/goal-1/request-ledger.json" in preview
+    assert "Request-Checks: goals/goal-1/request-checks.json" in preview
+    assert "Request-Ids: REQ-0001" in preview
+    assert "Request-Check-Ids: REQ-0001-CHECK-001, REQ-0001-CHECK-002" in preview
+
+    queued = module.queue_packet(state_root=state_root, packet_id="task-request-trace", auto=True)
+    body = queued.backlog_path.read_text(encoding="utf-8")
+    assert "Request-Ids: REQ-0001" in body
+    assert "Request-Check-Ids: REQ-0001-CHECK-001, REQ-0001-CHECK-002" in body
+    discovered = module.harness_loop.discover_backlog_items(state_root)
+    assert [item.item_id for item in discovered] == [queued.backlog_id]
+
+
 def test_task_review_normalizes_natural_language_request_to_canonical_preview(tmp_path: Path) -> None:
     module = _load_module()
     state_root = tmp_path / "targets" / "demo"

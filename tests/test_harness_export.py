@@ -453,6 +453,8 @@ def test_starter_bundle_excludes_live_state_and_can_create_project(tmp_path: Pat
     assert (second_bundle / "scripts" / "harness_watch.py").exists()
     assert (second_bundle / "scripts" / "harness_operator_wait.py").exists()
     assert (second_bundle / "scripts" / "harness_production_gate_verifier.py").exists()
+    assert (second_bundle / "scripts" / "harness_request_ledger.py").exists()
+    assert (second_bundle / "scripts" / "harness_request_publication.py").exists()
     assert (second_bundle / "scripts" / "harness_profiles.py").exists()
 
 
@@ -514,6 +516,8 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "scripts" / "harness_task_intake.py").exists()
     assert (bundle / "scripts" / "harness_goal.py").exists()
     assert (bundle / "scripts" / "harness_goal_contract.py").exists()
+    assert (bundle / "scripts" / "harness_request_ledger.py").exists()
+    assert (bundle / "scripts" / "harness_request_publication.py").exists()
     assert (bundle / "scripts" / "harness_capability_registry.py").exists()
     assert (bundle / "scripts" / "harness_goal_gates.py").exists()
     assert (bundle / "scripts" / "harness_goal_learning.py").exists()
@@ -538,6 +542,10 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "tests" / "test_harness_production_gate_verifier.py").exists()
     assert (bundle / "tests" / "test_harness_publication.py").exists()
     assert (bundle / "tests" / "test_harness_release.py").exists()
+    assert (bundle / "tests" / "test_harness_goal_request_traceability.py").exists()
+    assert (bundle / "tests" / "test_harness_request_ledger.py").exists()
+    assert (bundle / "tests" / "test_harness_request_publication.py").exists()
+    assert (bundle / "tests" / "test_harness_request_gate.py").exists()
     assert (bundle / "tests" / "test_harness_target_archive.py").exists()
     assert (bundle / "tests" / "test_harness_target_remove.py").exists()
     assert (bundle / "tests" / "test_harness_incident.py").exists()
