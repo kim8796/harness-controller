@@ -13,6 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import harness_request_ledger
+
 
 TARGET_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 RESERVED_TARGET_IDS = frozenset({"latest", "default", "all", "embedded"})
@@ -1969,6 +1971,38 @@ def _update_backlog_metadata(path: Path, updates: Mapping[str, str]) -> None:
     update_backlog_metadata(path, **dict(updates))
 
 
+def _metadata_csv_values(value: object) -> list[str]:
+    return [item.strip() for item in str(value or "").split(",") if item.strip()]
+
+
+def _enforce_request_verification_completion_guard(
+    *,
+    state_paths: StatePaths,
+    target_id: str,
+    metadata: Mapping[str, str],
+    evidence: Mapping[str, Any] | None,
+) -> None:
+    request_check_ids = _metadata_csv_values(metadata.get("request_check_ids"))
+    if not request_check_ids:
+        return
+    backlog_id = str(metadata.get("id") or "").strip()
+    goal_id = str(metadata.get("goal") or "").strip()
+    if not backlog_id or not goal_id or goal_id == "unlinked":
+        raise ControllerError("request verification requires linked backlog id and goal id")
+    status = harness_request_ledger.request_evidence_status(
+        state_root=state_paths.state_root,
+        target_id=target_id,
+        goal_id=goal_id,
+        backlog_id=backlog_id,
+        request_check_ids=request_check_ids,
+        product_commit_sha=str((evidence or {}).get("product_commit_sha") or ""),
+        product_diff_fingerprint=str((evidence or {}).get("product_diff_fingerprint") or ""),
+    )
+    if not bool(status.get("ok")):
+        missing = ", ".join(str(item) for item in status.get("missing_check_ids") or ())
+        raise ControllerError(f"linked request verification evidence missing or failed: {missing}")
+
+
 def _backlog_mentions_binding_design_source(backlog_text: str) -> bool:
     return bool(_BINDING_DESIGN_SOURCE_RE.search(backlog_text or ""))
 
@@ -2074,6 +2108,15 @@ def transition_sidecar_backlog(
     if target_status == "completed":
         if str(item.status) != "queued" or str(item.autonomy_execute) != "auto":
             raise ControllerError("completed transition requires queued Autonomy-Execute auto backlog")
+        from harness_autonomy import read_backlog_metadata
+
+        completion_metadata = read_backlog_metadata(source_path)
+        _enforce_request_verification_completion_guard(
+            state_paths=state_paths,
+            target_id=record.target_id,
+            metadata=completion_metadata,
+            evidence=evidence,
+        )
         _enforce_binding_design_completion_guard(source_path=source_path, evidence=evidence)
         target_state = "completed"
         metadata_updates = {

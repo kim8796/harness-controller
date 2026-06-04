@@ -19,6 +19,7 @@ import harness_goal_gates
 import harness_goal_learning
 import harness_loop
 import harness_product_audit
+import harness_request_ledger
 import harness_task_intake
 
 
@@ -475,6 +476,8 @@ def _build_goal_contract(
     success_criteria: Sequence[str] = (),
     spec_path: str = "",
     attachment_manifest_path: str = "",
+    request_ledger_path: str = "",
+    request_checks_path: str = "",
     attachments: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     return harness_goal_contract.build_goal_contract(
@@ -483,6 +486,8 @@ def _build_goal_contract(
         success_criteria=success_criteria,
         source_spec_path=spec_path,
         attachment_manifest_path=attachment_manifest_path,
+        request_ledger_path=request_ledger_path,
+        request_checks_path=request_checks_path,
         attachments=attachments,
     )
 
@@ -493,6 +498,10 @@ def _goal_traceability_payload(
     target_id: str,
     spec_path: str = "",
     attachment_manifest_path: str = "",
+    request_ledger_path: str = "",
+    request_checks_path: str = "",
+    request_ids: Sequence[str] = (),
+    request_check_ids: Sequence[str] = (),
     attachments: Sequence[Mapping[str, object]] = (),
     success_criteria: Sequence[str] = (),
 ) -> dict[str, object]:
@@ -502,6 +511,18 @@ def _goal_traceability_payload(
         "target_id": target_id,
         "source_spec_path": spec_path,
         "attachment_manifest_path": attachment_manifest_path,
+        "request_ledger_path": request_ledger_path,
+        "request_checks_path": request_checks_path,
+        "request_refs": [
+            {"request_id": str(item)}
+            for item in request_ids
+            if str(item)
+        ],
+        "request_check_refs": [
+            {"check_id": str(item)}
+            for item in request_check_ids
+            if str(item)
+        ],
         "attachment_refs": [
             {
                 "path": str(item.get("path") or ""),
@@ -927,8 +948,6 @@ def create_goal(
     if active is not None and replace:
         archive_goal(state_root=state_root, goal_id=active.goal_id, status="archived", reason="replaced by new goal")
     success_criteria = _default_success_criteria(title)
-    goal_contract = _build_goal_contract(title=title, success_criteria=success_criteria)
-    service_level = str(goal_contract["service_level"])
     goal_id = _safe_goal_id(title)
     goal_dir = _goals_root(state_root) / goal_id
     if goal_dir.exists():
@@ -936,6 +955,26 @@ def create_goal(
     goal_dir.mkdir(parents=True)
     traceability_path = goal_dir / "traceability.json"
     traceability_relpath = _sidecar_relative(state_root, traceability_path)
+    request_artifacts = harness_request_ledger.write_goal_request_artifacts(
+        goal_dir=goal_dir,
+        goal_id=goal_id,
+        target_id=target_id,
+        source_kind="goal-text",
+        source_path="inline",
+        source_text=title,
+        attachments=[],
+    )
+    request_ledger_relpath = _sidecar_relative(state_root, goal_dir / harness_request_ledger.REQUEST_LEDGER_PATH)
+    request_checks_relpath = _sidecar_relative(state_root, goal_dir / harness_request_ledger.REQUEST_CHECKS_PATH)
+    request_ids = [str(item) for item in request_artifacts.get("request_ids") or [] if str(item)]
+    request_check_ids = [str(item) for item in request_artifacts.get("request_check_ids") or [] if str(item)]
+    goal_contract = _build_goal_contract(
+        title=title,
+        success_criteria=success_criteria,
+        request_ledger_path=request_ledger_relpath,
+        request_checks_path=request_checks_relpath,
+    )
+    service_level = str(goal_contract["service_level"])
     goal_contract.setdefault("traceability_path", traceability_relpath)
     payload = {
         "schema_version": GOAL_SCHEMA_VERSION,
@@ -953,6 +992,10 @@ def create_goal(
         "active_plan_id": "",
         "linked_backlog_ids": [],
         "traceability_path": traceability_relpath,
+        "request_ledger_path": request_ledger_relpath,
+        "request_checks_path": request_checks_relpath,
+        "request_ids": request_ids,
+        "request_check_ids": request_check_ids,
         "publication": {},
     }
     _write_json(
@@ -960,6 +1003,10 @@ def create_goal(
         _goal_traceability_payload(
             goal_id=goal_id,
             target_id=target_id,
+            request_ledger_path=request_ledger_relpath,
+            request_checks_path=request_checks_relpath,
+            request_ids=request_ids,
+            request_check_ids=request_check_ids,
             success_criteria=success_criteria,
         ),
     )
@@ -1050,6 +1097,19 @@ def create_goal_from_spec(
             "size": len(spec_text.encode("utf-8")),
             "sha256_prefix": hashlib.sha256(spec_text.encode("utf-8")).hexdigest()[:16],
         }
+        request_artifacts = harness_request_ledger.write_goal_request_artifacts(
+            goal_dir=goal_dir,
+            goal_id=goal_id,
+            target_id=target_id,
+            source_kind="goal-spec",
+            source_path=str(source_meta["path"]),
+            source_text=spec_text,
+            attachments=attachments,
+        )
+        request_ledger_relpath = _sidecar_relative(state_root, goal_dir / harness_request_ledger.REQUEST_LEDGER_PATH)
+        request_checks_relpath = _sidecar_relative(state_root, goal_dir / harness_request_ledger.REQUEST_CHECKS_PATH)
+        request_ids = [str(item) for item in request_artifacts.get("request_ids") or [] if str(item)]
+        request_check_ids = [str(item) for item in request_artifacts.get("request_check_ids") or [] if str(item)]
         context_summary = _context_summary_from_spec(spec_text)
         success_criteria = _success_criteria_from_spec(spec_text, fallback_title=resolved_title)
         manifest_relpath = _sidecar_relative(state_root, attachment_manifest_path)
@@ -1061,6 +1121,8 @@ def create_goal_from_spec(
             success_criteria=success_criteria,
             spec_path=str(source_meta["path"]),
             attachment_manifest_path=manifest_relpath,
+            request_ledger_path=request_ledger_relpath,
+            request_checks_path=request_checks_relpath,
             attachments=attachments,
         )
         goal_contract.setdefault("traceability_path", traceability_relpath)
@@ -1081,6 +1143,10 @@ def create_goal_from_spec(
             "active_plan_id": "",
             "linked_backlog_ids": [],
             "traceability_path": traceability_relpath,
+            "request_ledger_path": request_ledger_relpath,
+            "request_checks_path": request_checks_relpath,
+            "request_ids": request_ids,
+            "request_check_ids": request_check_ids,
             "publication": {},
             "source": "spec",
             "spec_path": source_meta["path"],
@@ -1096,6 +1162,10 @@ def create_goal_from_spec(
                 target_id=target_id,
                 spec_path=str(source_meta["path"]),
                 attachment_manifest_path=manifest_relpath,
+                request_ledger_path=request_ledger_relpath,
+                request_checks_path=request_checks_relpath,
+                request_ids=request_ids,
+                request_check_ids=request_check_ids,
                 attachments=attachments,
                 success_criteria=success_criteria,
             ),
@@ -1735,6 +1805,44 @@ def _expected_evidence_for_gate_ids(
     return expected
 
 
+def _string_metadata_items(value: object) -> list[str]:
+    if isinstance(value, str):
+        raw_items = re.split(r"\s*,\s*", value)
+    elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        raw_items = [str(item) for item in value if not isinstance(item, Mapping)]
+    else:
+        raw_items = []
+    return list(dict.fromkeys(item.strip() for item in raw_items if item.strip()))
+
+
+def _request_metadata_from_payload(payload: Mapping[str, object]) -> dict[str, object]:
+    metadata: dict[str, object] = {}
+    for key in ("request_ledger_path", "request_checks_path"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            metadata[key] = value
+    for key in ("request_ids", "request_check_ids"):
+        values = _string_metadata_items(payload.get(key))
+        if values:
+            metadata[key] = values
+    return metadata
+
+
+def _write_task_packet_request_metadata(request_path: Path, task: Mapping[str, object]) -> None:
+    metadata = _request_metadata_from_payload(task)
+    if not metadata:
+        return
+    packet_path = request_path.parent / "task-packet.json"
+    packet = _read_json(packet_path)
+    changed = False
+    for key, value in metadata.items():
+        if packet.get(key) != value:
+            packet[key] = value
+            changed = True
+    if changed:
+        _write_json(packet_path, packet)
+
+
 def build_roadmap(
     *,
     state_root: Path,
@@ -1795,6 +1903,10 @@ def build_roadmap_model(
     product_standard = str(goal_contract.get("product_standard") or ("prototype" if service_level == "prototype" else "production_web"))
     attachment_manifest_path = str(goal_payload.get("attachment_manifest_path") or "")
     traceability_path = str(goal_payload.get("traceability_path") or goal_contract.get("traceability_path") or "")
+    request_ledger_path = str(goal_payload.get("request_ledger_path") or "")
+    request_checks_path = str(goal_payload.get("request_checks_path") or "")
+    request_ids = [str(item) for item in goal_payload.get("request_ids") or () if str(item)]
+    request_check_ids = [str(item) for item in goal_payload.get("request_check_ids") or () if str(item)]
     spec_refs = [spec_path] if spec_path else []
     attachment_refs = _attachment_refs_from_goal_payload(goal_payload)
     compact_hints = [dict(hint) for hint in reusable_lesson_hints[:5] if isinstance(hint, Mapping)]
@@ -1805,6 +1917,7 @@ def build_roadmap_model(
         if product_standard == "production_native":
             specs.extend(_native_goal_specs(title, spec_context))
         allowed_gate_ids = set(completion_gate_ids)
+        total_specs = len(specs)
         for index, (kind, task_title, summary, scope) in enumerate(specs, start=1):
             previous = [] if index == 1 else [f"task-{index - 1:02d}-{specs[index - 2][0]}"]
             gate_ids = [
@@ -1831,6 +1944,10 @@ def build_roadmap_model(
                     "goal_spec_path": spec_path,
                     "attachment_manifest_path": attachment_manifest_path,
                     "traceability_path": traceability_path,
+                    "request_ledger_path": request_ledger_path,
+                    "request_checks_path": request_checks_path,
+                    "request_ids": request_ids,
+                    "request_check_ids": request_check_ids if index == total_specs else [],
                     "spec_refs": list(spec_refs),
                     "attachment_refs": list(attachment_refs),
                     "attachment_count": attachment_count,
@@ -1893,6 +2010,7 @@ def build_roadmap_model(
     is_empty_scaffold_profile = not profile.get("has_client") and not profile.get("has_server")
     success_criteria = [str(item) for item in goal_payload.get("success_criteria") or () if str(item)]
     task_acceptance = success_criteria[:8]
+    total_specs = len(specs)
     for index, (kind, task_title, summary, scope_override) in enumerate(specs, start=1):
         scope = scope_override or _scope_for_profile(profile, kind)
         acceptance = (
@@ -1923,6 +2041,10 @@ def build_roadmap_model(
                 "goal_spec_path": spec_path,
                 "attachment_manifest_path": attachment_manifest_path,
                 "traceability_path": traceability_path,
+                "request_ledger_path": request_ledger_path,
+                "request_checks_path": request_checks_path,
+                "request_ids": request_ids,
+                "request_check_ids": request_check_ids if index == total_specs else [],
                 "spec_refs": list(spec_refs),
                 "attachment_refs": list(attachment_refs),
                 "attachment_count": attachment_count,
@@ -2025,6 +2147,22 @@ def _goal_task_notes(goal: GoalRecord, plan_id: str, task: Mapping[str, object])
     traceability_path = str(goal_payload.get("traceability_path") or "").strip()
     if traceability_path:
         notes.append(f"Goal-Traceability-Path: {traceability_path}")
+    request_ledger_path = str(goal_payload.get("request_ledger_path") or "").strip()
+    if request_ledger_path:
+        notes.append(f"Request-Ledger: {request_ledger_path}")
+    request_checks_path = str(goal_payload.get("request_checks_path") or "").strip()
+    if request_checks_path:
+        notes.append(f"Request-Checks: {request_checks_path}")
+    request_ids = [str(item).strip() for item in task.get("request_ids") or goal_payload.get("request_ids") or () if str(item).strip()]
+    if request_ids:
+        notes.append("Request-Ids: " + ", ".join(request_ids))
+    request_check_ids = [
+        str(item).strip()
+        for item in task.get("request_check_ids") or ()
+        if str(item).strip()
+    ]
+    if request_check_ids:
+        notes.append("Request-Check-Ids: " + ", ".join(request_check_ids))
     contract = goal_payload.get("goal_contract")
     if isinstance(contract, Mapping):
         standard = str(contract.get("product_standard") or "").strip()
@@ -2062,6 +2200,10 @@ def _copy_task_metadata(item: dict[str, object], task: Mapping[str, object]) -> 
         "goal_spec_path",
         "attachment_manifest_path",
         "traceability_path",
+        "request_ledger_path",
+        "request_checks_path",
+        "request_ids",
+        "request_check_ids",
         "spec_refs",
         "attachment_refs",
         "attachment_count",
@@ -2210,6 +2352,15 @@ def _retry_manual_goal_tasks(
         review = None
         if packet_id and not regenerate_from_roadmap:
             try:
+                packet_request_path = state_root / "backlog" / "drafts" / packet_id / "request.md"
+                _write_task_packet_request_metadata(
+                    packet_request_path,
+                    _goal_task_from_roadmap_defaults(
+                        task=task,
+                        roadmap_task=roadmap_task,
+                        roadmap_depends=roadmap_depends,
+                    ),
+                )
                 review = harness_task_intake.review_packet(
                     state_root=state_root,
                     packet_id=packet_id,
@@ -2293,6 +2444,7 @@ def _queue_task(
         packet_id=f"task-{harness_task_intake.packet_timestamp()}-{_slug(str(task.get('task_key') or 'goal-task'), max_length=28)}",
     )
     packet_id = request_path.parent.name
+    _write_task_packet_request_metadata(request_path, task)
     review = harness_task_intake.review_packet(
         state_root=state_root,
         packet_id=packet_id,
@@ -2328,7 +2480,11 @@ def _queue_task(
 
 
 def _goal_publication_success_backlog_ids(*, state_root: Path, target_id: str, goal_id: str) -> set[str]:
-    success: set[str] = set()
+    return set(_goal_publication_success_backlog_commits(state_root=state_root, target_id=target_id, goal_id=goal_id))
+
+
+def _goal_publication_success_backlog_commits(*, state_root: Path, target_id: str, goal_id: str) -> dict[str, str]:
+    success: dict[str, str] = {}
     candidates: list[Path] = []
     runs_root = state_root / "runs" / "harness"
     if runs_root.exists() and not runs_root.is_symlink():
@@ -2356,12 +2512,13 @@ def _goal_publication_success_backlog_ids(*, state_root: Path, target_id: str, g
         operation = str(payload.get("operation") or "")
         status = str(payload.get("status") or payload.get("publication_state") or "")
         applied = payload.get("applied") is True
-        if operation == "backlog-product-pr-merge" and applied and status == "merged":
-            success.add(backlog_id)
-        if operation == "backlog-product-pr" and applied and status in {"created", "updated", "published", "already-in-base"}:
-            success.add(backlog_id)
-        if operation == "backlog-product-push" and applied and status == "pass":
-            success.add(backlog_id)
+        commit_sha = str(payload.get("product_commit_sha") or payload.get("product_push_sha") or "")
+        if operation == "backlog-product-pr-merge" and applied and status == "merged" and commit_sha:
+            success[backlog_id] = commit_sha
+        if operation == "backlog-product-pr" and applied and status in {"created", "updated", "published", "already-in-base"} and commit_sha:
+            success.setdefault(backlog_id, commit_sha)
+        if operation == "backlog-product-push" and applied and status == "pass" and commit_sha:
+            success.setdefault(backlog_id, commit_sha)
     return success
 
 
@@ -2466,6 +2623,137 @@ def _latest_gate_verifier_blocks_pending_gates(
     ) is not None
 
 
+def _backlog_metadata_from_state(state_root: Path, backlog_id: str) -> dict[str, str]:
+    if not backlog_id:
+        return {}
+    for state in ("completed", "queued", "active", "blocked"):
+        candidate = state_root / "backlog" / state / f"{backlog_id}.md"
+        if not candidate.exists() or candidate.is_symlink():
+            continue
+        metadata: dict[str, str] = {}
+        for line in candidate.read_text(encoding="utf-8").splitlines():
+            if line.startswith("## "):
+                break
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            normalized_key = re.sub(r"[^0-9a-z]+", "_", key.strip().lower()).strip("_")
+            if normalized_key:
+                metadata[normalized_key] = value.strip()
+        return metadata
+    return {}
+
+
+def _request_check_ids_for_progress_task(
+    *,
+    state_root: Path,
+    task: Mapping[str, object],
+    backlog_id: str,
+) -> list[str]:
+    request_check_ids = _string_metadata_items(task.get("request_check_ids"))
+    if request_check_ids:
+        return request_check_ids
+    metadata = _backlog_metadata_from_state(state_root, backlog_id)
+    request_check_ids = _string_metadata_items(metadata.get("request_check_ids"))
+    if request_check_ids:
+        return request_check_ids
+    return []
+
+
+def _request_verification_progress_status(
+    *,
+    state_root: Path,
+    target_id: str,
+    goal_id: str,
+    tasks: Sequence[Mapping[str, object]],
+    statuses: Mapping[str, str],
+    publication_commits: Mapping[str, str],
+    goal_request_check_ids: Sequence[str] = (),
+    fallback_when_no_linked: bool = False,
+) -> dict[str, object]:
+    linked: list[dict[str, object]] = []
+    pending: list[dict[str, object]] = []
+    passed_backlog_ids: list[str] = []
+    for task in tasks:
+        backlog_id = str(task.get("backlog_id") or "").strip()
+        if not backlog_id or statuses.get(backlog_id) != "completed":
+            continue
+        request_check_ids = _request_check_ids_for_progress_task(
+            state_root=state_root,
+            task=task,
+            backlog_id=backlog_id,
+        )
+        if not request_check_ids:
+            continue
+        product_commit_sha = str(publication_commits.get(backlog_id) or "")
+        status = harness_request_ledger.request_evidence_status(
+            state_root=state_root,
+            target_id=target_id,
+            goal_id=goal_id,
+            backlog_id=backlog_id,
+            request_check_ids=request_check_ids,
+            product_commit_sha=product_commit_sha,
+        )
+        item = {
+            "backlog_id": backlog_id,
+            "request_check_ids": request_check_ids,
+            "product_commit_sha": product_commit_sha,
+            "passed_check_ids": list(status.get("passed_check_ids") or ()),
+            "missing_check_ids": list(status.get("missing_check_ids") or ()),
+        }
+        linked.append(item)
+        if bool(status.get("ok")):
+            passed_backlog_ids.append(backlog_id)
+        else:
+            pending.append(item)
+    if not linked and fallback_when_no_linked:
+        fallback_check_ids = [str(item).strip() for item in goal_request_check_ids if str(item).strip()]
+        completed_backlog_ids = [
+            str(task.get("backlog_id") or "").strip()
+            for task in tasks
+            if str(task.get("backlog_id") or "").strip() and statuses.get(str(task.get("backlog_id") or "").strip()) == "completed"
+        ]
+        if fallback_check_ids and completed_backlog_ids:
+            backlog_id = completed_backlog_ids[-1]
+            product_commit_sha = str(publication_commits.get(backlog_id) or "")
+            status = harness_request_ledger.request_evidence_status(
+                state_root=state_root,
+                target_id=target_id,
+                goal_id=goal_id,
+                backlog_id=backlog_id,
+                request_check_ids=fallback_check_ids,
+                product_commit_sha=product_commit_sha,
+            )
+            item = {
+                "backlog_id": backlog_id,
+                "request_check_ids": fallback_check_ids,
+                "product_commit_sha": product_commit_sha,
+                "fallback": "goal-request-checks",
+                "passed_check_ids": list(status.get("passed_check_ids") or ()),
+                "missing_check_ids": list(status.get("missing_check_ids") or ()),
+            }
+            linked.append(item)
+            if bool(status.get("ok")):
+                passed_backlog_ids.append(backlog_id)
+            else:
+                pending.append(item)
+    if not linked:
+        return {
+            "status": "not-required",
+            "linked_backlog_ids": [],
+            "pending_backlog_ids": [],
+            "missing_check_count": 0,
+        }
+    return {
+        "status": "passed" if not pending else "pending",
+        "linked_backlog_ids": [str(item["backlog_id"]) for item in linked],
+        "passed_backlog_ids": passed_backlog_ids,
+        "pending_backlog_ids": [str(item["backlog_id"]) for item in pending],
+        "missing_check_count": sum(len(item["missing_check_ids"]) for item in pending),
+        "pending": pending,
+    }
+
+
 def refresh_progress(*, state_root: Path, goal: GoalRecord) -> dict[str, object]:
     progress = _read_json(goal.progress_json)
     items = harness_loop.discover_backlog_items(state_root)
@@ -2497,11 +2785,12 @@ def refresh_progress(*, state_root: Path, goal: GoalRecord) -> dict[str, object]
         backlog_id = str(task.get("backlog_id") or "")
         if not backlog_id or statuses.get(backlog_id) != "completed":
             unresolved_required.append(task)
-    published = _goal_publication_success_backlog_ids(
+    publication_commits = _goal_publication_success_backlog_commits(
         state_root=state_root,
         target_id=goal.target_id,
         goal_id=goal.goal_id,
     )
+    published = set(publication_commits)
     publication_required_completed = [
         str(task.get("backlog_id"))
         for task in tasks
@@ -2518,6 +2807,17 @@ def refresh_progress(*, state_root: Path, goal: GoalRecord) -> dict[str, object]
             )
     else:
         goal_payload.pop("publication_blocked_backlog_ids", None)
+    request_verification_status = _request_verification_progress_status(
+        state_root=state_root,
+        target_id=goal.target_id,
+        goal_id=goal.goal_id,
+        tasks=tasks,
+        statuses=statuses,
+        publication_commits=publication_commits,
+        goal_request_check_ids=[str(item) for item in goal_payload.get("request_check_ids") or () if str(item)],
+        fallback_when_no_linked=not unresolved_required,
+    )
+    goal_payload["request_verification_status"] = request_verification_status
     service_level = str(goal_payload.get("service_level") or "").strip()
     goal_contract = goal_payload.get("goal_contract") if isinstance(goal_payload.get("goal_contract"), Mapping) else None
     if goal_contract is None:
@@ -2576,7 +2876,8 @@ def refresh_progress(*, state_root: Path, goal: GoalRecord) -> dict[str, object]
     gate_status = _completion_gate_status(goal_payload)
     goal_payload["completion_gate_status"] = gate_status
     gates_blocked = gate_status.get("status") == "pending"
-    if required_tasks and not unresolved_required and not publication_blocked and not gates_blocked:
+    requests_blocked = request_verification_status.get("status") == "pending"
+    if required_tasks and not unresolved_required and not publication_blocked and not gates_blocked and not requests_blocked:
         goal_payload["status"] = "completed"
         _clear_active_pointer_if_matches(state_root, goal.goal_id)
     elif goal_payload.get("status") == "completed":

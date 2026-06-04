@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
+import harness_request_publication
+
 
 class PublicationError(RuntimeError):
     pass
@@ -584,6 +586,19 @@ def merge_task_pr(
         result_payload = payload("merge-blocked", "refusing to merge non-harness task branch")
         _write_merge_payload(receipt_path=receipt_path, evidence_path=evidence_path, payload=result_payload)
         return _merge_result_from_payload(result_payload, receipt_path=receipt_path, evidence_path=evidence_path)
+    request_evidence = harness_request_publication.publication_request_evidence_for_merge(
+        state_root=state_root,
+        target_id=target_id,
+        backlog_id=backlog_id,
+        run_id=run_id,
+        pr_url=pr_url,
+        product_commit_sha=commit_sha,
+    )
+    if request_evidence is not None and request_evidence.get("linked") is True and request_evidence.get("status") != "passed":
+        message = str(request_evidence.get("message") or "linked task request evidence is missing or failed")
+        result_payload = payload("merge-blocked", message, request_evidence=request_evidence)
+        _write_merge_payload(receipt_path=receipt_path, evidence_path=evidence_path, payload=result_payload)
+        return _merge_result_from_payload(result_payload, receipt_path=receipt_path, evidence_path=evidence_path)
 
     view = _run(runner, _pr_view_command(pr_url), target_repo)
     if view.returncode != 0:
@@ -827,6 +842,12 @@ def publish_task_pr(
     receipt_path = run_dir / "product-pr-receipt.json"
     evidence_path = run_dir / "generated-evidence.json"
     now = utc_timestamp()
+    request_evidence = harness_request_publication.request_evidence_payload(
+        state_root=state_root,
+        target_id=target_id,
+        backlog_id=backlog_id,
+        product_commit_sha=commit_sha,
+    )
     gh_path = shutil.which("gh")
     if gh_path is None and runner is default_runner:
         payload = {
@@ -843,6 +864,7 @@ def publish_task_pr(
             "base": base_branch,
             "pr_url": "",
             "message": "gh CLI is not available",
+            "request_evidence": request_evidence,
             "created_at": now,
         }
         _write_json(receipt_path, payload)
@@ -886,6 +908,7 @@ def publish_task_pr(
                     "message": bootstrap.message,
                     "next_action": bootstrap.next_action,
                     "repo_bootstrap": bootstrap_payload,
+                    "request_evidence": request_evidence,
                     "created_at": now,
                 }
                 _write_json(receipt_path, payload)
@@ -911,6 +934,7 @@ def publish_task_pr(
                 "pr_url": "",
                 "message": message,
                 "next_action": _publication_next_action(message),
+                "request_evidence": request_evidence,
                 "created_at": now,
             }
             if bootstrap_payload:
@@ -965,6 +989,7 @@ def publish_task_pr(
                     "base": base_branch,
                     "pr_url": "",
                     "message": f"product commit is already present in origin/{base_branch}",
+                    "request_evidence": request_evidence,
                     "created_at": now,
                 }
                 if bootstrap_payload:
@@ -996,6 +1021,7 @@ def publish_task_pr(
                 "pr_url": "",
                 "message": message,
                 "next_action": _publication_next_action(message),
+                "request_evidence": request_evidence,
                 "created_at": now,
             }
             if bootstrap_payload:
@@ -1019,6 +1045,7 @@ def publish_task_pr(
         "branch": branch,
         "base": base_branch,
         "pr_url": pr_url,
+        "request_evidence": request_evidence,
         "created_at": now,
     }
     if bootstrap_payload:
