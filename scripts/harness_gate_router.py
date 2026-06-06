@@ -20,6 +20,8 @@ PRODUCT_ACTIONABLE_GATE_BLOCKER_HINTS = (
 )
 
 SETUP_GATE_BLOCKER_HINTS = (
+    "product gate readiness is waiting",
+    "provider setup",
     "missing env",
     "environment",
     "credential",
@@ -31,6 +33,8 @@ SETUP_GATE_BLOCKER_HINTS = (
     "phone",
     "sms",
     "twilio",
+    "production_smoke_",
+    "release smoke",
     "not configured",
     "설정",
     "인증",
@@ -49,12 +53,15 @@ EXTERNAL_ACCOUNT_GATE_BLOCKER_HINTS = (
 )
 
 PUBLICATION_GATE_BLOCKER_HINTS = (
-    "pr",
     "pull request",
     "merge",
     "github",
     "remote",
     "origin",
+)
+PUBLICATION_GATE_BLOCKER_PATTERNS = (
+    re.compile(r"(?i)\bpr\s*#?\d+\b"),
+    re.compile(r"(?i)\bpr\s+(?:pending|merge|failed|blocked|created|updated)\b"),
 )
 
 CONTROLLER_GATE_BLOCKER_HINTS = (
@@ -71,6 +78,10 @@ STORE_GATE_IDS = frozenset({"store_release_readiness"})
 def _text_contains_any(text: str, hints: Sequence[str]) -> bool:
     normalized = text.casefold()
     return any(hint.casefold() in normalized for hint in hints)
+
+
+def _text_matches_any(text: str, patterns: Sequence[re.Pattern[str]]) -> bool:
+    return any(pattern.search(text) for pattern in patterns)
 
 
 def _setup_missing_gate_ids(setup_readiness: Mapping[str, object]) -> set[str]:
@@ -96,7 +107,9 @@ def classify_gate_action(
         return "external-account"
     if gate in setup_missing or _text_contains_any(text, SETUP_GATE_BLOCKER_HINTS):
         return "setup-actionable"
-    if _text_contains_any(text, PUBLICATION_GATE_BLOCKER_HINTS):
+    if _text_contains_any(text, PUBLICATION_GATE_BLOCKER_HINTS) or _text_matches_any(
+        text, PUBLICATION_GATE_BLOCKER_PATTERNS
+    ):
         return "publication-actionable"
     if _text_contains_any(text, CONTROLLER_GATE_BLOCKER_HINTS):
         return "controller-actionable"

@@ -206,6 +206,7 @@ class GoalRefillResult:
     queue_report_path: Path
     generated_backlog_ids: tuple[str, ...]
     message: str
+    reason_by_gate: Mapping[str, str] | None = None
 
 
 def utc_timestamp() -> str:
@@ -3622,6 +3623,7 @@ def refill_goal_tasks(
                         queue_report_path=report_path,
                         generated_backlog_ids=(),
                         message="goal gate verifier blocked on external setup/toolchain/store prerequisites",
+                        reason_by_gate=dict(gate_block_report.get("reason_by_gate") or {}),
                     )
                 if not has_open_gate_correction_task:
                     completion_gates = goal_payload.get("completion_gates") if isinstance(goal_payload.get("completion_gates"), list) else []
@@ -3760,6 +3762,7 @@ def refill_goal_tasks(
                     queue_report_path=active.goal_dir / "queue-report.json",
                     generated_backlog_ids=tuple(str(item.get("backlog_id")) for item in existing_tasks if str(item.get("backlog_id") or "")),
                     message="goal gate verifier blocked pending gates",
+                    reason_by_gate=dict(gate_block_report.get("reason_by_gate") or {}),
                 )
             completion_gates = goal_payload.get("completion_gates") if isinstance(goal_payload.get("completion_gates"), list) else []
             product_audit = goal_payload.get("product_audit") if isinstance(goal_payload.get("product_audit"), Mapping) else {}

@@ -1,3 +1,22 @@
+# Correction Plan: Gate Router Reason Propagation
+
+## Goal
+
+`./harness watch`가 pending production gate를 처리할 때 verifier 반복/빈 대기 상태를 잘못 보여주지 않게 한다.
+
+## Changes
+
+- `production_e2e_smoke`가 `pr` 부분문자열 때문에 `publication-actionable`로 분류되는 오탐을 제거한다.
+- production gate verifier의 gate별 blocked reason을 watch/refill status 라우터까지 전달한다.
+- idle/action-required status의 `next_action`을 gate route와 일치시킨다.
+- 실제 product blocker는 repair task로, setup/provider/store blocker는 setup/external action으로 분리한다.
+
+## Verification
+
+- Gate router focused tests.
+- Goal refill/watch focused tests.
+- Full pre-push guard.
+
 # Harness No-Silent-Stop Loop Hardening Plan v2
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development for implementation and reviewer waves. Do not modify product repos. Do not revert unrelated local edits.

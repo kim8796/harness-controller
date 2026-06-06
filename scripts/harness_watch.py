@@ -1161,6 +1161,22 @@ def _operator_waits_from_summaries(
     return expanded
 
 
+def _reason_by_gate_from_verifier_result(result: Mapping[str, object]) -> dict[str, str]:
+    reasons: dict[str, str] = {}
+    for raw_gate in result.get("completion_gates") or []:
+        if not isinstance(raw_gate, Mapping):
+            continue
+        gate_id = str(raw_gate.get("gate_id") or raw_gate.get("id") or "").strip()
+        if not gate_id:
+            continue
+        for key in ("reason", "observed_result", "message", "summary"):
+            value = str(raw_gate.get(key) or "").strip()
+            if value:
+                reasons[gate_id] = value
+                break
+    return reasons
+
+
 def _run_idle_goal_gate_verifier(
     record: harness_controller.TargetRecord,
     *,
@@ -1212,6 +1228,7 @@ def _run_idle_goal_gate_verifier(
         "gate_verifier_blocked_gate_ids": [
             str(item) for item in result.get("blocked_gate_ids", []) if str(item)
         ] if isinstance(result.get("blocked_gate_ids"), list) else [],
+        "reason_by_gate": _reason_by_gate_from_verifier_result(result),
     }
 
 
@@ -2078,6 +2095,7 @@ def refill_goal_if_idle(
         "queue_report_path": result.queue_report_path.as_posix(),
         "generated_backlog_ids": list(result.generated_backlog_ids),
         "message": message,
+        "reason_by_gate": dict(result.reason_by_gate or {}),
     }
 
 
@@ -2116,6 +2134,7 @@ def verify_goal_gates_if_truly_idle(
         "gate_verifier_blocked_gate_ids": list(verifier_result.get("gate_verifier_blocked_gate_ids") or ()),
         "pending_gate_ids": list(verifier_result.get("pending_gate_ids") or ()),
         "operator_waits": list(verifier_result.get("operator_waits") or ()),
+        "reason_by_gate": dict(verifier_result.get("reason_by_gate") or {}),
     }
 
 
@@ -2514,6 +2533,14 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                 if active_goal_id:
                     print("대기: queued auto backlog가 없습니다.")
                     next_action = last_idle_next_action or "wait for planner/task intake or inspect `./harness task list`"
+                    routed_next_action = str(gate_route.get("next_action") or "").strip()
+                    if (
+                        next_action_kind
+                        and routed_next_action
+                        and idle_operator_wait is None
+                        and not int(refill.get("manual_review") or 0)
+                    ):
+                        next_action = routed_next_action
                     phase = last_idle_phase or "idle-no-backlog"
                     pending_reason = last_idle_reason
                 else:
