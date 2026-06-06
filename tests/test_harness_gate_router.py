@@ -47,6 +47,23 @@ def test_controller_and_publication_gate_reasons_route_to_non_product_actions() 
     assert route["primary_action_kind"] == "publication-actionable"
 
 
+def test_production_gate_name_does_not_match_pr_publication_hint() -> None:
+    module = _load_module()
+    route = module.route_pending_gates(
+        pending_gate_ids=["production_e2e_smoke"],
+        reason_by_gate={
+            "production_e2e_smoke": (
+                "Product gate readiness is waiting for `production_e2e_smoke` setup: "
+                "PRODUCTION_SMOKE_OTP_A, production HTTPS app, release smoke users."
+            )
+        },
+    )
+
+    assert route["primary_action_kind"] == "setup-actionable"
+    assert route["by_kind"]["setup-actionable"] == ["production_e2e_smoke"]
+    assert "publication-actionable" not in route["by_kind"]
+
+
 def test_gate_router_detects_gate_debt_from_status_payload() -> None:
     module = _load_module()
 
