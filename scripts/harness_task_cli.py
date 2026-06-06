@@ -44,6 +44,7 @@ class TaskCliRuntime:
     controller_errors: tuple[type[BaseException], ...]
     loop_errors: tuple[type[BaseException], ...]
     task_errors: tuple[type[BaseException], ...]
+    active_goal_id: Callable[[Any], str] | None = None
 
 
 def task_packet_id(record: harness_controller.TargetRecord, raw: str | None) -> str:
@@ -95,14 +96,43 @@ def create_review_queue_natural_task(
     )
     queued = None
     if bool(getattr(review, "auto_eligible", False)):
+        goal_id = task_queue_goal_id(runtime=runtime, record=record, packet_id=packet_id)
         queued = harness_task_intake.queue_packet(
             state_root=record.state_root,
             packet_id=packet_id,
             auto=True,
             expected_target_id=record.target_id,
             target_repo=record.repo,
+            goal_id=goal_id,
         )
     return NaturalTaskOutcome(packet_id=packet_id, request_path=request_path, review=review, queued=queued)
+
+
+def task_packet_explicitly_unlinked(state_root: Path, packet_id: str) -> bool:
+    packet_dir = state_root / "backlog" / "drafts" / packet_id
+    candidates = (packet_dir / "request.md", packet_dir / "normalized-contract.json")
+    for path in candidates:
+        if not path.exists() or path.is_symlink() or not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if re.search(r"(?im)^\s*(?:Goal|Harness-Goal|Goal-ID)\s*:\s*(?:unlinked|none)\s*$", text):
+            return True
+        if re.search(r"(?im)^\s*No-Goal-Link\s*:\s*(?:yes|true|1)\s*$", text):
+            return True
+    return False
+
+
+def task_queue_goal_id(*, runtime: TaskCliRuntime, record: harness_controller.TargetRecord, packet_id: str) -> str:
+    if task_packet_explicitly_unlinked(record.state_root, packet_id):
+        return "unlinked"
+    resolver = runtime.active_goal_id
+    if resolver is None:
+        return "unlinked"
+    goal_id = str(resolver(record) or "").strip()
+    return goal_id or "unlinked"
 
 
 def render_natural_task_outcome(
@@ -438,6 +468,7 @@ def command_do(args: argparse.Namespace, runtime: TaskCliRuntime) -> int:
                 runner_model=getattr(args, "runner_model", None),
                 runner_reasoning_effort=getattr(args, "runner_reasoning_effort", "xhigh"),
                 command_template=getattr(args, "command_template", None),
+                execution_profile=getattr(args, "execution_profile", "auto"),
                 drain_telegram=False,
                 auto_maintenance=True,
             )
@@ -619,12 +650,14 @@ def command_task_queue(args: argparse.Namespace, runtime: TaskCliRuntime) -> int
     try:
         record = runtime.resolve_task_target(args.target)
         packet_id = task_packet_id(record, args.packet)
+        goal_id = task_queue_goal_id(runtime=runtime, record=record, packet_id=packet_id)
         queued = harness_task_intake.queue_packet(
             state_root=record.state_root,
             packet_id=packet_id,
             auto=args.auto,
             expected_target_id=record.target_id,
             target_repo=record.repo,
+            goal_id=goal_id,
         )
         print("실행 대기열 등록 완료")
         print(f"- 대상: `{queued.target_id}`")

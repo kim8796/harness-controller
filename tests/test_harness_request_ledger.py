@@ -265,6 +265,32 @@ def test_request_verification_requires_matching_commit_or_diff_fingerprint(tmp_p
     assert matching_fingerprint["ok"] is True
 
 
+def test_request_check_ids_from_checks_path_rejects_symlink_parent(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    real_goal = state_root / "goals-real" / "goal-1"
+    real_goal.mkdir(parents=True)
+    (real_goal / "request-checks.json").write_text(
+        json.dumps(
+            {
+                "goal_id": "goal-1",
+                "target_id": "demo",
+                "check_ids": ["REQ-0001-CHECK-001"],
+                "checks": [{"check_id": "REQ-0001-CHECK-001"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (state_root / "goals-link").symlink_to(state_root / "goals-real", target_is_directory=True)
+
+    ids = module.request_check_ids_from_checks_path(
+        state_root,
+        "goals-link/goal-1/request-checks.json",
+    )
+
+    assert ids == []
+
+
 def test_request_verification_rejects_wrong_request_id_schema_and_secret_nested_text() -> None:
     module = _load_module()
 

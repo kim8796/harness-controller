@@ -1,3 +1,33 @@
+# Harness No-Silent-Stop Loop Hardening Plan v2
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development for implementation and reviewer waves. Do not modify product repos. Do not revert unrelated local edits.
+
+**Goal:** Ensure `./harness watch` never silently exits with an active goal and pending production gates; it must leave an actionable task, operator/setup wait, publication retry, or controller incident.
+
+**Architecture:** Add a deterministic stop-state contract and gate router around the existing watch/refill/verifier flow. Keep recovery fail-closed and reuse existing watch status, operator wait, and recovery evidence primitives where possible.
+
+**Tech Stack:** Python controller, pytest, existing harness sidecar state.
+
+---
+
+## Execution Slices
+
+- [ ] Stop-state contract: active goal + pending gates cannot produce `max-cycles-idle-no-progress`; watch status records `exit_reason`, `next_action_kind`, `pending_gate_ids`, and `blocked_gate_ids`.
+- [ ] Gate router: classify pending gates as product-actionable, setup-actionable, external-account, publication-actionable, or controller-actionable; only product-actionable gates create product backlog.
+- [ ] Active goal auto-link: link new task packets to the sole active goal only when they have no explicit goal metadata; preserve explicit `Goal: unlinked`.
+- [ ] Watchdog/recovery/preflight: keep implementation heartbeat useful, preserve strict recovery defaults, and surface publication/setup blockers as waits instead of quiet stops.
+- [ ] Verification: focused watch/task/goal/recovery/publication tests plus full pre-push guard.
+
+## Acceptance
+
+- `./harness watch --max-cycles 1 --no-telegram-drain` with active goal + pending gates exits with an actionable status, not idle/no-progress.
+- External setup/account gates do not create repeated no-diff product tasks.
+- Product-actionable pending gates still generate executable backlog.
+- Existing explicit unlinked discovery/task flows remain unlinked.
+- No secret/env values are written to status, receipts, or diagnostics.
+
+---
+
 # Local Provider Gate Verifiers Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -443,3 +473,126 @@ Diet-Exception: Production gate verifier support needs focused tests for real E2
 
 - `python3 -m pytest tests/test_harness_request_ledger.py tests/test_harness_request_publication.py tests/test_harness_request_gate.py tests/test_harness_goal_request_traceability.py tests/test_harness_publication.py tests/test_harness_task_intake.py tests/test_harness_export.py -q`
 - `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`
+
+### Correction: Legacy Active Goal Request Backfill
+
+**Problem:** Existing active goals created before request traceability do not have `request-ledger.json`, `request-checks.json`, `request_ids`, or `request_check_ids`. Their future gate/refill tasks can keep referencing the goal spec and attachments, but request/design requirements cannot block completion, merge, or progress because there are no request checks to enforce.
+
+**Fix:**
+
+- Add a goal-side backfill helper that runs from `refresh_progress()` and `build_roadmap()`.
+- If a goal is missing request artifacts, read the full existing `inputs/goal-spec.md` when present; otherwise use title and success criteria as the source text.
+- Preserve existing attachment manifest/attachments and mark supplied images/designs as binding source through request checks.
+- Write `request-ledger.json` and `request-checks.json` inside the existing goal directory only, update `goal.json`, `goal_contract`, and `traceability.json`, and do not touch the product repo.
+- Ensure dynamically generated gate verifier/correction/refill tasks inherit `request_ledger_path`, `request_checks_path`, `request_ids`, and `request_check_ids` so future product work cannot progress without request verification.
+
+**Verification:**
+
+- Add tests that a legacy spec goal is backfilled during refresh.
+- Add tests that the next gate/refill task contains request metadata after backfill.
+- Run focused request/goal tests and full pre-push guard.
+
+### Correction: Large Request Check List Uses Request-Checks File
+
+**Problem:** The real `chatapp-test` goal backfilled 278 request checks. Writing all `Request-Check-Ids` into backlog notes makes the task packet exceed the inline note limit (`notes is too long`) and stops `watch` before it can continue.
+
+**Fix:**
+
+- Keep `Request-Ledger` and `Request-Checks` paths in backlog markdown.
+- Omit long `Request-Check-Ids` markdown lines and write a short count marker instead.
+- Teach completion/merge request gates to load check IDs from `Request-Checks` when inline `Request-Check-Ids` is absent.
+- Preserve small inline check ID lists for simple goals so existing behavior remains compatible.
+
+**Verification:**
+
+- Add a test that large request-check lists queue without `notes is too long`.
+- Add tests that completion/merge request evidence expands IDs from `Request-Checks`.
+- Re-run focused tests and `./harness watch --max-cycles 1 --no-telegram-drain` against `chatapp-test`.
+
+### Correction: Reject Symlink Components In Request-Checks Paths
+
+**Problem:** Reviewer found that direct symlink `Request-Checks` paths are rejected, but a symlinked parent directory inside the target sidecar can still resolve back inside `state_root` and be accepted. That is inconsistent with the fail-closed sidecar path policy.
+
+**Fix:**
+
+- Reject any symlink component in a metadata path before resolving the final file.
+- Keep out-of-state, missing, malformed, and unreadable `Request-Checks` paths fail-closed in controller/publication paths.
+- Add regression coverage for symlink-parent rejection and unreadable/missing publication evidence.
+
+**Verification:**
+
+- Run focused request ledger/gate/publication tests.
+- Re-run full pre-push guard and live `watch --max-cycles 1 --no-telegram-drain`.
+
+### Correction: Target Lock Failures Are Bounded Waits, Not Repeated Product Failures
+
+**Problem:** `./harness do` can hold a target run lock while it invokes the run path. If a concurrent `watch` sees `target run already locked`, the current loop records it as a normal transaction failure. Repeating the watch then hits the repeated-incident threshold and blocks the task, even after the lock is gone.
+
+**Fix:**
+
+- Classify `target run already locked` / target lock owner errors as transaction `external-wait`.
+- When an existing incident blocker has a wait class, turn it into operator-wait/status guidance instead of quarantining the backlog.
+- Keep real product implementation failures subject to repeated-failure quarantine.
+
+**Verification:**
+
+- Add watch tests for lock text -> operator-wait and existing wait-class incident blocker not quarantining.
+- Run focused watch/incident tests and full guard.
+
+### Correction: Keep Watch Regression Tests Under File Size Budget
+
+**Problem:** The target lock regression tests fixed the watch loop issue, but adding them directly to `tests/test_harness_watch.py` made that file cross the 2000-line growth limit. The pre-push guard correctly rejects this as a code-health blocker.
+
+**Fix:**
+
+- Move the new repeated-incident/operator-wait regression tests into a focused `tests/test_harness_watch_operator_wait.py`.
+- Leave the existing watch behavior tests intact.
+- Do not change runtime behavior.
+
+**Verification:**
+
+- Run focused watch/operator-wait tests.
+- Re-run full pre-push guard.
+
+### Correction: Target Run Artifact Diet Retention
+
+**Problem:** Newer models make the full multi-lane run transcript less valuable for every historical target run, but `backlog/completed` and `generated-evidence.json` still act as dependency/progress receipts. Deleting whole `runs/harness` directories by count would violate the append-only evidence policy and remove receipts, while leaving every duplicate markdown/log/native cache artifact keeps the controller larger than needed.
+
+**Fix:**
+
+- Add a target archive retention count for full run artifacts, defaulting to the latest 75 run directories.
+- Protect every file in the retained latest run directories.
+- For older run directories, keep JSON receipts/evidence protected but delete only rebuildable duplicate/cache artifacts already covered by `generated-evidence.json`.
+- Treat known native verifier sidecar outputs (`gradle-home`, `xcode-derived-data`) as delete-safe run cache only when they are inside `runs/harness/<run>/` and that run has `generated-evidence.json`.
+- Expose `--keep-runs` on `./harness target archive audit|plan` so operators can tune retention without touching product files or completed backlog.
+
+**Verification:**
+
+- Add target archive tests for latest-run protection, `--keep-runs 0` old-cache pruning, native cache directory pruning, and completed backlog protection.
+- Run focused target archive tests and CLI archive tests.
+- Run the pre-push guard before any push.
+
+### Correction: Harness Diet v2 Execution Profiles
+
+**Problem:** The controller still treats every executable backlog as a full five-lane AI workflow. That preserves evidence compatibility, but it burns model/runtime budget on small safe P2/P3 changes, repeats autosplit/refill work too aggressively, and produces long lane artifacts even when deterministic controller checks are sufficient.
+
+**Fix:**
+
+- Add `--execution-profile auto|thin|standard|strict`, defaulting to `auto`.
+- Resolve the effective profile from backlog risk before lane execution.
+- Keep guard-compatible artifact files for every run: `plan.md`, `manager.md`, `implementer.md`, `reviewer.md`, `verifier.md`, `implementer-manifest.json`, and `generated-evidence.json`.
+- For `thin`, run only the AI implementer lane and write deterministic completed planner/manager/reviewer/verifier records.
+- For `standard`, run only the AI implementer lane, then write deterministic reviewer/verifier records from manifest/evidence/scope validation.
+- For `strict`, preserve the existing planner -> manager -> implementer -> reviewer -> verifier AI workflow.
+- Force hard-risk work to `strict`, even when `thin` is requested: P0/P1, auth/security/migration/production/release/store/external-service/goal-gate, request/design binding gates, `.env*`, secret-like paths/content, and destructive operations.
+- Disable autosplit proposal generation by default outside `strict`; keep duplicate proposal reuse in strict.
+- Narrow manual-review defaults to hard-risk/open-question/secret/env/external-account/deploy/store/destructive tasks while preserving explicit manual queue workflows.
+- Make prompts profile-aware so thin/standard prompts include only hard boundaries, selected backlog, and required outputs unless request/design/production metadata requires strict traceability language.
+
+**Verification:**
+
+- Add profile-classification tests for small safe backlog, strict override, and hard-risk promotion.
+- Add guard-compatibility tests proving thin/standard runs still write completed unique-agent lane artifacts with a valid `scope_contract`.
+- Add CLI parser coverage for `--execution-profile`.
+- Add watch/refill/manual-review regression tests where the behavior changes.
+- Run focused autonomy/CLI/watch/task-intake tests, then `python3 scripts/harness_guard.py --mode pre-push --run-lint --run-pytest`.

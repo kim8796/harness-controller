@@ -542,6 +542,156 @@ def _goal_traceability_payload(
     }
 
 
+def _goal_sidecar_path(state_root: Path, value: object) -> Path | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    candidate = path if path.is_absolute() else state_root / path
+    try:
+        resolved = candidate.resolve()
+        state_resolved = state_root.resolve()
+    except OSError:
+        return None
+    if not resolved.is_relative_to(state_resolved):
+        return None
+    if candidate.exists() and candidate.is_symlink():
+        return None
+    return candidate
+
+
+def _legacy_goal_source_for_request_artifacts(
+    *,
+    state_root: Path,
+    goal_dir: Path,
+    payload: Mapping[str, object],
+) -> tuple[str, str, str]:
+    contract = payload.get("goal_contract") if isinstance(payload.get("goal_contract"), Mapping) else {}
+    source = contract.get("source_of_truth") if isinstance(contract.get("source_of_truth"), Mapping) else {}
+    candidates = [
+        _goal_sidecar_path(state_root, payload.get("spec_path")),
+        _goal_sidecar_path(state_root, source.get("spec_path") if isinstance(source, Mapping) else ""),
+        goal_dir / "inputs" / "goal-spec.md",
+    ]
+    for candidate in candidates:
+        if candidate is None or not candidate.exists() or candidate.is_symlink() or not candidate.is_file():
+            continue
+        try:
+            return "legacy-goal-spec", _sidecar_relative(state_root, candidate), candidate.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+    criteria = [str(item).strip() for item in payload.get("success_criteria") or () if str(item).strip()]
+    title = str(payload.get("title") or "").strip()
+    source_text = "\n".join([title, *criteria]).strip() or "Legacy goal source text was unavailable; preserve the recorded goal intent."
+    return "legacy-goal-text", "goal.json", source_text
+
+
+def _goal_attachments_for_request_artifacts(
+    *,
+    state_root: Path,
+    payload: Mapping[str, object],
+) -> list[Mapping[str, object]]:
+    attachments = payload.get("attachments")
+    if isinstance(attachments, list):
+        return [dict(item) for item in attachments if isinstance(item, Mapping)]
+    contract = payload.get("goal_contract") if isinstance(payload.get("goal_contract"), Mapping) else {}
+    source = contract.get("source_of_truth") if isinstance(contract.get("source_of_truth"), Mapping) else {}
+    manifest_value = payload.get("attachment_manifest_path") or (
+        source.get("attachment_manifest_path") if isinstance(source, Mapping) else ""
+    )
+    manifest_path = _goal_sidecar_path(state_root, manifest_value)
+    if manifest_path is None or not manifest_path.exists() or manifest_path.is_symlink():
+        return []
+    manifest = _read_json(manifest_path)
+    manifest_attachments = manifest.get("attachments")
+    if not isinstance(manifest_attachments, list):
+        return []
+    return [dict(item) for item in manifest_attachments if isinstance(item, Mapping)]
+
+
+def _request_artifact_paths_present(state_root: Path, payload: Mapping[str, object]) -> bool:
+    ledger_path = _goal_sidecar_path(state_root, payload.get("request_ledger_path"))
+    checks_path = _goal_sidecar_path(state_root, payload.get("request_checks_path"))
+    return bool(
+        ledger_path
+        and checks_path
+        and ledger_path.exists()
+        and checks_path.exists()
+        and _string_metadata_items(payload.get("request_ids"))
+        and _string_metadata_items(payload.get("request_check_ids"))
+    )
+
+
+def _ensure_goal_request_artifacts(*, state_root: Path, goal: GoalRecord) -> dict[str, object]:
+    payload = _read_json(goal.goal_json)
+    if _request_artifact_paths_present(state_root, payload):
+        return payload
+    source_kind, source_path, source_text = _legacy_goal_source_for_request_artifacts(
+        state_root=state_root,
+        goal_dir=goal.goal_dir,
+        payload=payload,
+    )
+    attachments = _goal_attachments_for_request_artifacts(state_root=state_root, payload=payload)
+    artifacts = harness_request_ledger.write_goal_request_artifacts(
+        goal_dir=goal.goal_dir,
+        goal_id=goal.goal_id,
+        target_id=goal.target_id,
+        source_kind=source_kind,
+        source_path=source_path,
+        source_text=source_text,
+        attachments=attachments,
+    )
+    request_ledger_relpath = _sidecar_relative(state_root, goal.goal_dir / harness_request_ledger.REQUEST_LEDGER_PATH)
+    request_checks_relpath = _sidecar_relative(state_root, goal.goal_dir / harness_request_ledger.REQUEST_CHECKS_PATH)
+    request_ids = [str(item) for item in artifacts.get("request_ids") or [] if str(item)]
+    request_check_ids = [str(item) for item in artifacts.get("request_check_ids") or [] if str(item)]
+    payload["request_ledger_path"] = request_ledger_relpath
+    payload["request_checks_path"] = request_checks_relpath
+    payload["request_ids"] = request_ids
+    payload["request_check_ids"] = request_check_ids
+    payload["request_backfilled_at"] = utc_timestamp()
+    contract = payload.get("goal_contract") if isinstance(payload.get("goal_contract"), Mapping) else {}
+    if not contract:
+        contract = _build_goal_contract(
+            title=str(payload.get("title") or goal.title),
+            spec_text=source_text if source_kind == "legacy-goal-spec" else "",
+            success_criteria=[str(item) for item in payload.get("success_criteria") or () if str(item)],
+            spec_path=source_path if source_kind == "legacy-goal-spec" else "",
+            attachment_manifest_path=str(payload.get("attachment_manifest_path") or ""),
+            request_ledger_path=request_ledger_relpath,
+            request_checks_path=request_checks_relpath,
+            attachments=attachments,
+        )
+    else:
+        contract = dict(contract)
+        source = contract.get("source_of_truth") if isinstance(contract.get("source_of_truth"), Mapping) else {}
+        source = dict(source)
+        source["request_ledger_path"] = request_ledger_relpath
+        source["request_checks_path"] = request_checks_relpath
+        contract["source_of_truth"] = source
+    payload["goal_contract"] = contract
+    traceability_path = goal.goal_dir / "traceability.json"
+    existing_traceability = _read_json(traceability_path) if traceability_path.exists() else {}
+    traceability = _goal_traceability_payload(
+        goal_id=goal.goal_id,
+        target_id=goal.target_id,
+        spec_path=str(payload.get("spec_path") or (source_path if source_kind == "legacy-goal-spec" else "")),
+        attachment_manifest_path=str(payload.get("attachment_manifest_path") or ""),
+        request_ledger_path=request_ledger_relpath,
+        request_checks_path=request_checks_relpath,
+        request_ids=request_ids,
+        request_check_ids=request_check_ids,
+        attachments=attachments,
+        success_criteria=[str(item) for item in payload.get("success_criteria") or () if str(item)],
+    )
+    if existing_traceability.get("task_links"):
+        traceability["task_links"] = existing_traceability["task_links"]
+    _write_json(traceability_path, traceability)
+    payload["traceability_path"] = _sidecar_relative(state_root, traceability_path)
+    _write_json(goal.goal_json, payload)
+    return payload
+
+
 def _completion_gate_status(payload: Mapping[str, object]) -> dict[str, object]:
     gates = payload.get("completion_gates")
     if not isinstance(gates, list) or not gates:
@@ -1852,7 +2002,7 @@ def build_roadmap(
 ) -> dict[str, object]:
     profile = collect_product_profile(target_repo)
     plan_id = f"plan-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-    goal_payload = _read_json(goal.goal_json)
+    goal_payload = _ensure_goal_request_artifacts(state_root=state_root, goal=goal)
     goal_contract = goal_payload.get("goal_contract") if isinstance(goal_payload.get("goal_contract"), Mapping) else {}
     product_standard = str(goal_contract.get("product_standard") or goal_payload.get("service_level") or "")
     completion_gates = _completion_gates_for_goal_contract(goal_contract) if goal_contract else []
@@ -2161,8 +2311,12 @@ def _goal_task_notes(goal: GoalRecord, plan_id: str, task: Mapping[str, object])
         for item in task.get("request_check_ids") or ()
         if str(item).strip()
     ]
-    if request_check_ids:
-        notes.append("Request-Check-Ids: " + ", ".join(request_check_ids))
+    notes.extend(
+        harness_request_ledger.request_check_metadata_lines(
+            request_check_ids=request_check_ids,
+            request_checks_path=request_checks_path,
+        )
+    )
     contract = goal_payload.get("goal_contract")
     if isinstance(contract, Mapping):
         standard = str(contract.get("product_standard") or "").strip()
@@ -2776,7 +2930,7 @@ def refresh_progress(*, state_root: Path, goal: GoalRecord) -> dict[str, object]
     progress["completed_count"] = completed
     progress["updated_at"] = utc_timestamp()
     _write_json(goal.progress_json, progress)
-    goal_payload = _read_json(goal.goal_json)
+    goal_payload = _ensure_goal_request_artifacts(state_root=state_root, goal=goal)
     linked = [str(task.get("backlog_id")) for task in tasks if str(task.get("backlog_id") or "")]
     goal_payload["linked_backlog_ids"] = linked
     required_tasks = [task for task in tasks if not str(task.get("fallback_created_at") or "")]
@@ -3264,6 +3418,7 @@ def refill_goal_tasks(
     target_id: str,
     target_repo: Path,
     goal: GoalRecord | None = None,
+    max_executable_backlog: int | None = None,
 ) -> GoalRefillResult | None:
     active = goal or load_active_goal(state_root)
     if active is None or active.status != "active":
@@ -3529,6 +3684,7 @@ def refill_goal_tasks(
                         "goal_spec_path": str(goal_payload.get("spec_path") or ""),
                         "attachment_manifest_path": str(goal_payload.get("attachment_manifest_path") or ""),
                         "traceability_path": str(goal_payload.get("traceability_path") or ""),
+                        **_request_metadata_from_payload(goal_payload),
                         "spec_refs": [str(goal_payload.get("spec_path") or "")] if str(goal_payload.get("spec_path") or "") else [],
                         "attachment_refs": _attachment_refs_from_goal_payload(goal_payload),
                         "attachment_count": len(goal_payload.get("attachments")) if isinstance(goal_payload.get("attachments"), list) else 0,
@@ -3666,6 +3822,7 @@ def refill_goal_tasks(
                 "goal_spec_path": str(goal_payload.get("spec_path") or ""),
                 "attachment_manifest_path": str(goal_payload.get("attachment_manifest_path") or ""),
                 "traceability_path": str(goal_payload.get("traceability_path") or ""),
+                **_request_metadata_from_payload(goal_payload),
                 "spec_refs": [str(goal_payload.get("spec_path") or "")] if str(goal_payload.get("spec_path") or "") else [],
                 "attachment_refs": _attachment_refs_from_goal_payload(goal_payload),
                 "attachment_count": len(goal_payload.get("attachments")) if isinstance(goal_payload.get("attachments"), list) else 0,
@@ -3822,9 +3979,12 @@ def refill_goal_tasks(
     plan_id = str(roadmap["plan_id"])
     report_items: list[dict[str, object]] = []
     queued = manual_review = 0
+    max_queued = None if max_executable_backlog is None else max(0, int(max_executable_backlog))
     for task in roadmap.get("tasks") or []:
         if not isinstance(task, Mapping):
             continue
+        if max_queued is not None and queued >= max_queued:
+            break
         item = _queue_task(
             state_root=state_root,
             target_id=target_id,
@@ -3860,6 +4020,7 @@ def refill_goal_tasks(
             "tasks": report_items,
             "queued": queued,
             "manual_review": manual_review,
+            "max_executable_backlog": max_queued,
         },
     )
     _write_goal_markdown(active.goal_dir / "goal.md", goal_payload, queued=queued, completed=0)

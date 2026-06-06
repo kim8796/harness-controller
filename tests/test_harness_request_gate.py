@@ -227,3 +227,52 @@ def test_transition_allows_request_linked_backlog_with_passing_request_verificat
     assert payload["target_path"] == "backlog/completed/BL-intake-ok.md"
     assert not queued.exists()
     assert (state_root / "backlog" / "completed" / "BL-intake-ok.md").exists()
+
+
+def test_transition_loads_request_check_ids_from_request_checks_file(tmp_path: Path) -> None:
+    module = _load_module()
+    controller, product, record, state_root, queued = _make_transition_fixture(
+        module,
+        tmp_path,
+        backlog_id="BL-intake-checks-file",
+        backlog_title="Task intake linked by checks file",
+        css_after=".screen { color: #789; }\n",
+        run_id="run-intake-checks-file",
+    )
+    checks_file = state_root / "goals" / "goal-1" / "request-checks.json"
+    checks_file.parent.mkdir(parents=True, exist_ok=True)
+    checks_file.write_text(
+        json.dumps(
+            {
+                "goal_id": "goal-1",
+                "target_id": "demo",
+                "check_ids": ["REQ-0001-CHECK-001"],
+                "checks": [{"check_id": "REQ-0001-CHECK-001"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    queued.write_text(
+        queued.read_text(encoding="utf-8").replace(
+            "Request-Check-Ids: REQ-0001-CHECK-001",
+            "Request-Checks: goals/goal-1/request-checks.json\nRequest-Check-Count: 1\nRequest-Check-Source: Request-Checks",
+        ),
+        encoding="utf-8",
+    )
+    _write_request_verification(
+        state_root=state_root,
+        backlog_id="BL-intake-checks-file",
+        product_diff_fingerprint=module.product_diff_fingerprint(product, ["src/styles.css"]),
+    )
+
+    payload = module.transition_sidecar_backlog(
+        controller_root=controller,
+        record=record,
+        status="completed",
+        reason="autopilot implementation accepted",
+        apply=True,
+        run_id="run-intake-checks-file",
+    )
+
+    assert payload["target_path"] == "backlog/completed/BL-intake-checks-file.md"
+    assert not queued.exists()

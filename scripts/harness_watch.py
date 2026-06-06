@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 import harness_controller
+import harness_gate_router
 import harness_goal
 import harness_incident
 import harness_loop
@@ -51,6 +52,7 @@ _TRANSACTION_POLICY_WAIT_TEXT = re.compile(
 )
 _TRANSACTION_EXTERNAL_WAIT_TEXT = re.compile(
     r"(?i)("
+    r"target\s+run\s+already\s+locked|target[-_ ]?run\.lock|owner=pid:|"
     r"service\s+unavailable|temporarily\s+unavailable|timeout|timed\s+out|\b429\b|\b503\b|"
     r"rate[_ -]?limit(?:ed)?|too\s+many\s+requests|quota|"
     r"(?:provider|openai|anthropic|model\s+provider).{0,80}"
@@ -713,6 +715,37 @@ def _handle_transaction_operator_wait(
     return wait
 
 
+def _incident_blocker_wait_class(incident_blocker: Mapping[str, object]) -> str:
+    wait_class = str(incident_blocker.get("wait_class") or "").strip()
+    if wait_class:
+        return wait_class
+    text = " ".join(
+        str(incident_blocker.get(key) or "")
+        for key in ("kind", "reason", "error", "last_error", "message")
+    )
+    if _TRANSACTION_POLICY_WAIT_TEXT.search(text):
+        return "approval-wait"
+    if _TRANSACTION_SETUP_WAIT_TEXT.search(text):
+        return "setup-wait"
+    if _TRANSACTION_EXTERNAL_WAIT_TEXT.search(text):
+        return "external-wait"
+    return ""
+
+
+def _incident_blocker_wait_is_resolved(
+    record: harness_controller.TargetRecord,
+    incident_blocker: Mapping[str, object],
+    wait_class: str,
+) -> bool:
+    text = " ".join(
+        str(incident_blocker.get(key) or "")
+        for key in ("kind", "reason", "error", "last_error", "message")
+    )
+    if wait_class == "external-wait" and re.search(r"(?i)target\s+run\s+already\s+locked|target[-_ ]?run\.lock|owner=pid:", text):
+        return not (record.state_root / "locks" / "target-run.lock").exists()
+    return False
+
+
 def _selected_backlog_text(record: harness_controller.TargetRecord, item: object) -> str:
     relative = getattr(item, "path", Path())
     path = record.state_root / relative
@@ -1219,6 +1252,33 @@ def _idle_status_from_refill(refill: Mapping[str, object]) -> tuple[str, str, st
     )
 
 
+def _gate_route_for_idle_status(
+    record: harness_controller.TargetRecord,
+    *,
+    refill: Mapping[str, object] | None,
+) -> Mapping[str, object]:
+    goal_payload = watch_active_goal_payload(record)
+    gate_summary = _goal_gate_summary_from_payload(goal_payload)
+    pending_gate_ids = harness_gate_router.safe_gate_id_list(gate_summary.get("pending_gate_ids"))
+    if not pending_gate_ids:
+        return {}
+    blocked_gate_ids = harness_gate_router.safe_gate_id_list(
+        refill.get("gate_verifier_blocked_gate_ids") if isinstance(refill, Mapping) else []
+    )
+    setup_readiness = _watch_setup_readiness(record, goal_payload)
+    return harness_gate_router.route_pending_gates(
+        pending_gate_ids=pending_gate_ids,
+        blocked_gate_ids=blocked_gate_ids,
+        setup_readiness=setup_readiness,
+        reason_by_gate=harness_gate_router.extract_gate_reasons_from_refill(refill),
+    )
+
+
+def _active_goal_has_pending_gates(record: harness_controller.TargetRecord) -> bool:
+    gate_summary = watch_active_goal_gate_summary(record)
+    return str(gate_summary.get("status") or "") == "pending" and bool(gate_summary.get("pending_gate_ids"))
+
+
 def _watch_release_state(
     record: harness_controller.TargetRecord,
     *,
@@ -1548,6 +1608,11 @@ def write_watch_status(
     idle_count: int = 0,
     operator_wait: Mapping[str, object] | None = None,
     implementation_status: Mapping[str, object] | None = None,
+    exit_reason: str = "",
+    next_action_kind: str = "",
+    pending_gate_ids: Sequence[str] | None = None,
+    blocked_gate_ids: Sequence[str] | None = None,
+    gate_route: Mapping[str, object] | None = None,
 ) -> Mapping[str, object]:
     json_path, md_path = watch_status_paths(record)
     watch_dir = json_path.parent
@@ -1593,6 +1658,35 @@ def write_watch_status(
             payload["goal_gate_next_action"] = gate_next_action
     setup_readiness = _watch_setup_readiness(record, goal_payload)
     payload["setup_readiness"] = setup_readiness
+    resolved_pending_gate_ids = (
+        list(pending_gate_ids)
+        if pending_gate_ids is not None
+        else harness_gate_router.safe_gate_id_list(gate_summary.get("pending_gate_ids") if isinstance(gate_summary, Mapping) else [])
+    )
+    resolved_blocked_gate_ids = (
+        list(blocked_gate_ids)
+        if blocked_gate_ids is not None
+        else harness_gate_router.safe_gate_id_list(gate_route.get("blocked_gate_ids") if isinstance(gate_route, Mapping) else [])
+    )
+    if resolved_pending_gate_ids:
+        payload["pending_gate_ids"] = resolved_pending_gate_ids
+    if resolved_blocked_gate_ids:
+        payload["blocked_gate_ids"] = resolved_blocked_gate_ids
+    route_payload = dict(gate_route) if isinstance(gate_route, Mapping) else {}
+    if not route_payload and resolved_pending_gate_ids:
+        route_payload = harness_gate_router.route_pending_gates(
+            pending_gate_ids=resolved_pending_gate_ids,
+            blocked_gate_ids=resolved_blocked_gate_ids,
+            setup_readiness=setup_readiness,
+        )
+    if route_payload:
+        payload["gate_route"] = route_payload
+        if not next_action_kind:
+            next_action_kind = str(route_payload.get("primary_action_kind") or "")
+    if exit_reason:
+        payload["exit_reason"] = exit_reason
+    if next_action_kind:
+        payload["next_action_kind"] = next_action_kind
     payload["release_state"] = _watch_release_state(
         record,
         goal_payload=goal_payload,
@@ -1651,6 +1745,8 @@ def render_watch_status_markdown(payload: Mapping[str, object]) -> str:
         f"- Backlog: `{value('selected_backlog_id', 'none')}`",
         f"- Run: `{value('run_id', 'none')}`",
         f"- Transaction: `{value('transaction_status', 'none')}`",
+        f"- Exit reason: `{value('exit_reason', 'none')}`",
+        f"- Next action kind: `{value('next_action_kind', 'none')}`",
         f"- Commit: `{value('commit_sha', 'none')}`",
         f"- Publication branch: `{value('publication_branch', 'none')}`",
         f"- PR: `{value('pr_url', 'none')}`",
@@ -1685,6 +1781,8 @@ def render_watch_status_markdown(payload: Mapping[str, object]) -> str:
     if isinstance(gate_status, Mapping) and int(gate_status.get("required_count") or 0):
         pending_ids = gate_status.get("pending_gate_ids")
         pending_text = ", ".join(str(item) for item in pending_ids[:8]) if isinstance(pending_ids, list) else ""
+        blocked_ids = payload.get("blocked_gate_ids")
+        blocked_text = ", ".join(str(item) for item in blocked_ids[:8]) if isinstance(blocked_ids, list) else ""
         gate_next_action = value("goal_gate_next_action", "")
         lines.extend(
             [
@@ -1695,6 +1793,8 @@ def render_watch_status_markdown(payload: Mapping[str, object]) -> str:
                 f"- Passed: {gate_status.get('passed_count') or 0}",
                 f"- Pending: {gate_status.get('pending_count') or 0}",
                 f"- Pending gates: {pending_text or 'none'}",
+                f"- Blocked gates: {blocked_text or 'none'}",
+                f"- Route: `{value('next_action_kind', 'none')}`",
                 f"- Next action: {gate_next_action}" if gate_next_action else "",
                 "",
             ]
@@ -1916,6 +2016,12 @@ def print_watch_status(record: harness_controller.TargetRecord) -> int:
     pending = str(payload.get("pending_reason") or "")
     if pending:
         print(f"- pending: {pending}")
+    exit_reason = str(payload.get("exit_reason") or "")
+    if exit_reason:
+        print(f"- exit reason: `{exit_reason}`")
+    next_action_kind = str(payload.get("next_action_kind") or "")
+    if next_action_kind:
+        print(f"- next action kind: `{next_action_kind}`")
     print(f"- processed: {int(payload.get('processed_count') or 0)}")
     print(f"- idle: {int(payload.get('idle_count') or 0)}")
     print(f"- heartbeat: `{payload.get('last_heartbeat_at') or 'unknown'}`")
@@ -1944,6 +2050,7 @@ def refill_goal_if_idle(
             target_id=record.target_id,
             target_repo=record.repo,
             goal=active,
+            max_executable_backlog=1,
         )
     except (harness_goal.GoalError, harness_task_intake.TaskIntakeError) as exc:
         raise _error(f"goal planner refill failed: {exc}")
@@ -2048,6 +2155,7 @@ def command_watch(
             runner_model=getattr(args, "runner_model", None),
             runner_reasoning_effort=getattr(args, "runner_reasoning_effort", "xhigh"),
             command_template=getattr(args, "command_template", None),
+            execution_profile=getattr(args, "execution_profile", "auto"),
             drain_telegram=not bool(getattr(args, "no_telegram_drain", False)),
             auto_maintenance=True,
             auto_merge=not bool(getattr(args, "no_auto_merge", False)),
@@ -2096,6 +2204,7 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
     last_idle_phase = ""
     last_idle_reason = ""
     last_idle_next_action = ""
+    pending_publication_blocker: Mapping[str, object] | None = None
     print("하네스 autopilot run 시작")
     print(f"- 대상: `{record.target_id}`")
     if args.watch:
@@ -2239,6 +2348,7 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                 controller_root=runtime.repo_root(),
                 record=record,
             )
+            pending_publication_blocker = None
             if pending_pushes:
                 if runtime.retry_pending_publication:
                     retry_target = pending_pushes[-1]
@@ -2256,6 +2366,7 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                         record=record,
                     )
                     if not pending_pushes:
+                        pending_publication_blocker = None
                         refresh_active_goal_progress(record)
                         if args.watch:
                             runtime.write_watch_status(
@@ -2304,6 +2415,7 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                 if operator_blocker is not None:
                     print("publication 재시도 가능: GitHub credential이 준비되어 이전 credential blocker를 pending retry로 처리합니다.")
                 latest = pending_pushes[-1]
+                pending_publication_blocker = latest
                 print("publication 보류: 이전 transaction의 product publication이 아직 닫히지 않았습니다.")
                 print(f"- 구현 기록: `{latest['run_id']}`")
                 print(f"- 작업 항목: `{latest['backlog_id']}`")
@@ -2318,17 +2430,19 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                 print(f"- doctor diagnosis: `{diagnosis['path']}`")
                 print("- pending publication은 run/watch 전체를 멈추지 않고 다음 executable 작업을 계속 찾습니다.")
                 if args.watch:
-                    runtime.write_watch_status(
-                        record,
-                        phase="publication-pending",
-                        status="running",
-                        selected_backlog_id=str(latest["backlog_id"]),
-                        run_id=str(latest["run_id"]),
-                        pending_reason="previous product publication is still pending",
-                        processed_count=processed,
-                        idle_count=idle_count,
-                        next_action="continue selecting executable work; retry publication when ready",
-                    )
+                        runtime.write_watch_status(
+                            record,
+                            phase="publication-pending",
+                            status="running",
+                            selected_backlog_id=str(latest["backlog_id"]),
+                            run_id=str(latest["run_id"]),
+                            transaction_status="publication-pending",
+                            pending_reason="previous product publication is still pending",
+                            processed_count=processed,
+                            idle_count=idle_count,
+                            next_action="continue selecting executable work; retry publication when ready",
+                            next_action_kind="publication-actionable",
+                        )
             if args.watch and max_cycles and processed >= max_cycles:
                 runtime.write_watch_status(
                     record,
@@ -2393,6 +2507,10 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                     last_idle_phase, refill_status, last_idle_reason, last_idle_next_action, idle_operator_wait = _idle_status_from_refill(refill)
                 idle_count += 1
                 active_goal_id = runtime.watch_active_goal_id(record)
+                gate_route = _gate_route_for_idle_status(record, refill=refill)
+                pending_gate_ids = harness_gate_router.safe_gate_id_list(gate_route.get("pending_gate_ids"))
+                blocked_gate_ids = harness_gate_router.safe_gate_id_list(gate_route.get("blocked_gate_ids"))
+                next_action_kind = str(gate_route.get("primary_action_kind") or "")
                 if active_goal_id:
                     print("대기: queued auto backlog가 없습니다.")
                     next_action = last_idle_next_action or "wait for planner/task intake or inspect `./harness task list`"
@@ -2406,44 +2524,103 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
                     pending_reason = ""
                     refill_status = "idle"
                     idle_operator_wait = None
+                    gate_route = {}
+                    pending_gate_ids = []
+                    blocked_gate_ids = []
+                    next_action_kind = ""
+                if pending_publication_blocker is not None:
+                    phase = "publication-retry-pending"
+                    refill_status = "blocked"
+                    pending_reason = str(
+                        pending_publication_blocker.get("message")
+                        or pending_publication_blocker.get("status")
+                        or "previous product publication is still pending"
+                    )
+                    next_action = "retry or resolve pending GitHub publication, then rerun `./harness watch`"
+                    next_action_kind = "publication-actionable"
                 runtime.write_watch_status(
                     record,
                     phase=phase,
                     status=refill_status,
                     active_goal_id=active_goal_id,
+                    selected_backlog_id=str(pending_publication_blocker.get("backlog_id") or "") if pending_publication_blocker else "",
+                    run_id=str(pending_publication_blocker.get("run_id") or "") if pending_publication_blocker else "",
+                    transaction_status="publication-pending" if pending_publication_blocker else "",
                     pending_reason=pending_reason,
                     processed_count=processed,
                     idle_count=idle_count,
                     next_action=next_action,
                     operator_wait=idle_operator_wait,
+                    pending_gate_ids=pending_gate_ids,
+                    blocked_gate_ids=blocked_gate_ids,
+                    gate_route=gate_route,
+                    next_action_kind=next_action_kind,
                 )
                 if stop_on_idle:
+                    stopped_phase = "stopped-idle"
+                    stopped_status = "stopped"
+                    exit_reason = "stop-on-idle"
+                    action_required = bool(active_goal_id and pending_gate_ids) or bool(next_action_kind)
+                    if action_required:
+                        stopped_phase = "stopped-action-required"
+                        stopped_status = "blocked" if refill_status != "operator-wait" else "operator-wait"
+                        exit_reason = "stop-on-idle with pending watch action"
                     runtime.write_watch_status(
                         record,
-                        phase="stopped-idle",
-                        status="stopped",
+                        phase=stopped_phase,
+                        status=stopped_status,
                         active_goal_id=active_goal_id,
+                        selected_backlog_id=str(pending_publication_blocker.get("backlog_id") or "") if pending_publication_blocker else "",
+                        run_id=str(pending_publication_blocker.get("run_id") or "") if pending_publication_blocker else "",
+                        transaction_status="publication-pending" if pending_publication_blocker else "",
                         pending_reason=pending_reason,
                         processed_count=processed,
                         idle_count=idle_count,
                         next_action=next_action,
                         operator_wait=idle_operator_wait,
+                        exit_reason=exit_reason,
+                        next_action_kind=next_action_kind,
+                        pending_gate_ids=pending_gate_ids,
+                        blocked_gate_ids=blocked_gate_ids,
+                        gate_route=gate_route,
                     )
                     print("watch 종료: stop-on-idle, 실행할 작업이 없습니다.")
                     return 0
                 if max_cycles:
+                    stopped_phase = "max-cycles-idle-no-progress"
+                    stopped_status = "stopped"
+                    exit_reason = f"max-cycles={max_cycles} idle with no active goal work"
+                    action_required = bool(active_goal_id and pending_gate_ids) or bool(next_action_kind)
+                    if action_required:
+                        stopped_phase = "max-cycles-action-required"
+                        stopped_status = "blocked" if refill_status != "operator-wait" else "operator-wait"
+                        exit_reason = f"max-cycles={max_cycles} reached with pending watch action"
                     runtime.write_watch_status(
                         record,
-                        phase="max-cycles-idle-no-progress",
-                        status="stopped",
+                        phase=stopped_phase,
+                        status=stopped_status,
                         active_goal_id=active_goal_id,
+                        selected_backlog_id=str(pending_publication_blocker.get("backlog_id") or "") if pending_publication_blocker else "",
+                        run_id=str(pending_publication_blocker.get("run_id") or "") if pending_publication_blocker else "",
+                        transaction_status="publication-pending" if pending_publication_blocker else "",
                         pending_reason=pending_reason,
                         processed_count=processed,
                         idle_count=idle_count,
                         next_action=next_action,
                         operator_wait=idle_operator_wait,
+                        exit_reason=exit_reason,
+                        next_action_kind=next_action_kind,
+                        pending_gate_ids=pending_gate_ids,
+                        blocked_gate_ids=blocked_gate_ids,
+                        gate_route=gate_route,
                     )
-                    print(f"watch 종료: max-cycles={max_cycles}, 처리 가능한 backlog가 없어 {processed}개 처리 후 종료합니다.")
+                    if action_required:
+                        print(
+                            f"watch 종료: max-cycles={max_cycles}, 처리할 watch action이 남아 "
+                            "다음 조치를 status에 남겼습니다."
+                        )
+                    else:
+                        print(f"watch 종료: max-cycles={max_cycles}, 처리 가능한 backlog가 없어 {processed}개 처리 후 종료합니다.")
                     return 0
                 print(f"- watch 대기: {idle_seconds}초 후 다시 확인합니다.")
                 runtime.sleep(idle_seconds)
@@ -2513,30 +2690,49 @@ def command_run(args: argparse.Namespace, runtime: WatchRuntime) -> int:
         if incident_blocker:
             print("run 중단: 같은 작업의 반복 실패가 threshold에 도달했습니다.")
             print(f"- incident: `{incident_blocker['signature']}` count={incident_blocker['count']}")
-            if args.watch:
-                runtime.write_watch_status(
-                    record,
-                    phase="incident-blocked",
-                    status="blocked",
-                    selected_backlog_id=backlog_id,
-                    pending_reason=f"repeated incident {incident_blocker['signature']}",
-                    processed_count=processed,
-                    idle_count=idle_count,
-                    next_action="quarantine repeated-failure backlog and continue",
-                )
-                blocked_ok, blocked_path = runtime.block_sidecar_backlog_for_incident(
-                    record=record,
-                    backlog_id=backlog_id,
-                    reason=f"repeated incident {incident_blocker['signature']}",
-                )
-                print(f"- blocked backlog: `{blocked_path}`")
-                if not blocked_ok:
-                    print("- watch 중단: 반복 실패 task 격리에 실패했습니다.")
-                    return 2
-                print("- watch는 이 task를 격리하고 다음 goal/task 진행 경로를 찾습니다.")
-                continue
-            print("- 다음 조치: controller maintenance로 원인 수정 후 incident를 해결 처리하세요.")
-            return 2
+            wait_class = _incident_blocker_wait_class(incident_blocker)
+            if wait_class and _incident_blocker_wait_is_resolved(record, incident_blocker, wait_class):
+                print("- 이전 반복 실패 원인이 해소되어 같은 작업을 재시도합니다.")
+            else:
+                if args.watch and wait_class:
+                    wait = _handle_transaction_operator_wait(
+                        runtime,
+                        record,
+                        incident_record={**dict(incident_blocker), "wait_class": wait_class},
+                        backlog_id=backlog_id,
+                        error=ERROR_CLASS(
+                            str(incident_blocker.get("error") or incident_blocker.get("last_error") or incident_blocker.get("reason") or wait_class)
+                        ),
+                        processed_count=processed,
+                        idle_count=idle_count,
+                    )
+                    if wait is not None:
+                        print("- 반복 실패지만 operator-wait 대상이라 backlog를 격리하지 않습니다.")
+                        return 2
+                if args.watch:
+                    runtime.write_watch_status(
+                        record,
+                        phase="incident-blocked",
+                        status="blocked",
+                        selected_backlog_id=backlog_id,
+                        pending_reason=f"repeated incident {incident_blocker['signature']}",
+                        processed_count=processed,
+                        idle_count=idle_count,
+                        next_action="quarantine repeated-failure backlog and continue",
+                    )
+                    blocked_ok, blocked_path = runtime.block_sidecar_backlog_for_incident(
+                        record=record,
+                        backlog_id=backlog_id,
+                        reason=f"repeated incident {incident_blocker['signature']}",
+                    )
+                    print(f"- blocked backlog: `{blocked_path}`")
+                    if not blocked_ok:
+                        print("- watch 중단: 반복 실패 task 격리에 실패했습니다.")
+                        return 2
+                    print("- watch는 이 task를 격리하고 다음 goal/task 진행 경로를 찾습니다.")
+                    continue
+                print("- 다음 조치: controller maintenance로 원인 수정 후 incident를 해결 처리하세요.")
+                return 2
 
         heartbeat_stop: threading.Event | None = None
         heartbeat_thread: threading.Thread | None = None

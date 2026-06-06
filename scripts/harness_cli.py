@@ -58,6 +58,7 @@ UNSAFE_GLOBAL_SHIM_DIRS = (
 )
 FINISH_PUSH_CAUTION_KO = "remote push는 배포나 외부 자동화를 트리거할 수 있고 자동 remote rollback은 없습니다."
 AUTOPILOT_INCIDENT_THRESHOLD = 2
+EXECUTION_PROFILE_CHOICES = ("auto", "thin", "standard", "strict")
 RUN_BLOCKER_EXPLANATIONS_KO = {
     "product-diff-env-file": "제품 변경에 `.env` 계열 파일이 포함되어 자동 commit을 막았습니다.",
     "product-diff-secret-like-path": "파일명에 token/secret/key 같은 비밀값 단서가 있어 자동 commit을 막았습니다.",
@@ -79,6 +80,7 @@ CONTROLLER_RELEASE_CHECK_RUFF_PATHS = (
     "scripts/harness_env.py",
     "scripts/harness_export.py",
     "scripts/harness_fleet.py",
+    "scripts/harness_gate_router.py",
     "scripts/harness_goal.py",
     "scripts/harness_goal_contract.py",
     "scripts/harness_goal_gates.py",
@@ -1472,6 +1474,7 @@ def _task_runtime() -> harness_task_cli.TaskCliRuntime:
         controller_errors=(harness_controller.ControllerError,),
         loop_errors=(harness_loop.LoopError,),
         task_errors=(harness_task_intake.TaskIntakeError,),
+        active_goal_id=harness_watch.watch_active_goal_id,
     )
 
 
@@ -2441,6 +2444,7 @@ def _run_autopilot_transaction(record: harness_controller.TargetRecord, args: ar
                     runner_model=args.runner_model,
                     runner_reasoning_effort=args.runner_reasoning_effort,
                     command_template=args.command_template,
+                    execution_profile=getattr(args, "execution_profile", "auto"),
                     commit=False,
                     push=False,
                 )
@@ -2906,6 +2910,7 @@ def command_smoke_implementation(args: argparse.Namespace) -> int:
                 runner_model=args.runner_model,
                 runner_reasoning_effort=args.runner_reasoning_effort,
                 command_template=args.command_template,
+                execution_profile=getattr(args, "execution_profile", "auto"),
                 commit=False,
                 push=False,
             )
@@ -3771,6 +3776,7 @@ def _invoke_target_archive_backend(args: argparse.Namespace, record: harness_con
         "archive_plan": plan_path,
         "output": output_path,
         "output_path": output_path,
+        "keep_runs": getattr(args, "keep_runs", None),
         "apply": operation == "apply",
     }
     try:
@@ -4390,6 +4396,7 @@ def _run_target_autonomy_state_plumbing(
     runner_model: str | None = None,
     runner_reasoning_effort: str | None = None,
     command_template: str | None = None,
+    execution_profile: str = "auto",
 ) -> subprocess.CompletedProcess[str]:
     root = repo_root()
     from harness_autonomy import AutonomyError, main as autonomy_main
@@ -4435,6 +4442,8 @@ def _run_target_autonomy_state_plumbing(
             "auto",
             "--runner",
             runner,
+            "--execution-profile",
+            execution_profile,
             "--git-backup",
             "off",
         ]
@@ -4647,6 +4656,7 @@ def command_target_run(args: argparse.Namespace) -> int:
             runner_model=getattr(args, "runner_model", None),
             runner_reasoning_effort=getattr(args, "runner_reasoning_effort", None),
             command_template=getattr(args, "command_template", None),
+            execution_profile=str(getattr(args, "execution_profile", "auto") or "auto"),
         )
         evidence_after = set(evidence_root.glob("*/generated-evidence.json")) if evidence_root.exists() else set()
         new_evidence_paths = sorted(evidence_after - evidence_before)
@@ -5202,6 +5212,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("minimal", "low", "medium", "high", "xhigh"),
         help=argparse.SUPPRESS,
     )
+    do.add_argument(
+        "--execution-profile",
+        choices=EXECUTION_PROFILE_CHOICES,
+        default="auto",
+        help="Execution profile for the implementation run: auto, thin, standard, or strict.",
+    )
     do.add_argument("--command-template", help=argparse.SUPPRESS)
     do.set_defaults(func=command_do)
 
@@ -5219,6 +5235,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="xhigh",
         choices=("minimal", "low", "medium", "high", "xhigh"),
         help=argparse.SUPPRESS,
+    )
+    watch.add_argument(
+        "--execution-profile",
+        choices=EXECUTION_PROFILE_CHOICES,
+        default="auto",
+        help="Execution profile for implementation transactions: auto, thin, standard, or strict.",
     )
     watch.add_argument("--command-template", help=argparse.SUPPRESS)
     watch.set_defaults(func=command_watch)
@@ -5325,6 +5347,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="xhigh",
         choices=("minimal", "low", "medium", "high", "xhigh"),
         help=argparse.SUPPRESS,
+    )
+    run.add_argument(
+        "--execution-profile",
+        choices=EXECUTION_PROFILE_CHOICES,
+        default="auto",
+        help="Execution profile for implementation transactions: auto, thin, standard, or strict.",
     )
     run.add_argument("--command-template", help=argparse.SUPPRESS)
     run.add_argument("extra", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
@@ -5517,6 +5545,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Audit archive candidates under targets/<target-id> without mutating files.",
     )
     target_archive_audit.add_argument("target", help=target_selector_help)
+    target_archive_audit.add_argument(
+        "--keep-runs",
+        type=int,
+        default=None,
+        help="Keep full artifacts for the latest N runs; older runs retain JSON receipts but prune covered cache.",
+    )
     target_archive_audit.add_argument("--json", action="store_true")
     target_archive_audit.set_defaults(func=command_target_archive)
     target_archive_plan = target_archive_subparsers.add_parser(
@@ -5525,6 +5559,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     target_archive_plan.add_argument("target", help=target_selector_help)
     target_archive_plan.add_argument("--output", type=Path, help="Optional backend-specific archive plan output path.")
+    target_archive_plan.add_argument(
+        "--keep-runs",
+        type=int,
+        default=None,
+        help="Keep full artifacts for the latest N runs; older runs retain JSON receipts but prune covered cache.",
+    )
     target_archive_plan.add_argument("--json", action="store_true")
     target_archive_plan.set_defaults(func=command_target_archive)
     target_archive_apply = target_archive_subparsers.add_parser(
@@ -5570,6 +5610,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="xhigh",
         choices=("minimal", "low", "medium", "high", "xhigh"),
         help="Codex reasoning effort for --implement-backlog-once; default is xhigh (extra high).",
+    )
+    target_run.add_argument(
+        "--execution-profile",
+        choices=EXECUTION_PROFILE_CHOICES,
+        default="auto",
+        help="Execution profile forwarded to the implementation runner: auto, thin, standard, or strict.",
     )
     target_run.add_argument("--command-template", help=argparse.SUPPRESS)
     target_run.add_argument(

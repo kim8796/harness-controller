@@ -46,7 +46,8 @@
 ## 운영 규칙
 
 - `v1.8.26` 기준 external controller 의 beginner 기본 실행은 `./harness install /path/to/product`, `./harness goal "제품 목표"`, `./harness watch` 다. `goal` 은 단일 작업이 아니라 제품 완성 목표를 controller sidecar 에 저장하고, `watch` 는 active goal 이 끝날 때까지 planner refill, task intake queue, implementation, complete, commit, task branch push, PR receipt 를 반복한다. `./harness do "요청"`은 한 작업 helper이고, `run/run --once/finish/target backlog push` 는 복구/디버깅용 고급 명령이다. Telegram/Redis relay drain 은 controller-owned Upstash adapter 를 쓰며 manual smoke 는 `--target-id <target>` 를 명시한다. Telegram setup readiness 는 `./harness telegram setup --target-id <id> --repo-id <repo> --dry-run` 으로 확인하고, dry-run 은 env/provider/webhook/deploy side effect 를 막는다.
-- controller retention 은 product repo 를 지우지 않는다. smoke/temp sidecar 는 `./harness controller audit-size` 와 `./harness controller cleanup --dry-run|--apply` 로 delete-safe 후보만 다룬다.
+- Harness Diet v2 실행은 `--execution-profile auto|thin|standard|strict` 로 조절한다. 기본 `auto` 는 작은 P2/P3/P4 auto backlog 를 implementer-only thin으로 줄이고, auth/security/migration/production/release/store/request/design/env/secret/destructive 작업은 strict로 승격한다. guard-compatible `plan.md`, `manager.md`, `reviewer.md`, `verifier.md` 파일은 계속 생성한다.
+- controller retention 은 product repo 를 지우지 않는다. smoke/temp sidecar 는 `./harness controller audit-size` 와 `./harness controller cleanup --dry-run|--apply` 로 delete-safe 후보만 다룬다. target run artifact diet 는 `./harness target archive audit|plan <target> --keep-runs 75` 로 최근 N개 run 산출물과 completed backlog ledger 를 보호한 채 오래된 covered cache 만 줄인다.
 - `backlog/` 는 대기열이고 `runs/harness/` 는 실행 근거다. `CURRENT_STATE.md` 와 `RUNS_INDEX.md` 는 복구용 뷰다.
 - `docs/harness/GOALS.md` 는 backlog 보다 상위의 방향 문서다. 새 backlog, discovery proposal, plan 범위는 먼저 여기와 맞는지 본다.
 - goal machine state 는 `json goal_state` 가 canonical 이고 top-level `Status:` 는 사람이 읽는 mirror 다. 둘이 다르면 fail-closed 한다.

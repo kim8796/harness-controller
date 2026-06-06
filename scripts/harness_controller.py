@@ -1983,7 +1983,15 @@ def _enforce_request_verification_completion_guard(
     evidence: Mapping[str, Any] | None,
 ) -> None:
     request_check_ids = _metadata_csv_values(metadata.get("request_check_ids"))
+    request_checks_path = str(metadata.get("request_checks") or metadata.get("request_checks_path") or "").strip()
     if not request_check_ids:
+        request_check_ids = harness_request_ledger.request_check_ids_from_checks_path(
+            state_paths.state_root,
+            request_checks_path,
+        )
+    if not request_check_ids:
+        if request_checks_path:
+            raise ControllerError("request verification checks file is missing or unreadable")
         return
     backlog_id = str(metadata.get("id") or "").strip()
     goal_id = str(metadata.get("goal") or "").strip()

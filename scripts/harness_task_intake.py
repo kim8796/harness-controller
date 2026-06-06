@@ -14,6 +14,7 @@ from typing import Iterable, Mapping, Sequence
 
 import harness_controller
 import harness_loop
+import harness_request_ledger
 
 
 TASK_PACKET_SCHEMA_VERSION = 1
@@ -1733,8 +1734,12 @@ def _backlog_markdown(
     if clean_request_ids:
         metadata.append("Request-Ids: " + ", ".join(clean_request_ids))
     clean_request_check_ids = tuple(str(item).strip() for item in request_check_ids if str(item).strip())
-    if clean_request_check_ids:
-        metadata.append("Request-Check-Ids: " + ", ".join(clean_request_check_ids))
+    metadata.extend(
+        harness_request_ledger.request_check_metadata_lines(
+            request_check_ids=clean_request_check_ids,
+            request_checks_path=request_checks_path,
+        )
+    )
     clean_depends = tuple(str(item).strip() for item in depends_on if str(item).strip())
     if clean_depends:
         metadata.append("Depends-On: " + ", ".join(clean_depends))

@@ -88,6 +88,194 @@ def _write_successful_publication(
         )
 
 
+def _strip_request_artifacts(goal: object) -> None:
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    for key in ("request_ledger_path", "request_checks_path", "request_ids", "request_check_ids"):
+        payload.pop(key, None)
+    contract = payload.get("goal_contract")
+    if isinstance(contract, dict):
+        source = contract.get("source_of_truth")
+        if isinstance(source, dict):
+            source.pop("request_ledger_path", None)
+            source.pop("request_checks_path", None)
+        contract.pop("request_ledger_path", None)
+        contract.pop("request_checks_path", None)
+    goal.goal_json.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    for name in ("request-ledger.json", "request-checks.json"):
+        path = goal.goal_dir / name
+        if path.exists():
+            path.unlink()
+    traceability = goal.goal_dir / "traceability.json"
+    if traceability.exists():
+        traceability.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "goal_id": goal.goal_id,
+                    "target_id": goal.target_id,
+                    "request_refs": [],
+                    "request_check_refs": [],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+
+def test_refresh_progress_backfills_legacy_goal_request_artifacts(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    spec = tmp_path / "goal-spec.md"
+    image = tmp_path / "screen.png"
+    spec.write_text(
+        "\n".join(
+            [
+                "# Goal: 로컬 프로토타입만 스크린샷 기반 채팅 UI",
+                "",
+                "## 요구사항",
+                "- 내가 준 디자인 시안을 그대로 반영한다.",
+                "- 총 인원수는 넣지 않는다.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    goal = module.create_goal_from_spec(
+        state_root=state_root,
+        target_id="chatapp",
+        source=spec,
+        images=(image,),
+        image_captions=("메인 화면 디자인",),
+    )
+    _strip_request_artifacts(goal)
+
+    module.refresh_progress(state_root=state_root, goal=goal)
+
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    ledger = json.loads((goal.goal_dir / "request-ledger.json").read_text(encoding="utf-8"))
+    checks = json.loads((goal.goal_dir / "request-checks.json").read_text(encoding="utf-8"))
+    traceability = json.loads((goal.goal_dir / "traceability.json").read_text(encoding="utf-8"))
+    assert payload["request_ledger_path"].endswith("/request-ledger.json")
+    assert payload["request_checks_path"].endswith("/request-checks.json")
+    assert payload["request_ids"] == ["REQ-0001"]
+    assert payload["request_check_ids"] == checks["check_ids"]
+    assert ledger["entries"][0]["source_kind"] == "legacy-goal-spec"
+    assert ledger["entries"][0]["design_binding"] is True
+    assert any("총 인원수" in check["description"] for check in checks["checks"])
+    assert traceability["request_refs"] == [{"request_id": "REQ-0001"}]
+    assert traceability["request_check_refs"]
+    assert payload["goal_contract"]["source_of_truth"]["request_ledger_path"] == payload["request_ledger_path"]
+    assert payload["goal_contract"]["source_of_truth"]["request_checks_path"] == payload["request_checks_path"]
+
+
+def test_refill_backfills_legacy_goal_and_queues_request_bound_gate_task(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    product = tmp_path / "product"
+    product.mkdir()
+    _init_product(product)
+    (state_root / "target.json").parent.mkdir(parents=True, exist_ok=True)
+    (state_root / "target.json").write_text(json.dumps({"repo": product.as_posix()}), encoding="utf-8")
+    spec = tmp_path / "goal-spec.md"
+    image = tmp_path / "screen.png"
+    spec.write_text(
+        "\n".join(
+            [
+                "# Goal: 배포 가능한 iOS Android 채팅 서비스",
+                "",
+                "## 요구사항",
+                "- 내가 준 디자인 시안을 그대로 반영한다.",
+                "- 메시지는 DB에 저장되고 실시간으로 보인다.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    goal = module.create_goal_from_spec(
+        state_root=state_root,
+        target_id="chatapp",
+        source=spec,
+        images=(image,),
+        image_captions=("채팅 화면 디자인",),
+    )
+    _strip_request_artifacts(goal)
+    progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    progress["tasks"] = [{"task_key": "task-01-architecture", "backlog_id": "BL-done"}]
+    goal.progress_json.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
+    completed = state_root / "backlog" / "completed" / "BL-done.md"
+    completed.parent.mkdir(parents=True, exist_ok=True)
+    completed.write_text("\n".join(["ID: BL-done", "Status: completed", f"Goal: {goal.goal_id}", ""]), encoding="utf-8")
+    _write_successful_publication(
+        state_root,
+        target_id="chatapp",
+        goal_id=goal.goal_id,
+        backlog_id="BL-done",
+        write_request_verification=False,
+    )
+
+    result = module.refill_goal_tasks(state_root=state_root, target_id="chatapp", target_repo=product, goal=goal)
+
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    assert result is not None
+    assert result.created == 1
+    assert payload["request_check_ids"]
+    queued = sorted((state_root / "backlog" / "queued").glob("*.md"))
+    assert queued
+    body = queued[-1].read_text(encoding="utf-8")
+    assert f"Request-Ledger: {payload['request_ledger_path']}" in body
+    assert f"Request-Checks: {payload['request_checks_path']}" in body
+    assert "Request-Ids: REQ-0001" in body
+    assert "Request-Check-Ids: " + ", ".join(payload["request_check_ids"]) in body
+
+
+def test_refill_uses_request_checks_file_for_large_legacy_check_lists(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "chatapp"
+    product = tmp_path / "product"
+    product.mkdir()
+    _init_product(product)
+    (state_root / "target.json").parent.mkdir(parents=True, exist_ok=True)
+    (state_root / "target.json").write_text(json.dumps({"repo": product.as_posix()}), encoding="utf-8")
+    spec = tmp_path / "goal-spec.md"
+    lines = [
+        "# Goal: 배포 가능한 iOS Android 채팅 서비스",
+        "",
+        "## 요구사항",
+        "- 배포 가능한 실제 서비스를 만든다.",
+    ]
+    lines.extend(f"- 사용자 요청 상세 항목 {index:03d}을 완료 전 증거로 검증한다." for index in range(1, 121))
+    spec.write_text("\n".join(lines), encoding="utf-8")
+    goal = module.create_goal_from_spec(state_root=state_root, target_id="chatapp", source=spec)
+    _strip_request_artifacts(goal)
+    progress = json.loads(goal.progress_json.read_text(encoding="utf-8"))
+    progress["tasks"] = [{"task_key": "task-01-architecture", "backlog_id": "BL-done"}]
+    goal.progress_json.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
+    completed = state_root / "backlog" / "completed" / "BL-done.md"
+    completed.parent.mkdir(parents=True, exist_ok=True)
+    completed.write_text("\n".join(["ID: BL-done", "Status: completed", f"Goal: {goal.goal_id}", ""]), encoding="utf-8")
+    _write_successful_publication(
+        state_root,
+        target_id="chatapp",
+        goal_id=goal.goal_id,
+        backlog_id="BL-done",
+        write_request_verification=False,
+    )
+
+    result = module.refill_goal_tasks(state_root=state_root, target_id="chatapp", target_repo=product, goal=goal)
+
+    payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
+    queued = sorted((state_root / "backlog" / "queued").glob("*.md"))
+    assert result is not None
+    assert result.created == 1
+    assert len(payload["request_check_ids"]) > 100
+    assert queued
+    body = queued[-1].read_text(encoding="utf-8")
+    assert f"Request-Checks: {payload['request_checks_path']}" in body
+    assert f"Request-Check-Count: {len(payload['request_check_ids'])}" in body
+    assert "Request-Check-Source: Request-Checks" in body
+    assert "Request-Check-Ids:" not in body
+
+
 def test_goal_request_metadata_flows_to_roadmap_queue_report_and_backlog(tmp_path: Path) -> None:
     module = _load_module()
     state_root = tmp_path / "targets" / "chatapp"
@@ -100,11 +288,10 @@ def test_goal_request_metadata_flows_to_roadmap_queue_report_and_backlog(tmp_pat
         text="로컬 목업 채팅앱 만들기",
     )
     payload = json.loads(goal.goal_json.read_text(encoding="utf-8"))
-    payload["request_ledger_path"] = "goals/goal-1/request-ledger.json"
-    payload["request_checks_path"] = "goals/goal-1/request-checks.json"
-    payload["request_ids"] = ["REQ-0001"]
-    payload["request_check_ids"] = ["REQ-0001-CHECK-001", "REQ-0001-CHECK-002"]
-    goal.goal_json.write_text(json.dumps(payload), encoding="utf-8")
+    request_ledger_path = payload["request_ledger_path"]
+    request_checks_path = payload["request_checks_path"]
+    request_ids = payload["request_ids"]
+    request_check_ids = payload["request_check_ids"]
 
     roadmap = module.build_roadmap(
         state_root=state_root,
@@ -121,26 +308,26 @@ def test_goal_request_metadata_flows_to_roadmap_queue_report_and_backlog(tmp_pat
     first_candidate = queue_report["tasks"][0]
     first_progress = progress["tasks"][0]
     final_progress = progress["tasks"][-1]
-    assert first_task["request_ledger_path"] == "goals/goal-1/request-ledger.json"
-    assert first_task["request_ids"] == ["REQ-0001"]
+    assert first_task["request_ledger_path"] == request_ledger_path
+    assert first_task["request_ids"] == request_ids
     assert first_task["request_check_ids"] == []
-    assert final_task["request_check_ids"] == ["REQ-0001-CHECK-001", "REQ-0001-CHECK-002"]
-    assert first_candidate["request_ids"] == ["REQ-0001"]
+    assert final_task["request_check_ids"] == request_check_ids
+    assert first_candidate["request_ids"] == request_ids
     assert first_candidate.get("request_check_ids", []) == []
-    assert first_progress["request_ledger_path"] == "goals/goal-1/request-ledger.json"
+    assert first_progress["request_ledger_path"] == request_ledger_path
     assert first_progress.get("request_check_ids", []) == []
-    assert final_progress["request_check_ids"] == ["REQ-0001-CHECK-001", "REQ-0001-CHECK-002"]
+    assert final_progress["request_check_ids"] == request_check_ids
 
     queued = sorted((state_root / "backlog" / "queued").glob("*.md"))
     assert result.created >= 1
     assert queued
     first_body = queued[0].read_text(encoding="utf-8")
     final_body = queued[-1].read_text(encoding="utf-8")
-    assert "Request-Ledger: goals/goal-1/request-ledger.json" in first_body
-    assert "Request-Checks: goals/goal-1/request-checks.json" in first_body
-    assert "Request-Ids: REQ-0001" in first_body
+    assert f"Request-Ledger: {request_ledger_path}" in first_body
+    assert f"Request-Checks: {request_checks_path}" in first_body
+    assert "Request-Ids: " + ", ".join(request_ids) in first_body
     assert "Request-Check-Ids:" not in first_body
-    assert "Request-Check-Ids: REQ-0001-CHECK-001, REQ-0001-CHECK-002" in final_body
+    assert "Request-Check-Ids: " + ", ".join(request_check_ids) in final_body
     discovered = module.harness_loop.discover_backlog_items(state_root)
     assert {item.item_id for item in discovered} == {path.stem for path in queued}
 

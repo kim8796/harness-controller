@@ -15,6 +15,7 @@ REQUEST_VERIFICATION_OPERATION = "request-verification"
 REQUEST_VERIFICATION_CLAIM_OPERATION = "request-verification-claim"
 REQUEST_VERIFICATION_SCHEMA_VERSION = 1
 REQUEST_VERIFICATION_VALIDATOR = "request_check_v1"
+REQUEST_CHECK_IDS_INLINE_MAX_CHARS = 1500
 
 SECRETISH_TEXT = re.compile(
     r"(?i)(-----BEGIN [A-Z ]*PRIVATE KEY-----|"
@@ -63,6 +64,50 @@ def _read_json(path: Path) -> dict[str, object]:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _state_root_file_from_metadata(state_root: Path, value: object) -> Path | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if any(ord(char) < 32 or ord(char) == 127 for char in raw):
+        return None
+    raw_path = Path(raw)
+    if raw_path.is_absolute():
+        path = raw_path
+    else:
+        if ".." in raw_path.parts:
+            return None
+        path = state_root / raw_path
+    try:
+        root_resolved = state_root.resolve(strict=True)
+    except OSError:
+        return None
+    if raw_path.is_absolute():
+        try:
+            relative_parts = raw_path.relative_to(root_resolved).parts
+        except ValueError:
+            return None
+    else:
+        relative_parts = raw_path.parts
+    current = root_resolved
+    for part in relative_parts[:-1]:
+        current = current / part
+        if current.is_symlink():
+            return None
+    if path.exists() and path.is_symlink():
+        return None
+    try:
+        path_resolved = path.resolve(strict=True)
+    except OSError:
+        return None
+    try:
+        path_resolved.relative_to(root_resolved)
+    except ValueError:
+        return None
+    if not path_resolved.is_file():
+        return None
+    return path_resolved
 
 
 def _redact(text: object) -> str:
@@ -393,6 +438,54 @@ def request_ids_from_metadata(value: object) -> list[str]:
 
 def request_check_ids_from_metadata(value: object) -> list[str]:
     return [item.strip() for item in str(value or "").split(",") if item.strip()]
+
+
+def request_check_ids_from_checks_path(state_root: Path, checks_path: object) -> list[str]:
+    path = _state_root_file_from_metadata(state_root, checks_path)
+    if path is None:
+        return []
+    payload = _read_json(path)
+    raw_ids = payload.get("check_ids")
+    if isinstance(raw_ids, Sequence) and not isinstance(raw_ids, (str, bytes, bytearray)):
+        ids = [str(item).strip() for item in raw_ids if str(item).strip()]
+    else:
+        ids = []
+    if not ids and isinstance(payload.get("checks"), Sequence) and not isinstance(payload.get("checks"), (str, bytes, bytearray)):
+        for item in payload["checks"]:  # type: ignore[index]
+            if isinstance(item, Mapping):
+                check_id = str(item.get("check_id") or "").strip()
+                if check_id:
+                    ids.append(check_id)
+    return list(dict.fromkeys(ids))
+
+
+def request_check_ids_from_metadata_or_checks_path(
+    *,
+    state_root: Path,
+    metadata: Mapping[str, object],
+) -> list[str]:
+    ids = request_check_ids_from_metadata(metadata.get("request_check_ids"))
+    if ids:
+        return ids
+    checks_path = metadata.get("request_checks") or metadata.get("request_checks_path")
+    return request_check_ids_from_checks_path(state_root, checks_path)
+
+
+def request_check_metadata_lines(
+    *,
+    request_check_ids: Sequence[str],
+    request_checks_path: str = "",
+) -> list[str]:
+    clean_ids = [str(item).strip() for item in request_check_ids if str(item).strip()]
+    if not clean_ids:
+        return []
+    ids_line = "Request-Check-Ids: " + ", ".join(clean_ids)
+    if len(ids_line) <= REQUEST_CHECK_IDS_INLINE_MAX_CHARS or not request_checks_path:
+        return [ids_line]
+    return [
+        f"Request-Check-Count: {len(clean_ids)}",
+        "Request-Check-Source: Request-Checks",
+    ]
 
 
 def _json_blocks(text: str) -> list[dict[str, object]]:

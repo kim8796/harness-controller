@@ -11,6 +11,7 @@ from typing import Mapping
 
 
 SCHEMA_VERSION = 1
+DEFAULT_KEEP_FULL_RUNS = 75
 DELETE_SAFE_CLASSES = frozenset({"cold-report", "os-junk", "stale-goal-pointer", "run-cache", "archive-plan"})
 RUN_CACHE_DELETE_FILENAMES = frozenset(
     {
@@ -23,6 +24,7 @@ RUN_CACHE_DELETE_FILENAMES = frozenset(
         "status.json",
     }
 )
+RUN_CACHE_DELETE_DIRNAMES = frozenset({"gradle-home", "xcode-derived-data"})
 
 
 class TargetArchiveError(RuntimeError):
@@ -121,6 +123,65 @@ def _run_path_has_local_json_evidence(state_root: Path, rel_parts: tuple[str, ..
     return (state_root / "runs" / "harness" / rel_parts[2] / "generated-evidence.json").is_file()
 
 
+def _run_id_from_rel_parts(rel_parts: tuple[str, ...]) -> str:
+    if len(rel_parts) >= 3 and rel_parts[0] == "runs" and rel_parts[1] == "harness":
+        return rel_parts[2]
+    return ""
+
+
+def _normalize_keep_runs(value: object) -> int:
+    if value is None:
+        return DEFAULT_KEEP_FULL_RUNS
+    try:
+        keep_runs = int(value)
+    except (TypeError, ValueError) as exc:
+        raise TargetArchiveError("keep_runs must be a non-negative integer") from exc
+    if keep_runs < 0:
+        raise TargetArchiveError("keep_runs must be a non-negative integer")
+    return keep_runs
+
+
+def _run_recency_key(path: Path) -> tuple[str, int, str]:
+    match = re.search(r"20\d{6}[-T]?\d{6}", path.name)
+    timestamp_key = match.group(0).replace("-", "").replace("T", "") if match else ""
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        mtime_ns = 0
+    return (timestamp_key, mtime_ns, path.name)
+
+
+def _protected_recent_run_ids(state_root: Path, keep_runs: int) -> frozenset[str]:
+    if keep_runs <= 0:
+        return frozenset()
+    runs_root = state_root / "runs" / "harness"
+    if not runs_root.exists() or runs_root.is_symlink():
+        return frozenset()
+    run_dirs = [path for path in runs_root.iterdir() if path.is_dir() and not path.is_symlink()]
+    recent = sorted(run_dirs, key=_run_recency_key, reverse=True)[:keep_runs]
+    return frozenset(path.name for path in recent)
+
+
+def _is_run_cache_dir_path(state_root: Path, path: Path) -> bool:
+    rel_parts = path.relative_to(state_root.resolve()).parts
+    return (
+        len(rel_parts) == 4
+        and rel_parts[0] == "runs"
+        and rel_parts[1] == "harness"
+        and rel_parts[3] in RUN_CACHE_DELETE_DIRNAMES
+    )
+
+
+def _has_run_cache_dir_ancestor(state_root: Path, path: Path) -> bool:
+    rel_parts = path.relative_to(state_root.resolve()).parts
+    return (
+        len(rel_parts) > 4
+        and rel_parts[0] == "runs"
+        and rel_parts[1] == "harness"
+        and rel_parts[3] in RUN_CACHE_DELETE_DIRNAMES
+    )
+
+
 def _is_operator_task_instruction(path: Path) -> bool:
     text = _read_text(path)
     for line in text.splitlines():
@@ -163,7 +224,14 @@ def _goal_status(state_root: Path, goal_id: str) -> str:
     return str(payload.get("status") or "").strip().casefold()
 
 
-def _classify_path(state_root: Path, path: Path, *, active_packet_ids: set[str], has_evidence: bool) -> dict[str, object]:
+def _classify_path(
+    state_root: Path,
+    path: Path,
+    *,
+    active_packet_ids: set[str],
+    has_evidence: bool,
+    protected_run_ids: frozenset[str],
+) -> dict[str, object]:
     rel = path.relative_to(state_root.resolve()).as_posix()
     parts = Path(rel).parts
     if path.is_symlink():
@@ -230,8 +298,13 @@ def _classify_path(state_root: Path, path: Path, *, active_packet_ids: set[str],
             return {"path": rel, "class": "resolved-state", "action": "move", "reason": "resolved-state"}
         return {"path": rel, "class": "protected", "action": "protect", "reason": "active-state"}
     if parts[0] == "runs":
+        run_id = _run_id_from_rel_parts(parts)
+        if run_id in protected_run_ids:
+            return {"path": rel, "class": "hot-run", "action": "protect", "reason": "recent-run-retention"}
         if path.name == "generated-evidence.json" or path.name.endswith("-receipt.json") or "receipt" in path.name:
             return {"path": rel, "class": "receipt", "action": "protect", "reason": "run-evidence"}
+        if _is_run_cache_dir_path(state_root, path) and _run_path_has_local_json_evidence(state_root, parts):
+            return {"path": rel, "class": "run-cache", "action": "delete", "reason": "run-cache-covered-by-json-evidence"}
         if path.name in RUN_CACHE_DELETE_FILENAMES and _run_path_has_local_json_evidence(state_root, parts):
             return {"path": rel, "class": "run-cache", "action": "delete", "reason": "run-cache-covered-by-json-evidence"}
         return {"path": rel, "class": "receipt", "action": "protect", "reason": "run-evidence"}
@@ -256,18 +329,28 @@ def _iter_candidate_paths(state_root: Path) -> tuple[Path, ...]:
         rel_parts = path.relative_to(root).parts
         if rel_parts and rel_parts[0] in {"archive", "archive-receipts"}:
             continue
-        if path.is_dir() and any(child.is_file() for child in path.rglob("*")):
+        if _has_run_cache_dir_ancestor(root, path):
+            continue
+        if path.is_dir() and any(child.is_file() for child in path.rglob("*")) and not _is_run_cache_dir_path(root, path):
             continue
         candidates.append(path)
     return tuple(candidates)
 
 
-def audit_target_archive(*, state_root: Path, target_id: str, **_: object) -> Mapping[str, object]:
+def audit_target_archive(*, state_root: Path, target_id: str, keep_runs: int | None = None, **_: object) -> Mapping[str, object]:
     root = state_root.resolve()
+    resolved_keep_runs = _normalize_keep_runs(keep_runs)
+    protected_run_ids = _protected_recent_run_ids(root, resolved_keep_runs)
     active_packet_ids = _queued_or_active_packet_ids(root)
     has_evidence = _has_run_evidence(root)
     items = tuple(
-        _classify_path(root, path, active_packet_ids=active_packet_ids, has_evidence=has_evidence)
+        _classify_path(
+            root,
+            path,
+            active_packet_ids=active_packet_ids,
+            has_evidence=has_evidence,
+            protected_run_ids=protected_run_ids,
+        )
         for path in _iter_candidate_paths(root)
     )
     actionable = [item for item in items if item["action"] in {"move", "delete"}]
@@ -282,6 +365,11 @@ def audit_target_archive(*, state_root: Path, target_id: str, **_: object) -> Ma
         "delete_safe_count": len(delete_safe),
         "archive_needed_count": len(archive_needed),
         "protected_count": len(items) - len(actionable),
+        "run_retention": {
+            "keep_runs": resolved_keep_runs,
+            "protected_run_count": len(protected_run_ids),
+            "protected_run_ids": sorted(protected_run_ids),
+        },
         "items": items,
     }
 
@@ -291,9 +379,10 @@ def plan_target_archive(
     state_root: Path,
     target_id: str,
     output_path: Path | None = None,
+    keep_runs: int | None = None,
     **_: object,
 ) -> Mapping[str, object]:
-    audit = audit_target_archive(state_root=state_root, target_id=target_id)
+    audit = audit_target_archive(state_root=state_root, target_id=target_id, keep_runs=keep_runs)
     plan_id = f"target-archive-{_timestamp()}"
     plan_root = _ensure_safe_output_path(state_root, Path("archive-plans") / "placeholder").parent
     plan_root.mkdir(parents=True, exist_ok=True)
@@ -309,6 +398,7 @@ def plan_target_archive(
         "target_id": target_id,
         "state_root": state_root.resolve().as_posix(),
         "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "keep_runs": audit["run_retention"]["keep_runs"],
         "actions": actions,
         "protected_count": audit["protected_count"],
     }
@@ -360,7 +450,7 @@ def apply_target_archive(
     actions = payload.get("actions")
     if not isinstance(actions, list):
         raise TargetArchiveError("archive plan actions must be a list")
-    current_audit = audit_target_archive(state_root=root, target_id=target_id)
+    current_audit = audit_target_archive(state_root=root, target_id=target_id, keep_runs=_normalize_keep_runs(payload.get("keep_runs")))
     current_by_path = {str(item.get("path")): item for item in current_audit["items"]}
     _ensure_safe_output_path(root, Path("archive") / plan_id / "placeholder")
     receipt_dir = _ensure_safe_output_path(root, Path("archive-receipts") / "placeholder").parent
