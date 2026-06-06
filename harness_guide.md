@@ -14,6 +14,7 @@
 
 `v1.8.26`부터 beginner path는 제품 목표 단위다. `./harness goal`은 목표를 controller sidecar에 저장하고, `./harness watch`는 goal이 끝날 때까지 계획 생성, task 분해, 구현, 검증, product commit, task branch push, PR receipt를 반복한다.
 `./harness do "요청"`은 한 작업만 즉시 처리하는 helper다. `task review/queue`, `run`, `finish`, `target backlog push`는 복구와 디버깅용 고급 명령으로 남긴다.
+`--execution-profile auto|thin|standard|strict` 는 `do`, `watch`, `run`, `target run`에서 lane 호출량을 조절한다. 기본 `auto` 는 작은 안전 작업을 thin으로 줄이고, auth/security/migration/production/release/store/request/design/env/secret 계열은 strict로 승격한다.
 Telegram/Redis relay drain은 controller-owned Upstash adapter를 사용한다.
 relay smoke 는 target을 명시해 `python3 scripts/harness_telegram_bridge.py --drain-relay --target-id <target> --json` 으로 확인한다.
 Telegram/Redis setup readiness 는 `./harness telegram setup --target-id <id> --repo-id <repo> --dry-run` 으로 먼저 확인하며, dry-run 은 env/provider/webhook/deploy side effect 를 만들지 않는다.
@@ -33,11 +34,14 @@ Broad glob, `.env*` File Scope, secret/token/key 경로, 수동 smoke 가 필요
 ./harness controller audit-size
 ./harness controller cleanup --dry-run
 ./harness controller cleanup --apply
+./harness target archive audit my-app --keep-runs 75
+./harness target archive plan my-app --keep-runs 75
 ```
 
 기본 smoke 는 영구 target 을 남기지 않고 최신 summary 만 갱신한다.
 `--keep`을 붙인 smoke 만 `targets/smoke-*`로 보존된다.
 cleanup apply 는 controller-owned delete-safe smoke/temp sidecar만 지우며 product repo 파일, receipts, active target, queued backlog는 지우지 않는다.
+target archive 는 product repo 를 건드리지 않고 sidecar 안의 오래된 run cache/report 만 줄인다. 최근 N개 run 산출물과 `backlog/completed` ledger 는 보호한다.
 
 ## References
 

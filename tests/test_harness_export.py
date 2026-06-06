@@ -519,6 +519,7 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "scripts" / "harness_request_ledger.py").exists()
     assert (bundle / "scripts" / "harness_request_publication.py").exists()
     assert (bundle / "scripts" / "harness_capability_registry.py").exists()
+    assert (bundle / "scripts" / "harness_gate_router.py").exists()
     assert (bundle / "scripts" / "harness_goal_gates.py").exists()
     assert (bundle / "scripts" / "harness_goal_learning.py").exists()
     assert (bundle / "scripts" / "harness_fleet.py").exists()
@@ -549,6 +550,9 @@ def test_controller_bundle_includes_workflow_and_excludes_live_state(tmp_path: P
     assert (bundle / "tests" / "test_harness_target_archive.py").exists()
     assert (bundle / "tests" / "test_harness_target_remove.py").exists()
     assert (bundle / "tests" / "test_harness_incident.py").exists()
+    assert (bundle / "tests" / "test_harness_execution_profile.py").exists()
+    assert (bundle / "tests" / "test_harness_goal_refill_diet.py").exists()
+    assert (bundle / "tests" / "test_harness_watch_operator_wait.py").exists()
     assert (bundle / "scripts" / "harness_operator_wait.py").exists()
     assert (bundle / "tests" / "test_harness_operator_wait.py").exists()
     no_arg_help = subprocess.run(

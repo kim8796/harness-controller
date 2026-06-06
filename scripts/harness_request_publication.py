@@ -56,17 +56,27 @@ def request_evidence_payload(
             backlog_path = candidate.relative_to(state_root).as_posix()
             break
     request_check_ids = _csv_values(metadata.get("request_check_ids"))
+    request_checks_path = str(metadata.get("request_checks") or metadata.get("request_checks_path") or "").strip()
+    if not request_check_ids:
+        request_check_ids = harness_request_ledger.request_check_ids_from_checks_path(
+            state_root,
+            request_checks_path,
+        )
     goal_id = str(metadata.get("goal") or "").strip()
-    linked = bool(request_check_ids)
+    linked = bool(request_check_ids or request_checks_path)
     payload: dict[str, object] = {
         "linked": linked,
         "status": "not-linked",
         "backlog_path": backlog_path,
         "goal_id": goal_id,
+        "request_checks_path": request_checks_path,
         "request_check_ids": request_check_ids,
         "product_commit_sha": product_commit_sha,
     }
     if not linked:
+        return payload
+    if request_checks_path and not request_check_ids:
+        payload.update({"status": "missing", "message": "request checks file is missing or unreadable"})
         return payload
     if not goal_id or goal_id == "unlinked":
         payload.update({"status": "missing", "message": "request verification requires linked goal id"})

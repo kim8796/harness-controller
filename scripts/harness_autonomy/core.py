@@ -104,6 +104,38 @@ AUTOSPLIT_MODE_OFF = "off"
 AUTOSPLIT_MODE_PROPOSE = "propose"
 AUTOSPLIT_MODE_CHOICES = (AUTOSPLIT_MODE_OFF, AUTOSPLIT_MODE_PROPOSE)
 DEFAULT_AUTOSPLIT_MODE = AUTOSPLIT_MODE_PROPOSE
+EXECUTION_PROFILE_AUTO = "auto"
+EXECUTION_PROFILE_THIN = "thin"
+EXECUTION_PROFILE_STANDARD = "standard"
+EXECUTION_PROFILE_STRICT = "strict"
+EXECUTION_PROFILE_CHOICES = (
+    EXECUTION_PROFILE_AUTO,
+    EXECUTION_PROFILE_THIN,
+    EXECUTION_PROFILE_STANDARD,
+    EXECUTION_PROFILE_STRICT,
+)
+HARD_RISK_LABELS = frozenset(
+    {
+        "auth",
+        "security",
+        "migration",
+        "production",
+        "release",
+        "store",
+        "external-service",
+        "goal-gate",
+    }
+)
+HARD_RISK_TEXT_PATTERNS = (
+    re.compile(r"(?i)(^|[\s/])\.env(?:[.\s:/-]|$)"),
+    re.compile(r"(?i)\b(secret|credential|api[_ -]?key|token|private[_ -]?key)\b"),
+    re.compile(r"(?i)\b(destructive|delete\s+-rf|drop\s+table|truncate\s+table)\b"),
+    re.compile(r"(?i)\b(request-ids|request-check-ids|request-ledger|request-checks)\s*:"),
+    re.compile(r"(?i)\b(goal-attachment-manifest|figma|sketch|mockup|binding design|design artifact)\b"),
+)
+THIN_PROFILE_MAX_BODY_CHARS = 3600
+THIN_PROFILE_MAX_ACCEPTANCE_COUNT = 4
+THIN_PROFILE_MAX_FILE_SCOPE_COUNT = 3
 DEFAULT_SAME_GOAL_ZERO_PRODUCT_STUCK_THRESHOLD = 3
 PRODUCT_CODE_PATHS = ("vercel.json",)
 PRODUCT_CODE_PREFIXES = ("bot/", "app/", "api/", "services/", "frontend/", "web/", "experiments/")
@@ -1595,6 +1627,16 @@ class AutosplitProposalOutcome:
 
 
 @dataclass(frozen=True)
+class ExecutionPlan:
+    requested_profile: str
+    effective_profile: str
+    ai_lanes: tuple[str, ...]
+    deterministic_lanes: tuple[str, ...]
+    autosplit_enabled: bool
+    risk_reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class DiffSummary:
     changed_files: int
     insertions: int
@@ -2143,6 +2185,7 @@ def validate_configuration(args: argparse.Namespace) -> None:
         raise AutonomyError("state carry-forward requires `--persistent-branch` so the next cycle has a state anchor")
     if fixed_timeout_seconds is not None and fixed_timeout_seconds <= 0:
         raise AutonomyError("`--runner-timeout-seconds` must be greater than zero when provided")
+    execution_profile_from_args(args)
     runner_reasoning_effort = getattr(args, "runner_reasoning_effort", None)
     if runner_reasoning_effort and runner_reasoning_effort not in CODEX_REASONING_EFFORTS:
         allowed = ", ".join(sorted(CODEX_REASONING_EFFORTS))
@@ -2567,6 +2610,369 @@ def read_lane_timeout_signals(
         body_chars=len(body),
         acceptance_count=section_bullet_count(text, "Acceptance"),
         file_scope_count=len(file_scope),
+    )
+
+
+def normalize_execution_profile(value: str | None) -> str:
+    profile = str(value or EXECUTION_PROFILE_AUTO).strip().lower()
+    if profile not in EXECUTION_PROFILE_CHOICES:
+        choices = ", ".join(EXECUTION_PROFILE_CHOICES)
+        raise AutonomyError(f"invalid execution profile `{value}`; expected one of: {choices}")
+    return profile
+
+
+def execution_profile_from_args(args: argparse.Namespace) -> str:
+    return normalize_execution_profile(getattr(args, "execution_profile", EXECUTION_PROFILE_AUTO))
+
+
+def execution_hard_risk_reasons(selection: SelectedTask, backlog_text: str) -> tuple[str, ...]:
+    reasons: list[str] = []
+    priority = (read_text_field(backlog_text, "Priority") or "").strip().upper()
+    if priority in {"P0", "P1"}:
+        reasons.append(f"priority:{priority}")
+    labels = split_csv(read_text_field(backlog_text, "Labels"))
+    for label in labels:
+        normalized_label = label.strip().lower()
+        if normalized_label in HARD_RISK_LABELS:
+            reasons.append(f"label:{normalized_label}")
+    haystack = "\n".join(
+        part
+        for part in (
+            selection.title,
+            selection.source,
+            selection.backlog_path.as_posix() if selection.backlog_path is not None else "",
+            backlog_text,
+        )
+        if part
+    )
+    for pattern in HARD_RISK_TEXT_PATTERNS:
+        match = pattern.search(haystack)
+        if match is not None:
+            reasons.append(f"text:{slugify(match.group(0))}")
+    return tuple(dict.fromkeys(reasons))
+
+
+def _small_safe_execution_profile(backlog_text: str) -> bool:
+    if normalize_autonomy_execute(read_text_field(backlog_text, "Autonomy-Execute")) != "auto":
+        return False
+    priority = (read_text_field(backlog_text, "Priority") or "P3").strip().upper()
+    if priority not in {"P2", "P3", "P4"}:
+        return False
+    file_scope, _forbidden_scope, _scope_failures = parse_backlog_machine_scope(backlog_text)
+    body = extract_backlog_body(backlog_text)
+    return (
+        len(body) <= THIN_PROFILE_MAX_BODY_CHARS
+        and section_bullet_count(backlog_text, "Acceptance") <= THIN_PROFILE_MAX_ACCEPTANCE_COUNT
+        and len(file_scope) <= THIN_PROFILE_MAX_FILE_SCOPE_COUNT
+    )
+
+
+def _execution_lanes_for_profile(profile: str) -> tuple[tuple[str, ...], tuple[str, ...], bool]:
+    if profile == EXECUTION_PROFILE_STRICT:
+        return LANES, tuple(), True
+    deterministic_lanes = ("planner", "manager", "reviewer", "verifier")
+    return ("implementer",), deterministic_lanes, False
+
+
+def resolve_execution_plan(
+    selection: SelectedTask,
+    backlog_text: str,
+    *,
+    requested_profile: str | None = None,
+) -> ExecutionPlan:
+    requested = normalize_execution_profile(requested_profile)
+    risk_reasons = execution_hard_risk_reasons(selection, backlog_text)
+    if (
+        requested == EXECUTION_PROFILE_STRICT
+        or risk_reasons
+        or selection.mode != "execute"
+        or selection.backlog_path is None
+        or not backlog_text.strip()
+    ):
+        effective = EXECUTION_PROFILE_STRICT
+    elif requested == EXECUTION_PROFILE_AUTO and normalize_autonomy_execute(
+        read_text_field(backlog_text, "Autonomy-Execute")
+    ) != "auto":
+        effective = EXECUTION_PROFILE_STRICT
+    elif requested in {EXECUTION_PROFILE_THIN, EXECUTION_PROFILE_STANDARD}:
+        effective = requested
+    elif selection.mode == "execute" and _small_safe_execution_profile(backlog_text):
+        effective = EXECUTION_PROFILE_THIN
+    else:
+        effective = EXECUTION_PROFILE_STANDARD
+    ai_lanes, deterministic_lanes, autosplit_enabled = _execution_lanes_for_profile(effective)
+    return ExecutionPlan(
+        requested_profile=requested,
+        effective_profile=effective,
+        ai_lanes=ai_lanes,
+        deterministic_lanes=deterministic_lanes,
+        autosplit_enabled=autosplit_enabled,
+        risk_reasons=risk_reasons,
+    )
+
+
+def execution_plan_status_payload(plan: ExecutionPlan | None) -> dict[str, Any]:
+    if plan is None:
+        return {}
+    return {
+        "execution_profile": asdict(plan),
+        "execution_profile_summary": (
+            f"requested={plan.requested_profile} effective={plan.effective_profile} "
+            f"ai_lanes={','.join(plan.ai_lanes)} deterministic_lanes={','.join(plan.deterministic_lanes) or 'none'} "
+            f"autosplit={str(plan.autosplit_enabled).lower()}"
+        ),
+    }
+
+
+def _deterministic_lane_agent(run_dir: Path, lane: str) -> str:
+    return f"HarnessDiet-{run_dir.name}-{lane.title()}"
+
+
+def _deterministic_lane_header(
+    *,
+    lane: str,
+    run_dir: Path,
+    selection: SelectedTask,
+    entrypoint: str,
+) -> str:
+    heading = lane.replace("_", " ").title()
+    return "\n".join(
+        [
+            f"# {heading} Record",
+            "",
+            f"Task: {selection.task_slug}",
+            f"Title: {selection.title}",
+            "Tool: harness-diet",
+            f"Agent: {_deterministic_lane_agent(run_dir, lane)}",
+            "Worktree: n/a",
+            "Branch: n/a",
+            "Adapter: deterministic",
+            f"Entrypoint: {entrypoint}",
+            "Status: completed",
+            "",
+        ]
+    )
+
+
+def _deterministic_scope_contract(
+    *,
+    selection: SelectedTask,
+    backlog_text: str,
+    execution_plan: ExecutionPlan,
+) -> dict[str, Any]:
+    file_scope, forbidden_scope, _scope_failures = parse_backlog_machine_scope(backlog_text)
+    allow_globs = list(file_scope)
+    if not allow_globs and selection.backlog_path is not None:
+        allow_globs = [selection.backlog_path.as_posix()]
+    if not allow_globs:
+        allow_globs = ["docs/harness/**"]
+    deny_globs = list(dict.fromkeys((*forbidden_scope, ".env", ".env.local", ".env.production", "targets/**")))
+    max_changed_files = max(len(allow_globs) + 2, 3 if execution_plan.effective_profile == EXECUTION_PROFILE_THIN else 12)
+    return {
+        "allow_globs": allow_globs,
+        "deny_globs": deny_globs,
+        "max_changed_files": max_changed_files,
+        "backlog_id": (read_text_field(backlog_text, "ID") or selection.task_slug).strip(),
+        "goal_id": (read_text_field(backlog_text, "Goal") or "unlinked").strip(),
+    }
+
+
+def write_deterministic_pre_implementation_records(
+    *,
+    run_dir: Path,
+    selection: SelectedTask,
+    backlog_text: str,
+    execution_plan: ExecutionPlan,
+) -> None:
+    if execution_plan.effective_profile == EXECUTION_PROFILE_STRICT:
+        return
+    write_text(
+        run_dir / "plan.md",
+        _deterministic_lane_header(
+            lane="planner",
+            run_dir=run_dir,
+            selection=selection,
+            entrypoint="write_deterministic_pre_implementation_records",
+        )
+        + "\n".join(
+            [
+                "Change-Class: harness-diet",
+                "",
+                "## Goal",
+                "",
+                f"- Execute `{execution_plan.effective_profile}` profile with one AI implementer lane.",
+                "- Preserve guard-compatible lane evidence while reducing planner/manager/reviewer/verifier AI calls.",
+                "",
+                "## Validation Plan",
+                "",
+                "- Validate implementer manifest and generated evidence through controller checks.",
+                "",
+            ]
+        ),
+    )
+    scope_contract = _deterministic_scope_contract(
+        selection=selection,
+        backlog_text=backlog_text,
+        execution_plan=execution_plan,
+    )
+    write_text(
+        run_dir / "manager.md",
+        _deterministic_lane_header(
+            lane="manager",
+            run_dir=run_dir,
+            selection=selection,
+            entrypoint="write_deterministic_pre_implementation_records",
+        )
+        + "\n".join(
+            [
+                "Decision: approved",
+                "",
+                "## Scope",
+                "",
+                "- Scope contract is derived from the selected backlog File Scope.",
+                "",
+                "## Scope Contract",
+                "",
+                "```json scope_contract",
+                json.dumps(scope_contract, ensure_ascii=False, indent=2),
+                "```",
+                "",
+                "## Decision Notes",
+                "",
+                "- Deterministic manager approval for thin/standard profile.",
+                "",
+            ]
+        ),
+    )
+
+
+def write_deterministic_post_implementation_records(
+    *,
+    run_dir: Path,
+    selection: SelectedTask,
+    evidence_payload: Mapping[str, Any] | None,
+    execution_plan: ExecutionPlan,
+) -> None:
+    if execution_plan.effective_profile == EXECUTION_PROFILE_STRICT:
+        return
+    evidence_status = str((evidence_payload or {}).get("status") or "").strip().lower()
+    approved = evidence_status == "pass"
+    evidence_summary = str((evidence_payload or {}).get("summary") or "generated evidence inspected").strip()
+    write_text(
+        run_dir / "reviewer.md",
+        _deterministic_lane_header(
+            lane="reviewer",
+            run_dir=run_dir,
+            selection=selection,
+            entrypoint="write_deterministic_post_implementation_records",
+        )
+        + "\n".join(
+            [
+                f"Decision: {'approved' if approved else 'blocked'}",
+                "",
+                "## Findings",
+                "",
+                f"- generated-evidence status: `{evidence_status or 'missing'}`.",
+                f"- summary: {evidence_summary}",
+                "",
+                "## Regression Checks",
+                "",
+                "- Controller validation accepted implementer manifest and generated evidence.",
+                "",
+                "## Decision Notes",
+                "",
+                "- Deterministic reviewer record for thin/standard profile.",
+                "",
+            ]
+        ),
+    )
+    write_text(
+        run_dir / "verifier.md",
+        _deterministic_lane_header(
+            lane="verifier",
+            run_dir=run_dir,
+            selection=selection,
+            entrypoint="write_deterministic_post_implementation_records",
+        )
+        + "\n".join(
+            [
+                f"Result: {'pass' if approved else 'blocked'}",
+                "",
+                "## Commands",
+                "",
+                "- See `generated-evidence.json` verification command results.",
+                "",
+                "## Evidence",
+                "",
+                f"- generated-evidence status: `{evidence_status or 'missing'}`.",
+                "",
+                "## Result Notes",
+                "",
+                "- Deterministic verifier record for thin/standard profile.",
+                "",
+            ]
+        ),
+    )
+
+
+def build_profile_aware_implementer_prompt(
+    *,
+    repo_root: Path,
+    worktree_path: Path,
+    run_dir: Path,
+    report_dir: Path,
+    selection: SelectedTask,
+    execution_plan: ExecutionPlan,
+) -> str:
+    if execution_plan.effective_profile == EXECUTION_PROFILE_STRICT:
+        return build_lane_prompt(
+            "implementer",
+            repo_root,
+            worktree_path,
+            run_dir,
+            report_dir,
+            selection,
+            discovery_limit=3,
+        )
+    backlog_text = read_text(worktree_path / selection.backlog_path) if selection.backlog_path is not None else ""
+    lane_file_rel = (run_dir / "implementer.md").relative_to(worktree_path).as_posix()
+    manifest_file_rel = implementer_manifest_path(run_dir).relative_to(worktree_path).as_posix()
+    manager_file_rel = (run_dir / "manager.md").relative_to(worktree_path).as_posix()
+    return "\n".join(
+        [
+            "# Harness Diet Implementer",
+            "",
+            f"- Execution profile: `{execution_plan.effective_profile}`",
+            f"- Repo root for this cycle: `{repo_root}`",
+            f"- Allowed write root: `{worktree_path}`",
+            f"- Run directory: `{run_dir.relative_to(worktree_path).as_posix()}`",
+            f"- Reports directory: `{report_dir.relative_to(worktree_path).as_posix()}`",
+            f"- Task title: {selection.title}",
+            f"- Task source: `{selection.source}`",
+            "",
+            "## Hard Boundaries",
+            "",
+            "- Work on exactly the selected backlog item.",
+            f"- Respect the deterministic manager scope contract in `{manager_file_rel}`.",
+            "- Do not commit or push; the outer autonomy runner handles git backup.",
+            "- Do not read or modify sibling worktrees or parent checkouts.",
+            "- Do not touch `.env*`, secrets, external services, or target sidecars.",
+            "",
+            "## Selected Backlog Item",
+            "",
+            "```markdown",
+            backlog_text.strip(),
+            "```",
+            "",
+            "## Required Output",
+            "",
+            f"- Update `{lane_file_rel}` and keep exactly one top-level `Status: completed`.",
+            f"- Sanity-check `{manifest_file_rel}`; keep summary and self-assessment honest.",
+            "- Implement the smallest diff satisfying the backlog acceptance criteria.",
+            "- Run the backlog validation commands or explain a real blocker.",
+            "- Do not offer optional future work; report changed files and verification only.",
+            "",
+        ]
     )
 
 
@@ -8554,12 +8960,53 @@ def build_external_product_implementation_prompt(
     *,
     backlog_payload: Mapping[str, str],
     backlog_text: str,
+    execution_profile: str = EXECUTION_PROFILE_AUTO,
 ) -> str:
+    profile = normalize_execution_profile(execution_profile)
+    strict_prompt = profile == EXECUTION_PROFILE_STRICT
+    has_goal_source = bool(
+        re.search(r"(?im)^\s*-?\s*Goal-(?:Spec-Path|Attachment-Manifest)\s*:", backlog_text)
+    )
+    has_binding_design = has_goal_source or bool(
+        re.search(r"(?i)\b(user-provided design|design artifact|sketch|figma|mockup|screenshot|image attachment)\b", backlog_text)
+    )
+    has_request_traceability = bool(
+        re.search(r"(?im)^\s*-?\s*Request-(?:Ids|Check-Ids|Ledger|Checks)\s*:", backlog_text)
+    )
+    guidance_lines: list[str] = []
+    if strict_prompt or has_goal_source:
+        guidance_lines.extend(
+            [
+                "- Goal integrity: when the backlog lists `Goal-Spec-Path`, read the full goal spec before implementing.",
+                "- Visual evidence: when the backlog lists `Goal-Attachment-Manifest`, inspect the manifest and relevant attachments needed to satisfy the visual/product goal.",
+                "- Inspect the full goal spec and attachment manifest when the backlog references them.",
+            ]
+        )
+    if strict_prompt or has_binding_design:
+        guidance_lines.extend(
+            [
+                "- Binding design source: when the backlog references a user-provided design, mockup, Sketch, Figma, screenshot, or image attachment, treat it as the binding source of truth rather than loose inspiration.",
+                "- Do not replace it with a generic design system or arbitrary redesign; only make the minimum responsive/platform adjustments needed to implement that supplied design.",
+                "- If you cannot inspect the design artifact or map it to product screens, leave product files unchanged and report that blocker.",
+                "- For binding design tasks, CSS-only/theme-only diffs are insufficient unless the backlog explicitly says the task is style-only.",
+            ]
+        )
+    if strict_prompt or has_request_traceability:
+        guidance_lines.extend(
+            [
+                "- Request traceability: when the backlog lists `Request-Ids` or `Request-Check-Ids`, preserve those user-request constraints exactly.",
+                "- Before finishing, include a fenced JSON object with `request_verification_claims` entries for every listed request check that you addressed.",
+                "- These claims are non-authoritative implementer evidence; controller/verifier receipts decide whether a request check passes.",
+                "- Each request verification claim must include `request_id`, `check_id`, `status` (`passed`, `failed`, or `blocked`), `observed_result`, and `evidence`.",
+                "- If a request or binding design cannot be satisfied, mark that check `blocked` or `failed`; do not claim it passed.",
+            ]
+        )
     return "\n".join(
         [
             "# External Harness Product Implementation",
             "",
             "You are the implementer for an external harness controller target.",
+            f"- Execution profile: `{profile}`",
             "",
             "## Hard Boundaries",
             "",
@@ -8572,18 +9019,7 @@ def build_external_product_implementation_prompt(
             "- Do not commit, push, start long-running servers, or mutate external services.",
             "- Leave backlog state unchanged; this gate is local diff only.",
             "- If the task is unsafe or underspecified, leave product files unchanged and explain the blocker.",
-            "- Goal integrity: when the backlog lists `Goal-Spec-Path`, read the full goal spec before implementing.",
-            "- Visual evidence: when the backlog lists `Goal-Attachment-Manifest`, inspect the manifest and relevant attachments needed to satisfy the visual/product goal.",
-            "- Inspect the full goal spec and attachment manifest when the backlog references them.",
-            "- Binding design source: when the backlog references a user-provided design, mockup, Sketch, Figma, screenshot, or image attachment, treat it as the binding source of truth rather than loose inspiration.",
-            "- Do not replace it with a generic design system or arbitrary redesign; only make the minimum responsive/platform adjustments needed to implement that supplied design.",
-            "- If you cannot inspect the design artifact or map it to product screens, leave product files unchanged and report that blocker.",
-            "- For binding design tasks, CSS-only/theme-only diffs are insufficient unless the backlog explicitly says the task is style-only.",
-            "- Request traceability: when the backlog lists `Request-Ids` or `Request-Check-Ids`, preserve those user-request constraints exactly.",
-            "- Before finishing, include a fenced JSON object with `request_verification_claims` entries for every listed request check that you addressed.",
-            "- These claims are non-authoritative implementer evidence; controller/verifier receipts decide whether a request check passes.",
-            "- Each request verification claim must include `request_id`, `check_id`, `status` (`passed`, `failed`, or `blocked`), `observed_result`, and `evidence`.",
-            "- If a request or binding design cannot be satisfied, mark that check `blocked` or `failed`; do not claim it passed.",
+            *guidance_lines,
             "- Do not shrink the goal to a local demo, seed data, README-only change, or mocked flow unless the goal explicitly asks for that.",
             "- If implementation is blocked by missing credentials or external services, leave product files unchanged and report the exact blocker.",
             "",
@@ -8752,6 +9188,7 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
     product_push_error = ""
     expected_status_after: list[str] = []
     implementation_lane_result: RunnerInvocation | None = None
+    implementation_execution_plan: ExecutionPlan | None = None
     implementation_model_strategy = ""
     implementation_reasoning_effort = ""
     if context.product_implementation_enabled:
@@ -8778,6 +9215,11 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
             backlog_path=backlog_relative,
             source=f"external-backlog-implementation:{context.target_id}:{backlog_payload['id']}",
         )
+        implementation_execution_plan = resolve_execution_plan(
+            implementation_selection,
+            backlog_text,
+            requested_profile=execution_profile_from_args(args),
+        )
         timeout_budget = resolve_lane_timeout_budget(
             context.state_root,
             implementation_selection,
@@ -8789,6 +9231,7 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
             context,
             backlog_payload=backlog_payload,
             backlog_text=backlog_text,
+            execution_profile=implementation_execution_plan.effective_profile,
         )
         implementation_lane_result = run_lane(
             "implementer",
@@ -8989,6 +9432,9 @@ def run_external_state_plumbing_cycle(args: argparse.Namespace, context: Autonom
                 "runner_model": implementation_lane_result.runner_model or "",
                 "model_strategy": implementation_model_strategy,
                 "reasoning_effort": implementation_reasoning_effort,
+                "execution_profile": (
+                    asdict(implementation_execution_plan) if implementation_execution_plan is not None else None
+                ),
                 "prompt_path": implementation_lane_result.prompt_path.as_posix(),
                 "response_path": implementation_lane_result.response_path.as_posix(),
                 "stdout_path": implementation_lane_result.stdout_path.as_posix(),
@@ -9547,6 +9993,7 @@ def run_cycle(args: argparse.Namespace) -> CycleOutcome:
         lane_timeout_budgets: dict[str, LaneTimeoutBudget] = {}
         autosplit_proposal_outcome: AutosplitProposalOutcome | None = None
         autosplit_execution_short_circuited = False
+        execution_plan: ExecutionPlan | None = None
 
         try:
             run_dir = tools.orchestrator.init_run(
@@ -9574,6 +10021,18 @@ def run_cycle(args: argparse.Namespace) -> CycleOutcome:
                 backlog_path,
                 selection.source,
             )
+            backlog_text = read_text(worktree_path / backlog_path) if backlog_path is not None else ""
+            execution_plan = resolve_execution_plan(
+                effective_selection,
+                backlog_text,
+                requested_profile=execution_profile_from_args(args),
+            )
+            write_deterministic_pre_implementation_records(
+                run_dir=run_dir,
+                selection=effective_selection,
+                backlog_text=backlog_text,
+                execution_plan=execution_plan,
+            )
             lane_timeout_budgets = resolve_lane_timeout_budgets(
                 worktree_path,
                 effective_selection,
@@ -9581,7 +10040,10 @@ def run_cycle(args: argparse.Namespace) -> CycleOutcome:
                 cap_seconds=adaptive_runner_timeout_cap_seconds,
             )
             autosplit_projection = autosplit_projection_for_lane_timeout_budgets(lane_timeout_budgets)
-            if autosplit_mode == AUTOSPLIT_MODE_OFF:
+            if not execution_plan.autosplit_enabled:
+                autosplit_proposal_outcome = autosplit_operator_disabled_outcome()
+                autosplit_execution_short_circuited = False
+            elif autosplit_mode == AUTOSPLIT_MODE_OFF:
                 autosplit_proposal_outcome = autosplit_operator_disabled_outcome()
                 autosplit_execution_short_circuited = False
             else:
@@ -9623,18 +10085,29 @@ def run_cycle(args: argparse.Namespace) -> CycleOutcome:
                     ),
                 )
 
-            for lane in (() if autosplit_execution_short_circuited else LANES):
+            lanes_to_run = tuple() if autosplit_execution_short_circuited else execution_plan.ai_lanes
+            for lane in lanes_to_run:
                 lane_runner = lane_runners[lane]
-                prompt = build_lane_prompt(
-                    lane,
-                    repo_root,
-                    worktree_path,
-                    run_dir,
-                    report_dir,
-                    effective_selection,
-                    discovery_limit=args.discovery_limit,
-                    pending_inbox_messages=pending_inbox_messages if lane == "planner" else (),
-                )
+                if lane == "implementer" and execution_plan.effective_profile != EXECUTION_PROFILE_STRICT:
+                    prompt = build_profile_aware_implementer_prompt(
+                        repo_root=repo_root,
+                        worktree_path=worktree_path,
+                        run_dir=run_dir,
+                        report_dir=report_dir,
+                        selection=effective_selection,
+                        execution_plan=execution_plan,
+                    )
+                else:
+                    prompt = build_lane_prompt(
+                        lane,
+                        repo_root,
+                        worktree_path,
+                        run_dir,
+                        report_dir,
+                        effective_selection,
+                        discovery_limit=args.discovery_limit,
+                        pending_inbox_messages=pending_inbox_messages if lane == "planner" else (),
+                    )
                 attempt = 1
                 runner_model = runner_model_plan.model_for_lane(lane)
                 fallback_model = runner_model_plan.fallback_model_for_lane(lane)
@@ -9812,7 +10285,9 @@ def run_cycle(args: argparse.Namespace) -> CycleOutcome:
                             stage="completed" if result.returncode == 0 else "failed",
                             runner_model_summary=runner_model_plan.summary,
                             result=result,
-                            overall_status="running" if result.returncode == 0 and lane != LANES[-1] else None,
+                            overall_status=(
+                                "running" if result.returncode == 0 and lane != lanes_to_run[-1] else None
+                            ),
                             current_work=current_work,
                             lane_runners=lane_runners,
                         )
@@ -9821,6 +10296,7 @@ def run_cycle(args: argparse.Namespace) -> CycleOutcome:
                             {
                                 **status_payload,
                                 **lane_timeout_budget_status_payload(lane_timeout_budgets),
+                                **execution_plan_status_payload(execution_plan),
                                 **autosplit_mode_status_payload(autosplit_mode),
                                 **autosplit_proposal_status_payload(autosplit_proposal_outcome),
                             },
@@ -9899,6 +10375,12 @@ def run_cycle(args: argparse.Namespace) -> CycleOutcome:
                                     logger=logger,
                                     manifest=implementer_manifest_path(run_dir).as_posix(),
                                     evidence=generated_evidence_json_path(run_dir).as_posix(),
+                                )
+                                write_deterministic_post_implementation_records(
+                                    run_dir=run_dir,
+                                    selection=effective_selection,
+                                    evidence_payload=evidence_payload,
+                                    execution_plan=execution_plan,
                                 )
                         if result.returncode != 0:
                             selected_state_proposal_id = state_apply_proposal_id(effective_selection.source)
@@ -10165,6 +10647,7 @@ def run_cycle(args: argparse.Namespace) -> CycleOutcome:
                 {
                     **(read_status_payload(report_dir) or {}),
                     **lane_timeout_budget_status_payload(lane_timeout_budgets),
+                    **execution_plan_status_payload(execution_plan),
                     **autosplit_mode_status_payload(autosplit_mode),
                     **autosplit_proposal_status_payload(autosplit_proposal_outcome),
                     **autosplit_short_circuit_status_payload(
@@ -10606,6 +11089,7 @@ def run_cycle(args: argparse.Namespace) -> CycleOutcome:
                     {
                         **(read_status_payload(failure_report_dir) or {}),
                         **lane_timeout_budget_status_payload(lane_timeout_budgets),
+                        **execution_plan_status_payload(execution_plan),
                         **autosplit_mode_status_payload(autosplit_mode),
                         **autosplit_proposal_status_payload(autosplit_proposal_outcome),
                         **autosplit_short_circuit_status_payload(
@@ -10843,6 +11327,16 @@ def build_parser() -> argparse.ArgumentParser:
         choices=AUTOSPLIT_MODE_CHOICES,
         default=DEFAULT_AUTOSPLIT_MODE,
         help="Autosplit mode for oversized execute cycles: propose creates/reuses child proposals; off disables it.",
+    )
+    common.add_argument(
+        "--execution-profile",
+        choices=EXECUTION_PROFILE_CHOICES,
+        default=EXECUTION_PROFILE_AUTO,
+        help=(
+            "Execution profile: auto chooses thin/standard/strict from backlog risk; "
+            "thin and standard run only the AI implementer lane with deterministic records; "
+            "strict runs all AI lanes."
+        ),
     )
     common.add_argument("--base-ref", default="main")
     common.add_argument("--git-backup", choices=("off", "commit", "push"), default="commit")

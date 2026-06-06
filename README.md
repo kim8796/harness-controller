@@ -27,6 +27,7 @@ product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는�
 - 터미널에서 인자 없이 `./harness install` 을 실행하면 제품 저장소 경로만 질문한다. 스크립트/CI에서는 `./harness install /path/to/product-repo`를 쓴다. 질문에 답할 수 없는 환경에서 인자 없이 실행하면 상태만 보여준다.
 - `./harness watch` 는 Telegram relay, active goal, queued auto backlog를 계속 감시하며 goal이 비면 planner가 task를 다시 채운다.
 - 실전 검증은 `./harness watch --max-cycles 1 --no-telegram-drain` 으로 한 transaction만 돌리고, `./harness watch --status` 로 현재 단계, 마지막 transaction, operator-wait, 다음 조치를 확인한다.
+- `./harness do|watch|run|target run ... --execution-profile auto|thin|standard|strict` 는 lane 호출량을 조절한다. 기본 `auto` 는 작은 안전 작업을 `thin` 으로 줄이고, production/auth/security/migration/release/store/request/design/env/secret 계열은 `strict` 로 승격한다.
 - 여러 product target을 등록했다면 `./harness fleet status`가 전체 readiness, active goal, backlog, watch, operator-wait, publication/merge, compact learning 상태를 read-only로 보여준다.
 - 더 이상 관리하지 않을 product target은 `./harness target remove my-app`으로 controller 등록만 archive한다. product repo 파일은 삭제하지 않는다.
 - 성공 transaction은 완료 처리, product local commit, task branch push, PR publication receipt, 조건부 PR merge, local base sync까지 순서대로 시도한다. PR merge는 진행 증거이며 production goal 완료는 deployment, DB/auth/realtime/storage/AI/moderation/smoke 같은 gate evidence가 있어야 한다. localStorage, seed data, README-only checklist 같은 가짜 성공은 production gate evidence로 인정하지 않는다.
@@ -40,6 +41,7 @@ product repo에는 harness runtime/state/secrets를 기본 커밋하지 않는�
 - 푸시는 배포나 외부 자동화를 트리거할 수 있고 자동 원격 롤백은 없다.
 - `./harness smoke implementation` 은 임시 제품 저장소로 구현 경로가 정상인지 검증하고 기본적으로 smoke sidecar를 정리한다. 남기려면 `--keep`을 붙인다.
 - `./harness controller audit-size` 와 `./harness controller cleanup --dry-run|--apply` 는 controller-owned smoke/temp sidecar 정리 후보만 다룬다. product repo 파일은 지우지 않는다.
+- `./harness target archive audit my-app --keep-runs 75` 와 `plan/apply` 는 target sidecar 안에서 최근 N개 run 산출물은 보존하고, 더 오래된 run은 `generated-evidence.json` 같은 receipt를 남긴 채 중복 로그/markdown/native cache만 정리한다. `backlog/completed` 는 의존성/진행 ledger 이므로 삭제하지 않는다.
 
 Advanced mapping:
 
@@ -65,6 +67,7 @@ Telegram/Redis owner commands are target-scoped in external mode:
 - `target run --execute-backlog-once` selects that sidecar backlog item and creates only an uncommitted backlog-bound `product-smoke-change.txt`; it is not full AI implementation, does not complete the backlog, and does not commit or push.
 - `target run --implement-backlog-once` runs one AI implementer lane for that selected sidecar backlog and leaves local product diffs only; it does not complete the backlog, commit, or push.
 - By default the Codex implementation gate uses the Codex-managed latest/default model with `xhigh` reasoning and never forwards literal model `auto`; pass `--runner-model <model-id>` to override.
+- Add `--execution-profile thin|standard|strict` only when you need to override the default `auto` risk classifier; hard-risk backlogs still escalate to strict prompt handling.
 - `target backlog transition my-app --status completed --run <run-id>` dry-runs backlog completion; add `--apply` only after reviewing the product diff.
 - `target backlog commit my-app --run <run-id> --message "feat: ..."` dry-runs a local product commit for a completed sidecar backlog; add `--apply` only after reviewing the exact diff.
 - `target backlog push my-app --run <run-id>` dry-runs the remote push for a matching backlog product commit; add `--apply` only after checking the registered upstream.

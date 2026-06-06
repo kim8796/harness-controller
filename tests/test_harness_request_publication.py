@@ -53,6 +53,22 @@ def _write_request_verification(state_root: Path, *, backlog_id: str = "BL-demo"
     )
 
 
+def _write_request_checks_file(state_root: Path) -> None:
+    checks = state_root / "goals" / "goal-1" / "request-checks.json"
+    checks.parent.mkdir(parents=True, exist_ok=True)
+    checks.write_text(
+        json.dumps(
+            {
+                "goal_id": "goal-1",
+                "target_id": "demo",
+                "check_ids": ["REQ-0001-CHECK-001"],
+                "checks": [{"check_id": "REQ-0001-CHECK-001"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_request_evidence_payload_requires_matching_publication_commit(tmp_path: Path) -> None:
     module = _load_module()
     state_root = tmp_path / "targets" / "demo"
@@ -74,6 +90,75 @@ def test_request_evidence_payload_requires_matching_publication_commit(tmp_path:
 
     assert passed["status"] == "passed"
     assert stale["status"] == "missing"
+
+
+def test_request_evidence_payload_loads_check_ids_from_request_checks_file(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    backlog = state_root / "backlog" / "completed" / "BL-demo.md"
+    backlog.parent.mkdir(parents=True, exist_ok=True)
+    backlog.write_text(
+        "\n".join(
+            [
+                "ID: BL-demo",
+                "Status: completed",
+                "Goal: goal-1",
+                "Request-Ids: REQ-0001",
+                "Request-Checks: goals/goal-1/request-checks.json",
+                "Request-Check-Count: 1",
+                "Request-Check-Source: Request-Checks",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _write_request_checks_file(state_root)
+    _write_request_verification(state_root, commit_sha="abc123")
+
+    evidence = module.request_evidence_payload(
+        state_root=state_root,
+        target_id="demo",
+        backlog_id="BL-demo",
+        product_commit_sha="abc123",
+    )
+
+    assert evidence["linked"] is True
+    assert evidence["request_check_ids"] == ["REQ-0001-CHECK-001"]
+    assert evidence["status"] == "passed"
+
+
+def test_request_evidence_payload_fails_closed_when_request_checks_file_is_missing(tmp_path: Path) -> None:
+    module = _load_module()
+    state_root = tmp_path / "targets" / "demo"
+    backlog = state_root / "backlog" / "completed" / "BL-demo.md"
+    backlog.parent.mkdir(parents=True, exist_ok=True)
+    backlog.write_text(
+        "\n".join(
+            [
+                "ID: BL-demo",
+                "Status: completed",
+                "Goal: goal-1",
+                "Request-Ids: REQ-0001",
+                "Request-Checks: goals/goal-1/request-checks.json",
+                "Request-Check-Count: 1",
+                "Request-Check-Source: Request-Checks",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    evidence = module.request_evidence_payload(
+        state_root=state_root,
+        target_id="demo",
+        backlog_id="BL-demo",
+        product_commit_sha="abc123",
+    )
+
+    assert evidence["linked"] is True
+    assert evidence["request_check_ids"] == []
+    assert evidence["status"] == "missing"
+    assert evidence["message"] == "request checks file is missing or unreadable"
 
 
 def test_publication_request_evidence_for_merge_fails_closed_without_matching_publication_receipt(tmp_path: Path) -> None:

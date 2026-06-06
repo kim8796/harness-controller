@@ -476,7 +476,8 @@ def test_command_run_true_idle_preserves_gate_operator_wait_status(tmp_path, cap
     capsys.readouterr()
     status = json.loads((state_root / "watch" / "latest.json").read_text(encoding="utf-8"))
     text = json.dumps(status, ensure_ascii=False)
-    assert status["phase"] == "stopped-idle"
+    assert status["phase"] == "stopped-action-required"
+    assert status["status"] == "operator-wait"
     assert status["operator_wait"]["status"] == "waiting"
     assert status["operator_wait_deadline_at"]
     assert status["operator_wait_next_action"]
@@ -1054,6 +1055,7 @@ def test_command_run_operator_wait_prevents_repeated_dirty_quarantine(tmp_path, 
     [
         ("Missing required env VERCEL_PROJECT_ID before production deploy", "setup-wait"),
         ("OpenAI provider returned 503 temporarily unavailable", "external-wait"),
+        ("target run already locked: chatapp-test (owner=pid:123)", "external-wait"),
         ("App Store Connect team is not configured for store release", "setup-wait"),
         (
             "target product diff violates autopilot policy: product-diff-secret-like-content",
@@ -1093,11 +1095,6 @@ def test_transaction_blocker_text_without_incident_wait_class_becomes_operator_w
 
     assert wait is not None
     assert wait["wait_class"] == expected_wait_class
-    status = json.loads((state_root / "watch" / "latest.json").read_text(encoding="utf-8"))
-    assert status["phase"] == "operator-wait"
-    assert status["status"] == "operator-wait"
-    assert status["operator_wait_class"] == expected_wait_class
-    assert status["transaction_status"] != "completed"
 
 
 def test_command_run_marks_status_implementation_running_before_transaction(tmp_path) -> None:

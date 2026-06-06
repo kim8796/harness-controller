@@ -1295,7 +1295,8 @@ def test_watch_preserves_manual_review_only_status(monkeypatch, tmp_path: Path, 
     output = capsys.readouterr().out
     assert "watch 종료: stop-on-idle" in output
     status = json.loads((controller / "targets" / "demo" / "watch" / "latest.json").read_text(encoding="utf-8"))
-    assert status["phase"] == "stopped-idle"
+    assert status["phase"] == "stopped-action-required"
+    assert status["status"] == "blocked"
     assert status["pending_reason"] == "manual review tasks only"
     assert status["next_action"] == "inspect generated manual-review tasks or adjust the goal"
     assert "queue_report_path" not in json.dumps(status)
@@ -1377,9 +1378,9 @@ def test_watch_refill_failure_writes_blocked_status(monkeypatch, tmp_path: Path,
     assert module.main(["goal", "planner failure smoke"]) == 0
 
     def fail_refill(*_args, **_kwargs):
-        raise module.harness_goal.GoalError("planner exploded OPENAI_API_KEY=sk-secret")
+        raise module.HarnessCliError("planner exploded OPENAI_API_KEY=sk-secret")
 
-    monkeypatch.setattr(module.harness_goal, "refill_goal_tasks", fail_refill)
+    monkeypatch.setattr(module, "_refill_goal_if_idle", fail_refill)
 
     assert module.main(["watch", "--stop-on-idle", "--no-telegram-drain"]) == 2
     output = capsys.readouterr().out
@@ -3500,6 +3501,70 @@ def test_beginner_install_task_review_queue_auto(monkeypatch, tmp_path: Path, ca
     body = queued[0].read_text(encoding="utf-8")
     assert "Autonomy-Execute: auto" in body
     assert "Target-ID: demo" in body
+    _assert_no_product_harness_pollution(product)
+
+
+def test_beginner_task_queue_auto_links_to_active_goal(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    request = tmp_path / "request.md"
+    _write_safe_task_request(request)
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.32")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    state_root = controller / "targets" / "demo"
+    goal = module.harness_goal.create_goal(
+        state_root=state_root,
+        target_id="demo",
+        text="배포 가능한 제품 목표",
+    )
+    assert module.main(["task", "from", str(request), "--packet-id", "task-linked"]) == 0
+    assert module.main(["task", "review", "task-linked"]) == 0
+    assert module.main(["task", "queue", "task-linked", "--auto"]) == 0
+    capsys.readouterr()
+
+    queued = tuple((state_root / "backlog" / "queued").glob("*.md"))
+    assert len(queued) == 1
+    body = queued[0].read_text(encoding="utf-8")
+    assert f"Goal: {goal.goal_id}" in body
+    assert "Auto-PR: yes" in body
+    assert "Goal: unlinked" not in body
+    _assert_no_product_harness_pollution(product)
+
+
+def test_beginner_task_queue_preserves_explicit_unlinked_goal(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_module()
+    controller = tmp_path / "controller"
+    product = tmp_path / "product"
+    controller.mkdir()
+    _init_product_repo(product)
+    request = tmp_path / "request.md"
+    _write_safe_task_request(request)
+    request.write_text("Goal: unlinked\n\n" + request.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(module, "repo_root", lambda: controller)
+    monkeypatch.setattr(module.harness_export, "read_current_version", lambda root: "1.8.32")
+
+    assert module.main(["install", "--repo", str(product), "--id", "demo", "--default"]) == 0
+    state_root = controller / "targets" / "demo"
+    module.harness_goal.create_goal(
+        state_root=state_root,
+        target_id="demo",
+        text="배포 가능한 제품 목표",
+    )
+    assert module.main(["task", "from", str(request), "--packet-id", "task-unlinked"]) == 0
+    assert module.main(["task", "review", "task-unlinked"]) == 0
+    assert module.main(["task", "queue", "task-unlinked", "--auto"]) == 0
+    capsys.readouterr()
+
+    queued = tuple((state_root / "backlog" / "queued").glob("*.md"))
+    assert len(queued) == 1
+    body = queued[0].read_text(encoding="utf-8")
+    assert "Goal: unlinked" in body
+    assert "Auto-PR: no" in body
     _assert_no_product_harness_pollution(product)
 
 
